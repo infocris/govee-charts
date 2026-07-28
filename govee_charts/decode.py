@@ -1,0 +1,108 @@
+"""Decode Govee BLE manufacturer payloads (H5075 / H5179)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from bleak.backends.scanner import AdvertisementData
+
+# Govee manufacturer company IDs (as exposed by bleak)
+GOVEE_H5075_MFG_ID = 0xEC88  # H5075 / H5072
+GOVEE_H5179_MFG_ID = 0x8801  # H5179
+
+
+@dataclass(frozen=True)
+class Reading:
+    temperature_c: float
+    humidity: float
+    battery: int
+    address: str
+    name: str
+    model: str
+    rssi: int | None
+
+
+def decode_h5075(payload: bytes) -> tuple[float, float, int] | None:
+    """Decode H5075 manufacturer payload → (temp_c, humidity, battery)."""
+    if len(payload) < 5:
+        return None
+
+    packed = int.from_bytes(payload[1:4], "big")
+    negative = (packed & 0x800000) != 0
+    packed &= 0x7FFFFF
+
+    humidity_raw = packed % 1000
+    humidity = humidity_raw / 10.0
+    temperature = (packed - humidity_raw) / 10000.0
+    if negative:
+        temperature = -temperature
+
+    battery = int(payload[4])
+    if not (-40.0 <= temperature <= 60.0 and 0.0 <= humidity <= 100.0):
+        return None
+    if not (0 <= battery <= 100):
+        return None
+    return temperature, humidity, battery
+
+
+def decode_h5179(payload: bytes) -> tuple[float, float, int] | None:
+    """Decode H5179 manufacturer payload (bleak, company ID already stripped).
+
+    Layout (9 bytes): [0:4] unknown · [4:6] temp int16 LE /100 ·
+    [6:8] humidity uint16 LE /100 · [8] battery %
+    """
+    if len(payload) < 9:
+        return None
+
+    temp_raw = int.from_bytes(payload[4:6], "little", signed=True)
+    humidity_raw = int.from_bytes(payload[6:8], "little", signed=False)
+    battery = int(payload[8])
+
+    temperature = temp_raw / 100.0
+    humidity = humidity_raw / 100.0
+    if not (-40.0 <= temperature <= 60.0 and 0.0 <= humidity <= 100.0):
+        return None
+    if not (0 <= battery <= 100):
+        return None
+    return temperature, humidity, battery
+
+
+def detect_model(adv: AdvertisementData) -> str | None:
+    """Return 'h5179' or 'h5075' if manufacturer data matches a known Govee sensor."""
+    mfg = adv.manufacturer_data or {}
+    if GOVEE_H5179_MFG_ID in mfg:
+        return "h5179"
+    if GOVEE_H5075_MFG_ID in mfg:
+        return "h5075"
+    return None
+
+
+def decode_advertisement(
+    address: str,
+    name: str,
+    adv: AdvertisementData,
+) -> Reading | None:
+    """Decode a BLE advertisement into a Reading, or None if not a known Govee sensor."""
+    model = detect_model(adv)
+    if model is None:
+        return None
+
+    mfg = adv.manufacturer_data or {}
+    if model == "h5179":
+        values = decode_h5179(bytes(mfg[GOVEE_H5179_MFG_ID]))
+    else:
+        values = decode_h5075(bytes(mfg[GOVEE_H5075_MFG_ID]))
+
+    if values is None:
+        return None
+
+    temp, humidity, battery = values
+    return Reading(
+        temperature_c=temp,
+        humidity=humidity,
+        battery=battery,
+        address=address.upper(),
+        name=name or address.upper(),
+        model=model,
+        rssi=adv.rssi,
+    )

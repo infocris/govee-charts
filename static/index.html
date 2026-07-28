@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Govee Charts</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">Govee Charts</div>
+    <p class="tagline">Température et humidité — scan BLE local</p>
+    <nav class="views" role="tablist" aria-label="Vues">
+      <button type="button" role="tab" data-view="overview" class="active" aria-selected="true">Vue globale</button>
+      <button type="button" role="tab" data-view="compare" aria-selected="false">Comparaison</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="view-overview" class="view" role="tabpanel" aria-label="Vue globale">
+      <div class="overview-head">
+        <h2>Tous les capteurs</h2>
+        <p class="overview-hint">Dernières mesures, du plus chaud au plus froid</p>
+      </div>
+      <div class="overview-table-wrap">
+        <table class="overview-table" id="overview-table">
+          <thead>
+            <tr>
+              <th scope="col">Capteur</th>
+              <th scope="col" class="num">Température</th>
+              <th scope="col" class="num">Humidité</th>
+              <th scope="col" class="num">Batterie</th>
+              <th scope="col">Source</th>
+              <th scope="col">Dernière mesure</th>
+            </tr>
+          </thead>
+          <tbody id="overview-body">
+            <tr><td colspan="6" class="overview-empty">Chargement…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="status" id="overview-status">Chargement…</p>
+    </section>
+
+    <section id="view-compare" class="view" role="tabpanel" aria-label="Comparaison" hidden>
+      <section class="controls" aria-label="Sélection">
+        <div class="field field-devices">
+          <div class="field-head">
+            <span>Appareils</span>
+            <div class="device-actions">
+              <button type="button" id="select-all" class="linkish">Tous</button>
+              <button type="button" id="select-none" class="linkish">Aucun</button>
+            </div>
+          </div>
+          <div id="device-list" class="device-list" role="group" aria-label="Appareils à comparer"></div>
+        </div>
+        <div class="ranges" role="group" aria-label="Plage temporelle">
+          <button type="button" data-hours="1">1 h</button>
+          <button type="button" data-hours="6">6 h</button>
+          <button type="button" data-hours="24" class="active">24 h</button>
+          <button type="button" data-hours="168">7 j</button>
+        </div>
+      </section>
+
+      <section class="current" id="current" aria-live="polite"></section>
+
+      <section class="charts">
+        <figure class="chart-block">
+          <figcaption>Température (°C)</figcaption>
+          <canvas id="temp-chart"></canvas>
+        </figure>
+        <figure class="chart-block">
+          <figcaption>Humidité (%)</figcaption>
+          <canvas id="hum-chart"></canvas>
+        </figure>
+      </section>
+
+      <p class="status" id="status">Chargement…</p>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
