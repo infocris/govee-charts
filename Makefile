@@ -5,7 +5,7 @@ PIP         := $(BIN)/pip
 PY          := $(BIN)/python
 MODULE      := -m govee_charts.main
 
-.PHONY: help install venv deps config run serve discover systemd-install systemd-uninstall systemd-status
+.PHONY: help install venv deps config run serve discover systemd-install systemd-uninstall systemd-restart restart systemd-status
 
 help:
 	@echo "Targets:"
@@ -15,6 +15,8 @@ help:
 	@echo "  make discover           Scan BLE Govee devices for 30s then exit"
 	@echo "  make systemd-install    Install systemd service (sudo, starts on boot)"
 	@echo "  make systemd-uninstall  Remove systemd service"
+	@echo "  make systemd-restart    Restart systemd service (sudo)"
+	@echo "  make restart            Alias for systemd-restart"
 
 install: venv deps config
 
@@ -46,6 +48,12 @@ systemd-install: install
 systemd-uninstall:
 	chmod +x scripts/install-systemd.sh
 	./scripts/install-systemd.sh uninstall
+
+systemd-restart:
+	chmod +x scripts/install-systemd.sh
+	./scripts/install-systemd.sh restart
+
+restart: systemd-restart
 
 systemd-status:
 	./scripts/install-systemd.sh status

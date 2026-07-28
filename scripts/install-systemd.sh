@@ -10,10 +10,11 @@ EXTRA_ARGS=""
 
 usage() {
   cat <<EOF
-Usage: $0 [--hub] install|uninstall|status
+Usage: $0 [--hub] install|uninstall|restart|status
 
   install     Write ${UNIT_PATH}, enable and start the service (needs sudo)
   uninstall   Stop, disable and remove the unit (needs sudo)
+  restart     Restart the service (needs sudo)
   status      Show service status
 
   --hub       Web UI only (pass --no-scanner to the app)
@@ -26,7 +27,7 @@ while [[ $# -gt 0 ]]; do
       EXTRA_ARGS=" --no-scanner"
       shift
       ;;
-    install|uninstall|status)
+    install|uninstall|restart|status)
       ACTION="$1"
       shift
       ;;
@@ -42,7 +43,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-: "${ACTION:?Action required: install, uninstall, or status}"
+: "${ACTION:?Action required: install, uninstall, restart, or status}"
 
 if [[ ! -x "${ROOT}/venv/bin/python" ]]; then
   echo "Missing venv — run: make install" >&2
@@ -79,6 +80,10 @@ case "$ACTION" in
     sudo rm -f "$UNIT_PATH"
     sudo systemctl daemon-reload
     echo "Removed ${SERVICE_NAME}"
+    ;;
+  restart)
+    sudo systemctl restart "$SERVICE_NAME"
+    echo "Restarted ${SERVICE_NAME}"
     ;;
   status)
     systemctl status "$SERVICE_NAME" --no-pager || true
