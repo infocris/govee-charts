@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from govee_charts.address import register_mac, resolve_device_address
 from govee_charts.db import Database
 from govee_charts.decode import Reading
 
@@ -39,10 +40,12 @@ def create_app(
     labels: dict[str, str] | None = None,
     federation_token: str | None = None,
     node_id: str = "local",
+    suffix_map: dict[str, str] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Govee Charts", docs_url=None, redoc_url=None)
     app.state.db = db
     app.state.labels = {k.upper(): v for k, v in (labels or {}).items()}
+    app.state.suffix_map = suffix_map or {}
     app.state.federation_token = federation_token or None
     app.state.node_id = node_id
 
@@ -89,16 +92,23 @@ def create_app(
             raise HTTPException(status_code=400, detail="Refusing ingest from self")
 
         labels: dict[str, str] = app.state.labels
+        suffix_map: dict[str, str] = app.state.suffix_map
         inserted = 0
         for item in payload.readings:
-            address = item.address.upper()
-            display = labels.get(address) or item.name
+            ble_name = item.name
+            address = resolve_device_address(
+                item.address,
+                ble_name,
+                suffix_map=suffix_map,
+            )
+            register_mac(suffix_map, address)
+            display = labels.get(address) or ble_name
             reading = Reading(
                 temperature_c=item.temperature_c,
                 humidity=item.humidity,
                 battery=item.battery,
                 address=address,
-                name=item.name,
+                name=ble_name,
                 model=item.model.lower(),
                 rssi=item.rssi,
             )

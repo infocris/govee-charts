@@ -17,6 +17,7 @@ except ModuleNotFoundError:  # Python < 3.11
 
 import uvicorn
 
+from govee_charts.address import build_suffix_map
 from govee_charts.api import create_app
 from govee_charts.db import Database
 from govee_charts.federation import PeerPublisher
@@ -128,6 +129,9 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     db = Database(resolve_db_path(cfg))
     await db.connect()
 
+    suffix_map = build_suffix_map(cfg["labels"])
+    suffix_map.update(await db.suffix_map_from_devices())
+
     fed = cfg["federation"]
     publisher = PeerPublisher(
         fed["peers"],
@@ -149,6 +153,7 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
             adapters=cfg["scanner"]["adapters"],
             publisher=publisher,
             node_id=fed["node_id"],
+            suffix_map=suffix_map,
         )
         scan_task = asyncio.create_task(scanner.run(stop_event), name="ble-scanner")
     else:
@@ -159,6 +164,7 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         labels=cfg["labels"],
         federation_token=fed["token"] or None,
         node_id=fed["node_id"],
+        suffix_map=suffix_map,
     )
 
     host = str(cfg["server"]["host"])
@@ -199,6 +205,7 @@ async def amain() -> None:
             duration=30.0,
             active=bool(cfg["scanner"]["active"]),
             adapters=cfg["scanner"]["adapters"],
+            suffix_map=build_suffix_map(cfg["labels"]),
         )
         return
 

@@ -62,12 +62,12 @@ class PeerPublisher:
             await self._client.aclose()
             self._client = None
 
-    def publish(self, reading: Reading, display_name: str, ts: float) -> None:
+    def publish(self, reading: Reading, ts: float) -> None:
         if not self.enabled:
             return
         payload = {
             "address": reading.address,
-            "name": display_name,
+            "name": reading.name,
             "model": reading.model,
             "ts": ts,
             "temperature_c": reading.temperature_c,

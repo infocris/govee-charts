@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
+from govee_charts.address import resolve_device_address
+
 # Govee manufacturer company IDs (as exposed by bleak)
 GOVEE_H5075_MFG_ID = 0xEC88  # H5075 / H5072
 GOVEE_H5179_MFG_ID = 0x8801  # H5179
@@ -98,6 +100,7 @@ def decode_advertisement(
     adv: AdvertisementData,
     *,
     device: BLEDevice | None = None,
+    suffix_map: dict[str, str] | None = None,
 ) -> Reading | None:
     """Decode a BLE advertisement into a Reading, or None if not a known Govee sensor."""
     model = detect_model(adv)
@@ -119,12 +122,14 @@ def decode_advertisement(
     else:
         rssi = getattr(adv, "rssi", None)
         rssi = int(rssi) if rssi is not None else None
+    ble_name = name or address.upper()
+    canonical = resolve_device_address(address, ble_name, suffix_map=suffix_map)
     return Reading(
         temperature_c=temp,
         humidity=humidity,
         battery=battery,
-        address=address.upper(),
-        name=name or address.upper(),
+        address=canonical,
+        name=ble_name,
         model=model,
         rssi=rssi,
     )

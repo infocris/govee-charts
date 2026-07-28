@@ -8,6 +8,12 @@ from typing import Any
 
 import aiosqlite
 
+from govee_charts.address import (
+    is_ble_mac,
+    mac_address_suffix,
+    name_mac_suffix,
+    register_mac,
+)
 from govee_charts.decode import Reading
 
 
@@ -47,6 +53,7 @@ class Database:
             """
         )
         await self._migrate()
+        await self._merge_alias_devices()
         await self._db.commit()
 
     async def _migrate(self) -> None:
@@ -73,6 +80,76 @@ class Database:
                 ON readings(address, ts)
             """
         )
+
+    async def _merge_alias_devices(self) -> None:
+        """Merge UUID / alias device rows onto canonical BLE MAC addresses."""
+        cursor = await self.db.execute("SELECT address, name FROM devices")
+        rows = await cursor.fetchall()
+
+        suffix_to_mac: dict[str, str] = {}
+        for row in rows:
+            addr = str(row[0]).upper()
+            if not is_ble_mac(addr):
+                continue
+            try:
+                suffix_to_mac[mac_address_suffix(addr)] = addr
+            except ValueError:
+                continue
+
+        for row in rows:
+            addr = str(row[0]).upper()
+            name = str(row[1] or "")
+            if is_ble_mac(addr):
+                continue
+            suffix = name_mac_suffix(name)
+            if suffix and suffix in suffix_to_mac:
+                await self._rekey_device(addr, suffix_to_mac[suffix])
+
+    async def _rekey_device(self, old_address: str, new_address: str) -> None:
+        old_address = old_address.upper()
+        new_address = new_address.upper()
+        if old_address == new_address:
+            return
+
+        cursor = await self.db.execute(
+            "SELECT name, model, first_seen, last_seen FROM devices WHERE address = ?",
+            (old_address,),
+        )
+        old_row = await cursor.fetchone()
+        if old_row is None:
+            return
+
+        await self.db.execute(
+            """
+            INSERT INTO devices (address, name, model, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                last_seen = MAX(devices.last_seen, excluded.last_seen),
+                first_seen = MIN(devices.first_seen, excluded.first_seen)
+            """,
+            (new_address, old_row[0], old_row[1], old_row[2], old_row[3]),
+        )
+        await self.db.execute(
+            """
+            INSERT OR IGNORE INTO readings
+                (address, ts, temperature_c, humidity, battery, rssi, source)
+            SELECT ?, ts, temperature_c, humidity, battery, rssi, source
+            FROM readings WHERE address = ?
+            """,
+            (new_address, old_address),
+        )
+        await self.db.execute("DELETE FROM readings WHERE address = ?", (old_address,))
+        await self.db.execute("DELETE FROM devices WHERE address = ?", (old_address,))
+
+    async def suffix_map_from_devices(self) -> dict[str, str]:
+        """Build suffix → MAC map from devices already stored with real MACs."""
+        cursor = await self.db.execute("SELECT address FROM devices")
+        rows = await cursor.fetchall()
+        result: dict[str, str] = {}
+        for row in rows:
+            addr = str(row[0]).upper()
+            register_mac(result, addr)
+        return result
 
     async def close(self) -> None:
         if self._db is not None:

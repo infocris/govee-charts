@@ -13,6 +13,7 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from bleak.exc import BleakError
 
+from govee_charts.address import build_suffix_map, register_mac, resolve_device_address
 from govee_charts.db import Database
 from govee_charts.decode import Reading, decode_advertisement
 from govee_charts.federation import PeerPublisher
@@ -63,9 +64,11 @@ class GoveeScanner:
         adapters: Sequence[str] | None = None,
         publisher: PeerPublisher | None = None,
         node_id: str = "local",
+        suffix_map: dict[str, str] | None = None,
     ) -> None:
         self.db = db
         self.labels = {k.upper(): v for k, v in (labels or {}).items()}
+        self.suffix_map = suffix_map if suffix_map is not None else build_suffix_map(self.labels)
         self.sample_interval = sample_interval
         self.active = active
         self.retention_days = retention_days
@@ -93,10 +96,17 @@ class GoveeScanner:
         adapter: str | None = None,
     ) -> None:
         name = adv.local_name or device.name or ""
-        reading = decode_advertisement(device.address, name, adv, device=device)
+        reading = decode_advertisement(
+            device.address,
+            name,
+            adv,
+            device=device,
+            suffix_map=self.suffix_map,
+        )
         if reading is None:
             return
 
+        register_mac(self.suffix_map, reading.address)
         self._latest[reading.address] = reading
         now = time.time()
         last = self._last_sample.get(reading.address, 0.0)
@@ -137,7 +147,7 @@ class GoveeScanner:
                     via,
                 )
                 if self.publisher is not None:
-                    self.publisher.publish(reading, name, ts)
+                    self.publisher.publish(reading, ts)
             except Exception:
                 logger.exception("Failed to store reading for %s", reading.address)
 
@@ -226,6 +236,7 @@ async def discover_once(
     active: bool = True,
     adapters: Sequence[str] | None = None,
     on_found: Callable[[Reading], None] | None = None,
+    suffix_map: dict[str, str] | None = None,
 ) -> dict[str, Reading]:
     """Scan for `duration` seconds and return unique decoded Govee devices."""
     found: dict[str, Reading] = {}
@@ -237,7 +248,13 @@ async def discover_once(
     def make_cb(adapter: str | None):
         def cb(device: BLEDevice, adv: AdvertisementData) -> None:
             name = adv.local_name or device.name or ""
-            reading = decode_advertisement(device.address, name, adv, device=device)
+            reading = decode_advertisement(
+                device.address,
+                name,
+                adv,
+                device=device,
+                suffix_map=suffix_map,
+            )
             if reading is None:
                 return
             if reading.address in found:
