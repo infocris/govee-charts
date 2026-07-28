@@ -109,7 +109,7 @@
 
   function fmtTime(ts) {
     if (!ts) return "—";
-    return new Date(ts * 1000).toLocaleString("fr-FR", {
+    return new Date(ts * 1000).toLocaleString("en-GB", {
       day: "2-digit",
       month: "2-digit",
       hour: "2-digit",
@@ -150,7 +150,7 @@
     });
     if (!isOverview && !historyLoaded) {
       loadHistory().catch((err) => {
-        statusEl.textContent = `Erreur: ${err.message}`;
+        statusEl.textContent = `Error: ${err.message}`;
       });
     } else if (!isOverview && tempChart && humChart) {
       tempChart.resize();
@@ -189,8 +189,8 @@
     overviewBody.innerHTML = "";
     if (!devices.length) {
       overviewBody.innerHTML =
-        '<tr><td colspan="6" class="overview-empty">Aucun appareil détecté</td></tr>';
-      overviewStatus.textContent = "En attente d’appareils BLE…";
+        '<tr><td colspan="6" class="overview-empty">No devices detected</td></tr>';
+      overviewStatus.textContent = "Waiting for BLE devices…";
       return;
     }
 
@@ -220,7 +220,7 @@
         updateCurrent();
         setView("compare");
         loadHistory().catch((err) => {
-          statusEl.textContent = `Erreur: ${err.message}`;
+          statusEl.textContent = `Error: ${err.message}`;
         });
       });
       overviewBody.appendChild(tr);
@@ -234,7 +234,7 @@
         ? ` · Δ ${(Math.max(...temps) - Math.min(...temps)).toFixed(1)} °C`
         : "";
     overviewStatus.textContent =
-      `${ranked.length} capteur(s)${span} · MAJ ${new Date().toLocaleTimeString("fr-FR")}`;
+      `${ranked.length} sensor(s)${span} · updated ${new Date().toLocaleTimeString("en-GB")}`;
   }
 
   function updateCurrent() {
@@ -244,8 +244,8 @@
       const empty = document.createElement("div");
       empty.className = "metric metric-empty";
       empty.innerHTML =
-        '<span class="metric-label">Sélection</span>' +
-        '<span class="metric-value metric-time">Aucun appareil</span>';
+        '<span class="metric-label">Selection</span>' +
+        '<span class="metric-value metric-time">No devices</span>';
       currentEl.appendChild(empty);
       return;
     }
@@ -258,19 +258,19 @@
         <h3 class="device-current-name">${escapeHtml(deviceLabel(device))}</h3>
         <div class="device-current-metrics">
           <div class="metric">
-            <span class="metric-label">Température</span>
+            <span class="metric-label">Temperature</span>
             <span class="metric-value">${fmtNum(device.temperature_c, 1, " °C")}</span>
           </div>
           <div class="metric">
-            <span class="metric-label">Humidité</span>
+            <span class="metric-label">Humidity</span>
             <span class="metric-value">${fmtNum(device.humidity, 1, " %")}</span>
           </div>
           <div class="metric">
-            <span class="metric-label">Batterie</span>
+            <span class="metric-label">Battery</span>
             <span class="metric-value">${device.battery != null ? `${device.battery} %` : "—"}</span>
           </div>
           <div class="metric">
-            <span class="metric-label">Dernière mesure</span>
+            <span class="metric-label">Last reading</span>
             <span class="metric-value metric-time">${fmtTime(device.last_reading_ts || device.last_seen)}</span>
           </div>
         </div>
@@ -293,7 +293,7 @@
     deviceList.innerHTML = "";
 
     if (!devices.length) {
-      deviceList.innerHTML = '<p class="device-empty">Aucun appareil détecté</p>';
+      deviceList.innerHTML = '<p class="device-empty">No devices detected</p>';
       selected = new Set();
       return;
     }
@@ -361,7 +361,7 @@
       humChart.data.datasets = [];
       tempChart.update();
       humChart.update();
-      statusEl.textContent = "Sélectionnez au moins un appareil…";
+      statusEl.textContent = "Select at least one device…";
       historyLoaded = true;
       return;
     }
@@ -401,8 +401,8 @@
     const totalPoints = results.reduce((n, r) => n + r.points.length, 0);
     const names = results.map((r) => deviceLabel(r.device)).join(", ");
     statusEl.textContent =
-      `${names} · ${totalPoints} point(s) · fenêtre ${hours} h · MAJ ` +
-      new Date().toLocaleTimeString("fr-FR");
+      `${names} · ${totalPoints} point(s) · window ${hours} h · updated ` +
+      new Date().toLocaleTimeString("en-GB");
   }
 
   async function refresh() {
@@ -413,7 +413,7 @@
       }
     } catch (err) {
       console.error(err);
-      const msg = `Erreur: ${err.message}`;
+      const msg = `Error: ${err.message}`;
       overviewStatus.textContent = msg;
       statusEl.textContent = msg;
     }
@@ -428,7 +428,7 @@
     persistSelection();
     updateCurrent();
     loadHistory().catch((err) => {
-      statusEl.textContent = `Erreur: ${err.message}`;
+      statusEl.textContent = `Error: ${err.message}`;
     });
   }
 
@@ -446,7 +446,7 @@
     persistSelection();
     updateCurrent();
     loadHistory().catch((err) => {
-      statusEl.textContent = `Erreur: ${err.message}`;
+      statusEl.textContent = `Error: ${err.message}`;
     });
   });
 
@@ -458,7 +458,7 @@
     persistSelection();
     updateCurrent();
     loadHistory().catch((err) => {
-      statusEl.textContent = `Erreur: ${err.message}`;
+      statusEl.textContent = `Error: ${err.message}`;
     });
   });
 
@@ -468,7 +468,7 @@
       btn.classList.add("active");
       hours = Number(btn.dataset.hours);
       loadHistory().catch((err) => {
-        statusEl.textContent = `Erreur: ${err.message}`;
+        statusEl.textContent = `Error: ${err.message}`;
       });
     });
   });

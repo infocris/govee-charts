@@ -1,56 +1,58 @@
 # Govee Charts (BLE)
 
-Collecte température / humidité des thermomètres Govee à portée Bluetooth LE,
-stocke l’historique en SQLite, et affiche des graphiques dans une page HTML.
+Collect temperature and humidity from nearby Govee BLE thermometers, store
+history in SQLite, and show charts in a local HTML dashboard.
 
-Plusieurs instances peuvent se fédérer sur le réseau local : chaque nœud scanne
-près de lui et pousse ses mesures vers les autres.
+Multiple instances can federate on the LAN: each node scans near itself and
+pushes its readings to the others.
 
-## Capteurs supportés
+## Supported sensors
 
 - **H5075** / H5072 (manufacturer ID `0xEC88`)
 - **H5179** (manufacturer ID `0x8801`)
 
-Découverte automatique : tout appareil Govee émettant ces données apparaît sans configuration.
+Auto-discovery: any Govee device advertising these payloads appears without
+manual pairing.
 
-## Prérequis
+## Requirements
 
 - Python 3.11+
-- Adaptateur Bluetooth Linux (`hci0`) à portée des capteurs (sauf nœud hub sans scan)
-- Optionnel : 2ᵉ dongle USB (`hci1`) plus proche des capteurs éloignés
+- Linux Bluetooth adapter (`hci0`) within range of the sensors (unless the node
+  is a hub with scanning disabled)
+- Optional: second USB dongle (`hci1`) closer to distant sensors
 
-## Installation
+## Install
 
 ```bash
 cd ~/govee-charts
 make install
-# optionnel : éditer config.toml (labels, port, rétention, federation)
+# optional: edit config.toml (labels, port, retention, federation)
 ```
 
 ## Usage
 
 ```bash
-make discover   # scan 30 s, liste les Govee détectés
-make run        # collector + serveur web
+make discover   # scan 30s, list detected Govee devices
+make run        # collector + web UI
 ```
 
-Ouvrir [http://127.0.0.1:8080](http://127.0.0.1:8080).
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 
-## Fédération (plusieurs machines)
+## Federation (multiple machines)
 
-Sur chaque machine : installer le projet, puis croiser les URLs dans `[federation]` :
+On each machine, install the project and cross-link peer URLs in `[federation]`:
 
 ```toml
 [federation]
-node_id = "cave"          # unique par machine
-token = "un-secret-partage"
-peers = ["http://192.168.1.10:8080"]   # l’autre instance
+node_id = "basement"          # unique per machine
+token = "shared-secret"
+peers = ["http://192.168.1.10:8080"]   # the other instance
 ```
 
-Sur l’autre nœud, `peers` pointe vers celui-ci. Les mesures BLE **locales** sont
-poussées vers les pairs ; les données reçues ne sont pas renvoyées (pas de boucle).
+On the other node, `peers` points back here. Only **locally scanned** samples
+are pushed to peers; ingested data is not re-forwarded (no loops).
 
-Hub sans Bluetooth (UI centrale seulement) :
+Hub without Bluetooth (central UI only):
 
 ```toml
 [scanner]
@@ -59,24 +61,24 @@ enabled = false
 
 ## Configuration
 
-Voir `config.example.toml` :
+See `config.example.toml`:
 
-- `scanner.enabled` — activer/désactiver le scan BLE local
-- `scanner.sample_interval` — intervalle min entre deux points enregistrés (défaut 60 s)
-- `scanner.retention_days` — durée de conservation (défaut 30 j)
-- `scanner.adapters` — liste d’adaptateurs BlueZ (`["hci0", "hci1"]`)
-- `federation.peers` — URLs des autres instances
-- `federation.token` — secret partagé pour `POST /api/ingest`
-- `[labels]` — noms amicaux par adresse MAC
+- `scanner.enabled` — enable/disable local BLE scanning
+- `scanner.sample_interval` — minimum seconds between stored samples (default 60)
+- `scanner.retention_days` — history retention (default 30)
+- `scanner.adapters` — BlueZ adapters (`["hci0", "hci1"]`)
+- `federation.peers` — URLs of other instances
+- `federation.token` — shared secret for `POST /api/ingest`
+- `[labels]` — friendly names keyed by BLE MAC
 
 ## API
 
-- `GET /api/devices` — appareils connus + dernière mesure
-- `GET /api/history?address=…&hours=24` — série temporelle
-- `POST /api/ingest` — réception des mesures d’un pair (header `X-Govee-Token`)
-- `GET /api/health` — santé + `node_id`
+- `GET /api/devices` — known devices + latest reading
+- `GET /api/history?address=…&hours=24` — time series
+- `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
+- `GET /api/health` — health + `node_id`
 
 ## Notes
 
-- Soft-blocked : `rfkill unblock bluetooth`
-- Pas d’API cloud Govee — BLE uniquement
+- Soft-blocked Bluetooth: `rfkill unblock bluetooth`
+- No Govee cloud API — BLE only
