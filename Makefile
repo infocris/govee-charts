@@ -5,12 +5,13 @@ PIP         := $(BIN)/pip
 PY          := $(BIN)/python
 MODULE      := -m govee_charts.main
 
-.PHONY: help install venv deps config run discover
+.PHONY: help install venv deps config run serve discover
 
 help:
 	@echo "Targets:"
 	@echo "  make install    Create venv, install deps, copy config if missing"
 	@echo "  make run        Run BLE collector + web UI (http://127.0.0.1:8080)"
+	@echo "  make serve      Run web UI only (no BLE scanner)"
 	@echo "  make discover   Scan BLE Govee devices for 30s then exit"
 
 install: venv deps config
@@ -29,6 +30,9 @@ config:
 
 run: deps config
 	$(PY) $(MODULE)
+
+serve: deps config
+	$(PY) $(MODULE) --no-scanner
 
 discover: deps config
 	$(PY) $(MODULE) --discover

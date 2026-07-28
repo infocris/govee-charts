@@ -116,10 +116,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Scan BLE for Govee sensors (30s) then exit",
     )
+    parser.add_argument(
+        "--no-scanner",
+        action="store_true",
+        help="Start web UI only (disable local BLE scanning)",
+    )
     return parser.parse_args()
 
 
-async def run_server(cfg: dict[str, Any]) -> None:
+async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> None:
     db = Database(resolve_db_path(cfg))
     await db.connect()
 
@@ -133,7 +138,8 @@ async def run_server(cfg: dict[str, Any]) -> None:
 
     stop_event = asyncio.Event()
     scan_task: asyncio.Task[None] | None = None
-    if bool(cfg["scanner"].get("enabled", True)):
+    scanner_enabled = enable_scanner and bool(cfg["scanner"].get("enabled", True))
+    if scanner_enabled:
         scanner = GoveeScanner(
             db,
             labels=cfg["labels"],
@@ -146,7 +152,7 @@ async def run_server(cfg: dict[str, Any]) -> None:
         )
         scan_task = asyncio.create_task(scanner.run(stop_event), name="ble-scanner")
     else:
-        logging.info("BLE scanner disabled (scanner.enabled=false)")
+        logging.info("BLE scanner disabled (scanner.enabled=false or --no-scanner)")
 
     app = create_app(
         db,
@@ -196,7 +202,7 @@ async def amain() -> None:
         )
         return
 
-    await run_server(cfg)
+    await run_server(cfg, enable_scanner=not args.no_scanner)
 
 
 def main() -> None:
