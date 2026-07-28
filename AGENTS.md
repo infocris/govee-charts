@@ -50,4 +50,5 @@ make install    # venv + deps + config.toml from example if missing
 make run        # collector + web UI
 make serve      # web UI only (no BLE scanner)
 make discover   # 30s BLE discovery then exit
+sudo make systemd-install   # systemd service, starts on boot
 ```

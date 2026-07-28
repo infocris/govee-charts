@@ -44,6 +44,28 @@ make serve      # web UI only (no BLE scanner)
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 
+## Run as a systemd service
+
+After `make install` and editing `config.toml`:
+
+```bash
+# BLE collector + web UI (starts on boot)
+sudo make systemd-install
+
+# Hub only (no local BLE scan)
+sudo ./scripts/install-systemd.sh --hub install
+```
+
+Logs: `journalctl -u govee-charts -f` and `govee-charts.log` in the project directory.
+
+Remove: `sudo make systemd-uninstall`
+
+On Raspberry Pi, ensure the service user is in the `bluetooth` group:
+
+```bash
+sudo usermod -aG bluetooth "$USER"
+```
+
 ## Federation (multiple machines)
 
 On each machine, install the project and cross-link peer URLs in `[federation]`:
