@@ -23,8 +23,8 @@ manual pairing.
 
 On Raspberry Pi OS with Python &lt; 3.10, `bleak` 3.x is unavailable; this project
 accepts `bleak` 0.22+ on most platforms. On **armv6l** (Pi Zero / early Pi),
-requirements pin `bleak` 0.19.x (pure-Python `dbus-next`) because `dbus-fast`
-has no armv6 wheels.
+requirements pin older `bleak` + pure-Python `dbus-fast` (&lt; 1.18) because newer
+`dbus-fast` has no armv6 wheels.
 
 ## Install
 
