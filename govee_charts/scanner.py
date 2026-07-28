@@ -69,7 +69,7 @@ class GoveeScanner:
         adapter: str | None = None,
     ) -> None:
         name = adv.local_name or device.name or ""
-        reading = decode_advertisement(device.address, name, adv)
+        reading = decode_advertisement(device.address, name, adv, device=device)
         if reading is None:
             return
 
@@ -213,7 +213,7 @@ async def discover_once(
     def make_cb(adapter: str | None):
         def cb(device: BLEDevice, adv: AdvertisementData) -> None:
             name = adv.local_name or device.name or ""
-            reading = decode_advertisement(device.address, name, adv)
+            reading = decode_advertisement(device.address, name, adv, device=device)
             if reading is None:
                 return
             if reading.address in found:

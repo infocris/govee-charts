@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
 # Govee manufacturer company IDs (as exposed by bleak)
@@ -77,10 +78,26 @@ def detect_model(adv: AdvertisementData) -> str | None:
     return None
 
 
+def advertisement_rssi(
+    device: BLEDevice,
+    adv: AdvertisementData,
+) -> int | None:
+    """RSSI from advertisement (bleak 3.x) or device (bleak 0.18.x on Linux)."""
+    adv_rssi = getattr(adv, "rssi", None)
+    if adv_rssi is not None:
+        return int(adv_rssi)
+    device_rssi = getattr(device, "rssi", None)
+    if device_rssi is None or device_rssi == 0:
+        return None
+    return int(device_rssi)
+
+
 def decode_advertisement(
     address: str,
     name: str,
     adv: AdvertisementData,
+    *,
+    device: BLEDevice | None = None,
 ) -> Reading | None:
     """Decode a BLE advertisement into a Reading, or None if not a known Govee sensor."""
     model = detect_model(adv)
@@ -97,6 +114,11 @@ def decode_advertisement(
         return None
 
     temp, humidity, battery = values
+    if device is not None:
+        rssi = advertisement_rssi(device, adv)
+    else:
+        rssi = getattr(adv, "rssi", None)
+        rssi = int(rssi) if rssi is not None else None
     return Reading(
         temperature_c=temp,
         humidity=humidity,
@@ -104,5 +126,5 @@ def decode_advertisement(
         address=address.upper(),
         name=name or address.upper(),
         model=model,
-        rssi=adv.rssi,
+        rssi=rssi,
     )
