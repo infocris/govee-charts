@@ -37,6 +37,7 @@ Chat replies to the repository owner may follow their preferred language; projec
 ## Conventions
 
 - Prefer small, focused changes; match existing module style.
+- Target Python **3.9+** (use `tomli` fallback for TOML on &lt; 3.11; keep `bleak>=0.22` for older Pi).
 - Do not commit `config.toml`, `venv/`, `*.log`, or `data/*.db`.
 - Do not invent cloud/Govee HTTP APIs — collection is BLE advertisement decode only (H5075 / H5179).
 - After dependency changes, update `requirements.txt`.

@@ -19,9 +19,10 @@ logger = logging.getLogger(__name__)
 
 
 def _scanner_kwargs(adapter: str | None, mode: str) -> dict:
+    # Use legacy ``adapter=`` so bleak 0.22+ and 3.x both work (Pi / older Python).
     kwargs: dict = {"scanning_mode": mode}
     if adapter:
-        kwargs["bluez"] = {"adapter": adapter}
+        kwargs["adapter"] = adapter
     return kwargs
 
 

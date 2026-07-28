@@ -16,10 +16,13 @@ manual pairing.
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.9+ (3.11+ recommended; 3.9–3.10 need `tomli` from requirements)
 - Linux Bluetooth adapter (`hci0`) within range of the sensors (unless the node
   is a hub with scanning disabled)
 - Optional: second USB dongle (`hci1`) closer to distant sensors
+
+On Raspberry Pi OS with Python &lt; 3.10, `bleak` 3.x is unavailable; this project
+accepts `bleak` 0.22+ so `make install` works on older Pi images.
 
 ## Install
 
