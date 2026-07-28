@@ -22,7 +22,9 @@ manual pairing.
 - Optional: second USB dongle (`hci1`) closer to distant sensors
 
 On Raspberry Pi OS with Python &lt; 3.10, `bleak` 3.x is unavailable; this project
-accepts `bleak` 0.22+ so `make install` works on older Pi images.
+accepts `bleak` 0.22+ on most platforms. On **armv6l** (Pi Zero / early Pi),
+requirements pin `bleak` 0.19.x (pure-Python `dbus-next`) because `dbus-fast`
+has no armv6 wheels.
 
 ## Install
 
@@ -37,6 +39,7 @@ make install
 ```bash
 make discover   # scan 30s, list detected Govee devices
 make run        # collector + web UI
+make serve      # web UI only (no BLE scanner)
 ```
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080).

@@ -1,4 +1,8 @@
-bleak>=0.22.0
+# Modern bleak on x86_64 / aarch64 / armv7. On armv6l (Pi Zero / early Pi),
+# dbus-fast has no wheels and compiling it is impractical — use bleak 0.19.x
+# which depends on pure-Python dbus-next instead.
+bleak>=0.22.0; platform_machine != "armv6l"
+bleak>=0.19.5,<0.20; platform_machine == "armv6l"
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 aiosqlite>=0.20.0
