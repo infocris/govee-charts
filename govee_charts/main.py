@@ -164,6 +164,7 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         labels=cfg["labels"],
         federation_token=fed["token"] or None,
         node_id=fed["node_id"],
+        peers=fed["peers"],
         suffix_map=suffix_map,
     )
 

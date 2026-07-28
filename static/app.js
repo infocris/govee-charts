@@ -4,12 +4,17 @@
   const statusEl = document.getElementById("status");
   const overviewBody = document.getElementById("overview-body");
   const overviewStatus = document.getElementById("overview-status");
+  const modelFiltersEl = document.getElementById("model-filters");
+  const compareModelFiltersEl = document.getElementById("compare-model-filters");
+  const nodeLineEl = document.getElementById("node-line");
+  const peerLinksEl = document.getElementById("peer-links");
   const viewOverview = document.getElementById("view-overview");
   const viewCompare = document.getElementById("view-compare");
   const selectAllBtn = document.getElementById("select-all");
   const selectNoneBtn = document.getElementById("select-none");
   const rangeButtons = [...document.querySelectorAll(".ranges button")];
   const viewButtons = [...document.querySelectorAll(".views [data-view]")];
+  const sortButtons = [...document.querySelectorAll(".sort-btn")];
 
   const PALETTE = [
     "#e8a87c",
@@ -24,14 +29,21 @@
 
   const STORAGE_KEY = "govee-charts.selected";
   const VIEW_KEY = "govee-charts.view";
+  const MODEL_KEY = "govee-charts.model";
+  const SORT_KEY = "govee-charts.sort";
 
   let hours = 24;
   let devices = [];
   let selected = new Set();
+  let modelFilter = localStorage.getItem(MODEL_KEY) || "all";
+  let sortState = loadSortState();
   let currentView = localStorage.getItem(VIEW_KEY) === "compare" ? "compare" : "overview";
   let tempChart = null;
   let humChart = null;
   let historyLoaded = false;
+  let localNodeId = "";
+  /** @type {Map<string, string>} node_id → url */
+  let peerByNodeId = new Map();
 
   const chartDefaults = {
     responsive: true,
@@ -88,6 +100,114 @@
     localStorage.setItem(STORAGE_KEY, JSON.stringify([...selected]));
   }
 
+  function loadSortState() {
+    try {
+      const raw = localStorage.getItem(SORT_KEY);
+      if (!raw) return { key: "temperature_c", dir: "desc" };
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed.key !== "string") {
+        return { key: "temperature_c", dir: "desc" };
+      }
+      return {
+        key: parsed.key,
+        dir: parsed.dir === "asc" ? "asc" : "desc",
+      };
+    } catch {
+      return { key: "temperature_c", dir: "desc" };
+    }
+  }
+
+  function persistSortState() {
+    localStorage.setItem(SORT_KEY, JSON.stringify(sortState));
+  }
+
+  function persistModelFilter() {
+    localStorage.setItem(MODEL_KEY, modelFilter);
+  }
+
+  function peerHostLabel(url) {
+    try {
+      return new URL(url).host;
+    } catch {
+      return url;
+    }
+  }
+
+  async function probePeer(url) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    try {
+      const res = await fetch(`${url}/api/health`, { signal: controller.signal });
+      if (!res.ok) return { url, node_id: peerHostLabel(url), online: false };
+      const data = await res.json();
+      return {
+        url,
+        node_id: data.node_id || peerHostLabel(url),
+        online: true,
+      };
+    } catch {
+      return { url, node_id: peerHostLabel(url), online: false };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function renderPeers(peers) {
+    peerByNodeId = new Map();
+    for (const peer of peers) {
+      if (peer.node_id) peerByNodeId.set(peer.node_id, peer.url);
+    }
+
+    if (localNodeId && nodeLineEl) {
+      nodeLineEl.hidden = false;
+      nodeLineEl.textContent = `Node · ${localNodeId}`;
+    }
+
+    if (!peerLinksEl) return;
+    peerLinksEl.innerHTML = "";
+    if (!peers.length) {
+      peerLinksEl.hidden = true;
+      return;
+    }
+    peerLinksEl.hidden = false;
+    for (const peer of peers) {
+      const a = document.createElement("a");
+      a.href = peer.url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = peer.node_id;
+      a.title = peer.url;
+      if (!peer.online) a.classList.add("offline");
+      peerLinksEl.appendChild(a);
+    }
+  }
+
+  async function loadFederation() {
+    const res = await fetch("/api/federation");
+    if (!res.ok) throw new Error(`federation HTTP ${res.status}`);
+    const data = await res.json();
+    localNodeId = data.node_id || "";
+    const urls = (data.peers || []).map((p) => p.url).filter(Boolean);
+    const peers = await Promise.all(urls.map(probePeer));
+    renderPeers(peers);
+  }
+
+  function sourceHtml(source) {
+    if (!source || source === "—") return "—";
+    const url = peerByNodeId.get(source);
+    if (!url) return escapeHtml(source);
+    return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${escapeHtml(source)}</a>`;
+  }
+
+  function availableModels() {
+    return [...new Set(devices.map((d) => (d.model || "").toLowerCase()).filter(Boolean))].sort();
+  }
+
+  function filteredDevices() {
+    if (modelFilter === "all") return devices;
+    return devices.filter((d) => (d.model || "").toLowerCase() === modelFilter);
+  }
+
   function colorFor(address) {
     const idx = devices.findIndex((d) => d.address === address);
     return PALETTE[(idx >= 0 ? idx : 0) % PALETTE.length];
@@ -122,19 +242,89 @@
   }
 
   function selectedDevices() {
-    return devices.filter((d) => selected.has(d.address));
+    return filteredDevices().filter((d) => selected.has(d.address));
   }
 
-  function sortedByTemperature(list) {
+  function sortValue(device, key) {
+    if (key === "name") return (device.name || "").toLowerCase();
+    if (key === "last_source") return (device.last_source || "").toLowerCase();
+    if (key === "last_reading_ts") {
+      return device.last_reading_ts ?? device.last_seen ?? null;
+    }
+    return device[key] ?? null;
+  }
+
+  function sortedDevices(list) {
+    const { key, dir } = sortState;
+    const factor = dir === "asc" ? 1 : -1;
     return [...list].sort((a, b) => {
-      const ta = a.temperature_c;
-      const tb = b.temperature_c;
-      if (ta == null && tb == null) return a.name.localeCompare(b.name, "fr");
-      if (ta == null) return 1;
-      if (tb == null) return -1;
-      if (tb !== ta) return tb - ta;
+      const va = sortValue(a, key);
+      const vb = sortValue(b, key);
+      if (va == null && vb == null) {
+        return a.name.localeCompare(b.name, "fr");
+      }
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (typeof va === "string" && typeof vb === "string") {
+        const cmp = va.localeCompare(vb, "fr");
+        return cmp !== 0 ? cmp * factor : a.name.localeCompare(b.name, "fr");
+      }
+      if (va !== vb) return (va < vb ? -1 : 1) * factor;
       return a.name.localeCompare(b.name, "fr");
     });
+  }
+
+  function updateSortButtons() {
+    for (const btn of sortButtons) {
+      const active = btn.dataset.sort === sortState.key;
+      btn.classList.toggle("active", active);
+      btn.classList.toggle("asc", active && sortState.dir === "asc");
+      btn.classList.toggle("desc", active && sortState.dir === "desc");
+      btn.setAttribute(
+        "aria-sort",
+        active ? (sortState.dir === "asc" ? "ascending" : "descending") : "none"
+      );
+    }
+  }
+
+  function renderModelFilters(container) {
+    if (!container) return;
+    const models = availableModels();
+    if (modelFilter !== "all" && !models.includes(modelFilter)) {
+      modelFilter = "all";
+      persistModelFilter();
+    }
+    container.innerHTML = "";
+    const options = [{ id: "all", label: "All models" }].concat(
+      models.map((m) => ({ id: m, label: m.toUpperCase() }))
+    );
+    for (const opt of options) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.dataset.model = opt.id;
+      btn.textContent = opt.label;
+      btn.classList.toggle("active", modelFilter === opt.id);
+      btn.addEventListener("click", () => {
+        if (modelFilter === opt.id) return;
+        modelFilter = opt.id;
+        persistModelFilter();
+        syncModelFilterButtons();
+        fillDeviceList();
+        updateOverview();
+        updateCurrent();
+        if (currentView === "compare") {
+          loadHistory().catch((err) => {
+            statusEl.textContent = `Error: ${err.message}`;
+          });
+        }
+      });
+      container.appendChild(btn);
+    }
+  }
+
+  function syncModelFilterButtons() {
+    renderModelFilters(modelFiltersEl);
+    renderModelFilters(compareModelFiltersEl);
   }
 
   function setView(view) {
@@ -187,14 +377,22 @@
 
   function updateOverview() {
     overviewBody.innerHTML = "";
+    updateSortButtons();
+    const visible = filteredDevices();
     if (!devices.length) {
       overviewBody.innerHTML =
         '<tr><td colspan="6" class="overview-empty">No devices detected</td></tr>';
       overviewStatus.textContent = "Waiting for BLE devices…";
       return;
     }
+    if (!visible.length) {
+      overviewBody.innerHTML =
+        '<tr><td colspan="6" class="overview-empty">No sensors for this model</td></tr>';
+      overviewStatus.textContent = `0 / ${devices.length} sensor(s) · filter ${modelFilter}`;
+      return;
+    }
 
-    const ranked = sortedByTemperature(devices);
+    const ranked = sortedDevices(visible);
     for (const device of ranked) {
       const tr = document.createElement("tr");
       tr.style.setProperty("--device-color", colorFor(device.address));
@@ -210,7 +408,7 @@
         <td class="num temp">${fmtNum(device.temperature_c, 1, " °C")}</td>
         <td class="num">${fmtNum(device.humidity, 1, " %")}</td>
         <td class="num">${device.battery != null ? `${device.battery} %` : "—"}</td>
-        <td class="overview-source">${escapeHtml(source)}</td>
+        <td class="overview-source">${sourceHtml(source)}</td>
         <td>${fmtTime(device.last_reading_ts || device.last_seen)}</td>
       `;
       tr.addEventListener("click", () => {
@@ -233,8 +431,10 @@
       temps.length >= 2
         ? ` · Δ ${(Math.max(...temps) - Math.min(...temps)).toFixed(1)} °C`
         : "";
+    const filterNote =
+      modelFilter === "all" ? "" : ` · ${modelFilter.toUpperCase()}`;
     overviewStatus.textContent =
-      `${ranked.length} sensor(s)${span} · updated ${new Date().toLocaleTimeString("en-GB")}`;
+      `${ranked.length}${modelFilter === "all" ? "" : ` / ${devices.length}`} sensor(s)${filterNote}${span} · updated ${new Date().toLocaleTimeString("en-GB")}`;
   }
 
   function updateCurrent() {
@@ -291,10 +491,15 @@
     const previous = new Set(selected);
     const persisted = previous.size ? null : loadPersistedSelection();
     deviceList.innerHTML = "";
+    const visible = filteredDevices();
 
     if (!devices.length) {
       deviceList.innerHTML = '<p class="device-empty">No devices detected</p>';
       selected = new Set();
+      return;
+    }
+    if (!visible.length) {
+      deviceList.innerHTML = '<p class="device-empty">No sensors for this model</p>';
       return;
     }
 
@@ -304,11 +509,13 @@
     } else if (persisted && persisted.length) {
       selected = new Set(persisted.filter((a) => known.has(a)));
     }
-    if (!selected.size) {
-      selected = new Set([devices[0].address]);
+    const visibleAddrs = new Set(visible.map((d) => d.address));
+    const selectedVisible = [...selected].filter((a) => visibleAddrs.has(a));
+    if (!selectedVisible.length) {
+      selected = new Set([visible[0].address]);
     }
 
-    for (const d of devices) {
+    for (const d of visible) {
       const id = `dev-${d.address.replaceAll(":", "")}`;
       const label = document.createElement("label");
       label.className = "device-item";
@@ -340,6 +547,7 @@
     const res = await fetch("/api/devices");
     if (!res.ok) throw new Error(`devices HTTP ${res.status}`);
     devices = await res.json();
+    syncModelFilterButtons();
     fillDeviceList();
     updateOverview();
     updateCurrent();
@@ -407,6 +615,7 @@
 
   async function refresh() {
     try {
+      await loadFederation();
       await loadDevices();
       if (currentView === "compare") {
         await loadHistory();
@@ -439,7 +648,8 @@
   deviceList.addEventListener("change", onSelectionChange);
 
   selectAllBtn.addEventListener("click", () => {
-    selected = new Set(devices.map((d) => d.address));
+    const visible = filteredDevices();
+    selected = new Set(visible.map((d) => d.address));
     for (const input of deviceList.querySelectorAll('input[type="checkbox"]')) {
       input.checked = true;
     }
@@ -459,6 +669,21 @@
     updateCurrent();
     loadHistory().catch((err) => {
       statusEl.textContent = `Error: ${err.message}`;
+    });
+  });
+
+  sortButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const key = btn.dataset.sort;
+      if (sortState.key === key) {
+        sortState.dir = sortState.dir === "asc" ? "desc" : "asc";
+      } else {
+        sortState.key = key;
+        sortState.dir =
+          key === "name" || key === "last_source" ? "asc" : "desc";
+      }
+      persistSortState();
+      updateOverview();
     });
   });
 

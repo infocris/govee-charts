@@ -51,6 +51,39 @@ body {
   font-size: 1.05rem;
 }
 
+.node-line {
+  margin: 0.55rem 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.peer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+}
+
+.peer-links a {
+  color: var(--ink);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.9rem;
+  background: rgba(26, 34, 28, 0.55);
+}
+
+.peer-links a:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.peer-links a.offline {
+  color: var(--muted);
+  opacity: 0.7;
+}
+
 .views {
   display: flex;
   flex-wrap: wrap;
@@ -102,6 +135,39 @@ main {
   font-size: 0.95rem;
 }
 
+.model-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 1rem;
+}
+
+.model-filters-inline {
+  margin: 0.35rem 0 0.15rem;
+}
+
+.model-filters button {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.4rem 0.75rem;
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.model-filters button:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+.model-filters button.active {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
 .overview-table-wrap {
   overflow-x: auto;
   border-top: 1px solid var(--line);
@@ -127,6 +193,60 @@ main {
   letter-spacing: 0.06em;
   color: var(--muted);
   font-weight: 600;
+  padding: 0.4rem 0.35rem;
+}
+
+.sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.45rem 0.4rem;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.overview-table th.num .sort-btn {
+  justify-content: flex-end;
+}
+
+.sort-btn:hover {
+  color: var(--ink);
+  background: rgba(111, 191, 115, 0.08);
+}
+
+.sort-btn.active {
+  color: var(--accent);
+}
+
+.sort-btn::after {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  opacity: 0.35;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-1px);
+  flex: 0 0 auto;
+}
+
+.sort-btn.active.asc::after {
+  opacity: 1;
+  transform: rotate(-135deg) translateY(-1px);
+}
+
+.sort-btn.active.desc::after {
+  opacity: 1;
+  transform: rotate(45deg) translateY(-2px);
 }
 
 .overview-table th.num,
@@ -169,6 +289,15 @@ main {
 .overview-source {
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+.overview-source a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.overview-source a:hover {
+  text-decoration: underline;
 }
 
 .overview-empty {

@@ -40,6 +40,7 @@ def create_app(
     labels: dict[str, str] | None = None,
     federation_token: str | None = None,
     node_id: str = "local",
+    peers: list[str] | None = None,
     suffix_map: dict[str, str] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Govee Charts", docs_url=None, redoc_url=None)
@@ -48,6 +49,7 @@ def create_app(
     app.state.suffix_map = suffix_map or {}
     app.state.federation_token = federation_token or None
     app.state.node_id = node_id
+    app.state.peers = [p.rstrip("/") for p in (peers or []) if p.strip()]
 
     @app.get("/")
     async def index() -> FileResponse:
@@ -56,6 +58,13 @@ def create_app(
     @app.get("/api/health")
     async def api_health() -> dict[str, Any]:
         return {"ok": True, "node_id": app.state.node_id}
+
+    @app.get("/api/federation")
+    async def api_federation() -> dict[str, Any]:
+        return {
+            "node_id": app.state.node_id,
+            "peers": [{"url": url} for url in app.state.peers],
+        }
 
     @app.get("/api/devices")
     async def api_devices() -> list[dict[str, Any]]:
