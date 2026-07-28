@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 from collections.abc import Callable, Sequence
 
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
+from bleak.exc import BleakError
 
 from govee_charts.db import Database
 from govee_charts.decode import Reading, decode_advertisement
@@ -18,12 +20,34 @@ from govee_charts.federation import PeerPublisher
 logger = logging.getLogger(__name__)
 
 
+def _scan_mode(active: bool) -> str:
+    # CoreBluetooth does not support passive scanning.
+    if sys.platform == "darwin":
+        return "active"
+    return "active" if active else "passive"
+
+
 def _scanner_kwargs(adapter: str | None, mode: str) -> dict:
     # Use legacy ``adapter=`` so bleak 0.22+ and 3.x both work (Pi / older Python).
     kwargs: dict = {"scanning_mode": mode}
     if adapter:
         kwargs["adapter"] = adapter
     return kwargs
+
+
+def _format_ble_unavailable(exc: BaseException) -> str:
+    msg = str(exc).strip() or exc.__class__.__name__
+    lines = [f"BLE unavailable: {msg}"]
+    if sys.platform == "darwin":
+        # Bleak maps a stuck "Unknown" CoreBluetooth state to "turned off",
+        # which is often a missing Privacy → Bluetooth grant for the terminal.
+        lines.append(
+            "On macOS, enable Bluetooth for your terminal app under "
+            "System Settings → Privacy & Security → Bluetooth "
+            "(Terminal, iTerm, Cursor, …). Bluetooth may already be on — "
+            "without that privacy grant, CoreBluetooth stays unavailable."
+        )
+    return "\n".join(lines)
 
 
 class GoveeScanner:
@@ -155,7 +179,7 @@ class GoveeScanner:
                     pass
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        mode = "active" if self.active else "passive"
+        mode = _scan_mode(self.active)
         names = ", ".join(a or "default" for a in self.adapters)
         logger.info(
             "BLE scanner started (adapters=[%s], mode=%s, sample_interval=%.0fs)",
@@ -206,7 +230,7 @@ async def discover_once(
     """Scan for `duration` seconds and return unique decoded Govee devices."""
     found: dict[str, Reading] = {}
     adapter_list = [a for a in (adapters or []) if a] or [None]
-    mode = "active" if active else "passive"
+    mode = _scan_mode(active)
     names = ", ".join(a or "default" for a in adapter_list)
     logger.info("Discovery mode — %.0f seconds on [%s]…", duration, names)
 
@@ -236,18 +260,23 @@ async def discover_once(
 
         return cb
 
-    scanners = [
-        BleakScanner(
-            detection_callback=make_cb(adapter),
-            **_scanner_kwargs(adapter, mode),
-        )
-        for adapter in adapter_list
-    ]
+    try:
+        scanners = [
+            BleakScanner(
+                detection_callback=make_cb(adapter),
+                **_scanner_kwargs(adapter, mode),
+            )
+            for adapter in adapter_list
+        ]
+    except BleakError as exc:
+        raise SystemExit(_format_ble_unavailable(exc)) from exc
 
     try:
         for scanner in scanners:
             await scanner.__aenter__()
         await asyncio.sleep(duration)
+    except BleakError as exc:
+        raise SystemExit(_format_ble_unavailable(exc)) from exc
     finally:
         for scanner in reversed(scanners):
             await scanner.__aexit__(None, None, None)

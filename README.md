@@ -20,11 +20,14 @@ manual pairing.
 - Linux Bluetooth adapter (`hci0`) within range of the sensors (unless the node
   is a hub with scanning disabled)
 - Optional: second USB dongle (`hci1`) closer to distant sensors
+- macOS (development): Bluetooth on, and your terminal app allowed under
+  **System Settings → Privacy & Security → Bluetooth**
 
 On Raspberry Pi OS with Python &lt; 3.10, `bleak` 3.x is unavailable; this project
 accepts `bleak` 0.22+ on most platforms. On **armv6l** (Pi Zero / early Pi),
 requirements pin older `bleak` + pure-Python `dbus-fast` (&lt; 1.18) because newer
-`dbus-fast` has no armv6 wheels.
+`dbus-fast` has no armv6 wheels. On macOS with Python 3.9, PyObjC is capped
+below 12.x (12 dropped 3.9 support).
 
 ## Install
 

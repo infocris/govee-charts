@@ -24,6 +24,7 @@ venv:
 	@test -d $(VENV) || $(PYTHON) -m venv $(VENV)
 
 deps: venv
+	$(PIP) install -U pip
 	$(PIP) install -r requirements.txt
 
 config:
