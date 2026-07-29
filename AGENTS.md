@@ -46,9 +46,11 @@ Chat replies to the repository owner may follow their preferred language; projec
 ## Useful commands
 
 ```bash
-make install    # venv + deps + config.toml from example if missing
-make run        # collector + web UI
-make serve      # web UI only (no BLE scanner)
-make discover   # 30s BLE discovery then exit
-sudo make systemd-install   # systemd service, starts on boot
+make install                 # venv + deps + config.toml from example if missing
+make run                     # collector + web UI
+make serve                   # web UI only (no BLE scanner)
+make discover                # 30s BLE discovery then exit
+sudo make systemd-install    # Linux: systemd service, starts on boot
+make launchd-install         # macOS: LaunchAgent, starts at login
+make restart                 # restart background service (systemd or launchd)
 ```

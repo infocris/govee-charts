@@ -47,9 +47,11 @@ make serve      # web UI only (no BLE scanner)
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 
-## Run as a systemd service
+## Run in the background
 
 After `make install` and editing `config.toml`:
+
+### Linux (systemd)
 
 ```bash
 # BLE collector + web UI (starts on boot)
@@ -68,6 +70,32 @@ On Raspberry Pi, ensure the service user is in the `bluetooth` group:
 ```bash
 sudo usermod -aG bluetooth "$USER"
 ```
+
+### macOS (launchd)
+
+```bash
+# BLE collector + web UI (starts at login, no sudo)
+make launchd-install
+
+# Hub only (no local BLE scan)
+./scripts/install-launchd.sh --hub install
+```
+
+Restart / status / remove:
+
+```bash
+make restart
+make service-status
+make launchd-uninstall
+```
+
+Logs: `govee-charts.log` and `govee-charts.launchd.log` in the project directory.
+
+Allow Bluetooth for **Python** under
+**System Settings → Privacy & Security → Bluetooth**. A LaunchAgent does not
+inherit Cursor/Terminal’s Bluetooth grant — without this toggle, the web UI
+stays up but local scanning fails with `BLE is not authorized`. Then:
+`make restart`.
 
 ## Federation (multiple machines)
 

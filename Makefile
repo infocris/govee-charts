@@ -4,8 +4,12 @@ BIN         := $(VENV)/bin
 PIP         := $(BIN)/pip
 PY          := $(BIN)/python
 MODULE      := -m govee_charts.main
+UNAME_S     := $(shell uname -s)
 
-.PHONY: help install venv deps config run serve discover systemd-install systemd-uninstall systemd-restart restart systemd-status
+.PHONY: help install venv deps config run serve discover \
+	systemd-install systemd-uninstall systemd-restart systemd-status \
+	launchd-install launchd-uninstall launchd-restart launchd-status \
+	restart service-status
 
 help:
 	@echo "Targets:"
@@ -13,10 +17,12 @@ help:
 	@echo "  make run                Run BLE collector + web UI (http://127.0.0.1:8080)"
 	@echo "  make serve              Run web UI only (no BLE scanner)"
 	@echo "  make discover           Scan BLE Govee devices for 30s then exit"
-	@echo "  make systemd-install    Install systemd service (sudo, starts on boot)"
+	@echo "  make systemd-install    Install systemd service (Linux, sudo, starts on boot)"
 	@echo "  make systemd-uninstall  Remove systemd service"
-	@echo "  make systemd-restart    Restart systemd service (sudo)"
-	@echo "  make restart            Alias for systemd-restart"
+	@echo "  make launchd-install    Install LaunchAgent (macOS, starts at login)"
+	@echo "  make launchd-uninstall  Remove LaunchAgent"
+	@echo "  make restart            Restart background service (systemd or launchd)"
+	@echo "  make service-status     Show background service status"
 
 install: venv deps config
 
@@ -54,7 +60,29 @@ systemd-restart:
 	chmod +x scripts/install-systemd.sh
 	./scripts/install-systemd.sh restart
 
-restart: systemd-restart
-
 systemd-status:
 	./scripts/install-systemd.sh status
+
+launchd-install: install
+	chmod +x scripts/install-launchd.sh
+	./scripts/install-launchd.sh install
+
+launchd-uninstall:
+	chmod +x scripts/install-launchd.sh
+	./scripts/install-launchd.sh uninstall
+
+launchd-restart:
+	chmod +x scripts/install-launchd.sh
+	./scripts/install-launchd.sh restart
+
+launchd-status:
+	chmod +x scripts/install-launchd.sh
+	./scripts/install-launchd.sh status
+
+ifeq ($(UNAME_S),Darwin)
+restart: launchd-restart
+service-status: launchd-status
+else
+restart: systemd-restart
+service-status: systemd-status
+endif

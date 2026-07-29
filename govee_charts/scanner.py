@@ -41,10 +41,13 @@ def _format_ble_unavailable(exc: BaseException) -> str:
     lines = [f"BLE unavailable: {msg}"]
     if sys.platform == "darwin":
         # Bleak maps a stuck "Unknown" CoreBluetooth state to "turned off",
-        # which is often a missing Privacy → Bluetooth grant for the terminal.
+        # which is often a missing Privacy → Bluetooth grant. Interactive
+        # shells inherit the terminal's TCC grant; LaunchAgents need Python
+        # itself allowed under Bluetooth privacy.
         lines.append(
-            "On macOS, enable Bluetooth for your terminal app under "
-            "System Settings → Privacy & Security → Bluetooth "
+            "On macOS, enable Bluetooth under "
+            "System Settings → Privacy & Security → Bluetooth for "
+            "Python (LaunchAgent) and/or your terminal app "
             "(Terminal, iTerm, Cursor, …). Bluetooth may already be on — "
             "without that privacy grant, CoreBluetooth stays unavailable."
         )
@@ -65,6 +68,10 @@ class GoveeScanner:
         publisher: PeerPublisher | None = None,
         node_id: str = "local",
         suffix_map: dict[str, str] | None = None,
+        # Restart scanner if no BLE ads arrive (CoreBluetooth can stall silently).
+        stale_restart_after: float = 120.0,
+        # Periodic recycle even while healthy (0 = disabled). Helpful on macOS.
+        recycle_after: float | None = None,
     ) -> None:
         self.db = db
         self.labels = {k.upper(): v for k, v in (labels or {}).items()}
@@ -73,6 +80,11 @@ class GoveeScanner:
         self.active = active
         self.retention_days = retention_days
         self.prune_interval = prune_interval
+        self.stale_restart_after = max(30.0, float(stale_restart_after))
+        if recycle_after is None:
+            # macOS CoreBluetooth long-lived scans often go quiet; recycle proactively.
+            recycle_after = 1800.0 if sys.platform == "darwin" else 0.0
+        self.recycle_after = max(0.0, float(recycle_after))
         # Empty / None → default system adapter only
         self.adapters = [a for a in (adapters or []) if a] or [None]
         self.publisher = publisher
@@ -158,8 +170,13 @@ class GoveeScanner:
         mode: str,
     ) -> None:
         label = adapter or "default"
+        auth_failures = 0
+        last_adv = time.monotonic()
 
         def cb(device: BLEDevice, adv: AdvertisementData) -> None:
+            nonlocal last_adv
+            # Any advertisement proves the backend is still delivering events.
+            last_adv = time.monotonic()
             self.on_advertisement(device, adv, adapter=adapter)
 
         while not stop_event.is_set():
@@ -168,23 +185,73 @@ class GoveeScanner:
                     detection_callback=cb,
                     **_scanner_kwargs(adapter, mode),
                 ):
+                    auth_failures = 0
+                    last_adv = time.monotonic()
+                    started = last_adv
                     logger.info("BLE scanner listening on %s (mode=%s)", label, mode)
                     while not stop_event.is_set():
                         try:
                             await asyncio.wait_for(stop_event.wait(), timeout=5.0)
                         except asyncio.TimeoutError:
                             pass
+                        now = time.monotonic()
+                        silent_for = now - last_adv
+                        if silent_for >= self.stale_restart_after:
+                            logger.warning(
+                                "BLE scanner on %s stale (no advertisements for "
+                                "%.0fs) — restarting",
+                                label,
+                                silent_for,
+                            )
+                            break
+                        if (
+                            self.recycle_after > 0
+                            and now - started >= self.recycle_after
+                        ):
+                            logger.info(
+                                "BLE scanner on %s periodic recycle after %.0fs",
+                                label,
+                                now - started,
+                            )
+                            break
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 if stop_event.is_set():
                     break
-                logger.exception(
-                    "BLE scanner on %s failed — retry in 10s",
-                    label,
+                unauthorized = (
+                    isinstance(exc, BleakError)
+                    and "not authorized" in str(exc).lower()
                 )
+                if unauthorized:
+                    auth_failures += 1
+                    # LaunchAgents often never show a TCC prompt — log clearly
+                    # once, then back off so logs stay readable.
+                    delay = min(300.0, 30.0 * auth_failures)
+                    if auth_failures == 1:
+                        logger.error("%s", _format_ble_unavailable(exc))
+                        logger.error(
+                            "BLE scanner on %s will retry every %.0fs until "
+                            "Bluetooth access is granted",
+                            label,
+                            delay,
+                        )
+                    else:
+                        logger.warning(
+                            "BLE still unauthorized on %s — retry in %.0fs",
+                            label,
+                            delay,
+                        )
+                else:
+                    auth_failures = 0
+                    delay = 10.0
+                    logger.exception(
+                        "BLE scanner on %s failed — retry in %.0fs",
+                        label,
+                        delay,
+                    )
                 try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+                    await asyncio.wait_for(stop_event.wait(), timeout=delay)
                 except asyncio.TimeoutError:
                     pass
 
@@ -192,10 +259,13 @@ class GoveeScanner:
         mode = _scan_mode(self.active)
         names = ", ".join(a or "default" for a in self.adapters)
         logger.info(
-            "BLE scanner started (adapters=[%s], mode=%s, sample_interval=%.0fs)",
+            "BLE scanner started (adapters=[%s], mode=%s, sample_interval=%.0fs, "
+            "stale_restart=%.0fs, recycle=%s)",
             names,
             mode,
             self.sample_interval,
+            self.stale_restart_after,
+            f"{self.recycle_after:.0f}s" if self.recycle_after > 0 else "off",
         )
         pruned = await self.db.prune(self.retention_days)
         if pruned:

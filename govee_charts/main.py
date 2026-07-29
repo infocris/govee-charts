@@ -191,7 +191,15 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     finally:
         stop_event.set()
         if scan_task is not None:
-            await scan_task
+            try:
+                await asyncio.wait_for(scan_task, timeout=15.0)
+            except asyncio.TimeoutError:
+                logging.warning("BLE scanner stop timed out — cancelling")
+                scan_task.cancel()
+                try:
+                    await scan_task
+                except (asyncio.CancelledError, Exception):
+                    pass
         await publisher.stop()
         await db.close()
 
