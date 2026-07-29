@@ -425,15 +425,26 @@ async def discover_once(
     except BleakError as exc:
         raise SystemExit(_format_ble_unavailable(exc)) from exc
 
+    started: list[tuple[BleakScanner, str]] = []
     try:
-        for scanner in scanners:
-            await scanner.__aenter__()
+        for scanner, adapter in zip(scanners, adapter_list):
+            label = adapter or "default"
+            try:
+                await scanner.start()
+            except BleakError as exc:
+                if _is_bluez_in_progress(exc):
+                    raise SystemExit(
+                        "BLE discovery failed: BlueZ reports InProgress.\n"
+                        "Another process is likely already scanning "
+                        "(govee-charts service or bluetoothctl).\n"
+                        "Stop it first, e.g.: sudo systemctl stop govee-charts"
+                    ) from exc
+                raise SystemExit(_format_ble_unavailable(exc)) from exc
+            started.append((scanner, label))
         await asyncio.sleep(duration)
-    except BleakError as exc:
-        raise SystemExit(_format_ble_unavailable(exc)) from exc
     finally:
-        for scanner in reversed(scanners):
-            await scanner.__aexit__(None, None, None)
+        for scanner, label in reversed(started):
+            await _stop_scanner(scanner, label)
 
     if not found:
         logger.warning(
