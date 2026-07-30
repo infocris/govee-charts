@@ -42,7 +42,12 @@ class PeerPublisher:
         headers = {}
         if self.token:
             headers["X-Govee-Token"] = self.token
-        self._client = httpx.AsyncClient(timeout=self.timeout, headers=headers)
+        self._client = httpx.AsyncClient(
+            timeout=self.timeout,
+            headers=headers,
+            # LAN peers often use self-signed certs
+            verify=False,
+        )
         self._task = asyncio.create_task(self._worker(), name="federation-publisher")
         logger.info(
             "Federation publisher → %s (node_id=%s)",

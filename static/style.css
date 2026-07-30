@@ -112,6 +112,29 @@ body {
   border-color: var(--accent);
 }
 
+.restart-btn {
+  margin-left: auto;
+  color: var(--muted) !important;
+  border-color: var(--line) !important;
+  background: transparent !important;
+}
+
+.restart-btn:hover {
+  color: var(--ink) !important;
+  border-color: var(--muted) !important;
+}
+
+.restart-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.restart-status {
+  margin: 0.55rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 main {
   max-width: 1100px;
   margin: 0 auto;
@@ -166,6 +189,82 @@ main {
   color: var(--bg);
   background: var(--accent);
   border-color: var(--accent);
+}
+
+.category-filters {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.75rem 0 1.25rem;
+}
+
+.category-filters-inline {
+  margin: 0.55rem 0 0.75rem;
+}
+
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.filter-row::before {
+  content: attr(data-label);
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  min-width: 3.5rem;
+}
+
+.filter-row button {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.35rem 0.65rem;
+  font: inherit;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.filter-row button:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+.filter-row button.active {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.cat-select {
+  appearance: none;
+  background: var(--bg-elev);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0.35rem 0.45rem;
+  font: inherit;
+  font-size: 0.85rem;
+  min-width: 6.5rem;
+  max-width: 8.5rem;
+}
+
+.cat-select:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+
+.overview-table td.cat-cell {
+  vertical-align: middle;
+}
+
+.overview-hint {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .overview-table-wrap {
@@ -435,11 +534,66 @@ main {
   border-color: var(--accent);
 }
 
+.forecast-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.forecast-toggle input {
+  accent-color: var(--accent);
+}
+
+.locate-btn {
+  align-self: center;
+}
+
+.geo-status {
+  align-self: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .current {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.projections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem 1rem;
   margin-bottom: 1.75rem;
+  padding-top: 0.25rem;
+}
+
+.projection-card {
+  border-top: 1px dashed var(--device-color, var(--line));
+  padding-top: 0.55rem;
+}
+
+.projection-card h4 {
+  margin: 0 0 0.35rem;
+  font-family: var(--font-display);
+  font-size: 0.98rem;
+  font-weight: 500;
+}
+
+.projection-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.projection-weather {
+  border-top-style: solid;
+  border-top-color: #c5c9c4;
 }
 
 .device-current {

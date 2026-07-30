@@ -15,6 +15,8 @@
   const rangeButtons = [...document.querySelectorAll(".ranges button")];
   const viewButtons = [...document.querySelectorAll(".views [data-view]")];
   const sortButtons = [...document.querySelectorAll(".sort-btn")];
+  const restartBtn = document.getElementById("restart-btn");
+  const restartStatusEl = document.getElementById("restart-status");
 
   const PALETTE = [
     "#e8a87c",
@@ -31,19 +33,39 @@
   const VIEW_KEY = "govee-charts.view";
   const MODEL_KEY = "govee-charts.model";
   const SORT_KEY = "govee-charts.sort";
+  const FORECAST_KEY = "govee-charts.forecast";
+  const GEO_KEY = "govee-charts.geo";
+  const CAT_FILTER_KEY = "govee-charts.catFilters";
 
   let hours = 24;
   let devices = [];
+  let taxonomyData = { zones: [], heights: [], rooms: [] };
   let selected = new Set();
   let modelFilter = localStorage.getItem(MODEL_KEY) || "all";
+  let catFilters = loadCatFilters();
   let sortState = loadSortState();
   let currentView = localStorage.getItem(VIEW_KEY) === "compare" ? "compare" : "overview";
+  let showForecast = localStorage.getItem(FORECAST_KEY) !== "0";
+  /** @type {{latitude:number, longitude:number, accuracy?:number, at?:number}|null} */
+  let browserGeo = loadStoredGeo();
+  let geoStatus = browserGeo ? "cached" : "idle";
   let tempChart = null;
   let humChart = null;
+  let dewChart = null;
   let historyLoaded = false;
   let localNodeId = "";
   /** @type {Map<string, string>} node_id → url */
   let peerByNodeId = new Map();
+  const showForecastEl = document.getElementById("show-forecast");
+  const projectionsEl = document.getElementById("projections");
+  const locateBtn = document.getElementById("locate-btn");
+  const geoStatusEl = document.getElementById("geo-status");
+  const zoneFiltersEl = document.getElementById("zone-filters");
+  const heightFiltersEl = document.getElementById("height-filters");
+  const roomFiltersEl = document.getElementById("room-filters");
+  const compareZoneFiltersEl = document.getElementById("compare-zone-filters");
+  const compareHeightFiltersEl = document.getElementById("compare-height-filters");
+  const compareRoomFiltersEl = document.getElementById("compare-room-filters");
 
   const chartDefaults = {
     responsive: true,
@@ -84,6 +106,146 @@
       },
     },
   };
+
+  function loadStoredGeo() {
+    try {
+      const raw = localStorage.getItem(GEO_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (
+        !parsed ||
+        typeof parsed.latitude !== "number" ||
+        typeof parsed.longitude !== "number"
+      ) {
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  function persistGeo(geo) {
+    browserGeo = geo;
+    if (geo) {
+      localStorage.setItem(GEO_KEY, JSON.stringify(geo));
+    } else {
+      localStorage.removeItem(GEO_KEY);
+    }
+    updateGeoStatus();
+  }
+
+  function updateGeoStatus() {
+    if (!geoStatusEl) return;
+    if (!showForecast) {
+      geoStatusEl.textContent = "";
+      return;
+    }
+    if (geoStatus === "pending") {
+      geoStatusEl.textContent = "Locating…";
+      return;
+    }
+    if (geoStatus === "denied") {
+      geoStatusEl.textContent = "Location denied — using config fallback";
+      return;
+    }
+    if (geoStatus === "unavailable") {
+      geoStatusEl.textContent =
+        "Geolocation unavailable (needs HTTPS or localhost)";
+      return;
+    }
+    if (geoStatus === "error") {
+      geoStatusEl.textContent = "Location failed — using config fallback";
+      return;
+    }
+    if (browserGeo) {
+      geoStatusEl.textContent = `GPS ${browserGeo.latitude.toFixed(3)}, ${browserGeo.longitude.toFixed(3)}`;
+      return;
+    }
+    geoStatusEl.textContent = "No GPS — config fallback";
+  }
+
+  function requestBrowserGeo(force = false) {
+    return new Promise((resolve) => {
+      if (!showForecast) {
+        resolve(browserGeo);
+        return;
+      }
+      if (!force && browserGeo && browserGeo.at && Date.now() - browserGeo.at < 30 * 60 * 1000) {
+        geoStatus = "cached";
+        updateGeoStatus();
+        resolve(browserGeo);
+        return;
+      }
+      if (!navigator.geolocation) {
+        geoStatus = "unavailable";
+        updateGeoStatus();
+        resolve(null);
+        return;
+      }
+      // Non-secure LAN origins (http://192.168.x) usually block geolocation.
+      if (
+        typeof window.isSecureContext === "boolean" &&
+        !window.isSecureContext &&
+        location.hostname !== "localhost" &&
+        location.hostname !== "127.0.0.1"
+      ) {
+        geoStatus = "unavailable";
+        updateGeoStatus();
+        resolve(browserGeo);
+        return;
+      }
+
+      geoStatus = "pending";
+      updateGeoStatus();
+      if (locateBtn) locateBtn.disabled = true;
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const geo = {
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+            accuracy: pos.coords.accuracy,
+            at: Date.now(),
+          };
+          geoStatus = "ok";
+          persistGeo(geo);
+          if (locateBtn) locateBtn.disabled = false;
+          resolve(geo);
+        },
+        (err) => {
+          geoStatus = err && err.code === 1 ? "denied" : "error";
+          updateGeoStatus();
+          if (locateBtn) locateBtn.disabled = false;
+          resolve(browserGeo);
+        },
+        {
+          enableHighAccuracy: false,
+          timeout: 12000,
+          maximumAge: 15 * 60 * 1000,
+        }
+      );
+    });
+  }
+
+  function loadCatFilters() {
+    try {
+      const raw = localStorage.getItem(CAT_FILTER_KEY);
+      if (!raw) return { zone: "all", height: "all", room: "all" };
+      const parsed = JSON.parse(raw);
+      return {
+        zone: parsed.zone || "all",
+        height: parsed.height || "all",
+        room: parsed.room || "all",
+      };
+    } catch {
+      return { zone: "all", height: "all", room: "all" };
+    }
+  }
+
+  function persistCatFilters() {
+    localStorage.setItem(CAT_FILTER_KEY, JSON.stringify(catFilters));
+  }
 
   function loadPersistedSelection() {
     try {
@@ -204,8 +366,21 @@
   }
 
   function filteredDevices() {
-    if (modelFilter === "all") return devices;
-    return devices.filter((d) => (d.model || "").toLowerCase() === modelFilter);
+    return devices.filter((d) => {
+      if (modelFilter !== "all" && (d.model || "").toLowerCase() !== modelFilter) {
+        return false;
+      }
+      if (catFilters.zone !== "all" && (d.zone || "") !== catFilters.zone) {
+        return false;
+      }
+      if (catFilters.height !== "all" && (d.height || "") !== catFilters.height) {
+        return false;
+      }
+      if (catFilters.room !== "all" && (d.room || "") !== catFilters.room) {
+        return false;
+      }
+      return true;
+    });
   }
 
   function colorFor(address) {
@@ -248,6 +423,9 @@
   function sortValue(device, key) {
     if (key === "name") return (device.name || "").toLowerCase();
     if (key === "last_source") return (device.last_source || "").toLowerCase();
+    if (key === "zone" || key === "height" || key === "room") {
+      return (device[key] || "").toLowerCase();
+    }
     if (key === "last_reading_ts") {
       return device.last_reading_ts ?? device.last_seen ?? null;
     }
@@ -325,6 +503,112 @@
   function syncModelFilterButtons() {
     renderModelFilters(modelFiltersEl);
     renderModelFilters(compareModelFiltersEl);
+    renderAllCategoryFilters();
+  }
+
+  function categoryLabel(kind, id) {
+    if (!id) return "—";
+    const list =
+      kind === "zone"
+        ? taxonomyData.zones
+        : kind === "height"
+          ? taxonomyData.heights
+          : taxonomyData.rooms;
+    const hit = (list || []).find((x) => x.id === id);
+    return hit ? hit.label : id;
+  }
+
+  function renderCategoryFilterRow(container, kind, options) {
+    if (!container) return;
+    container.dataset.label =
+      kind === "zone" ? "Zone" : kind === "height" ? "Height" : "Room";
+    container.innerHTML = "";
+    const items = [{ id: "all", label: "All" }].concat(options || []);
+    for (const opt of items) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.dataset.value = opt.id;
+      btn.textContent = opt.label;
+      btn.classList.toggle("active", catFilters[kind] === opt.id);
+      btn.addEventListener("click", () => {
+        if (catFilters[kind] === opt.id) return;
+        catFilters[kind] = opt.id;
+        persistCatFilters();
+        renderAllCategoryFilters();
+        fillDeviceList();
+        updateOverview();
+        updateCurrent();
+        if (currentView === "compare") {
+          loadHistory().catch((err) => {
+            statusEl.textContent = `Error: ${err.message}`;
+          });
+        }
+      });
+      container.appendChild(btn);
+    }
+  }
+
+  function renderAllCategoryFilters() {
+    renderCategoryFilterRow(zoneFiltersEl, "zone", taxonomyData.zones);
+    renderCategoryFilterRow(heightFiltersEl, "height", taxonomyData.heights);
+    renderCategoryFilterRow(roomFiltersEl, "room", taxonomyData.rooms);
+    renderCategoryFilterRow(compareZoneFiltersEl, "zone", taxonomyData.zones);
+    renderCategoryFilterRow(compareHeightFiltersEl, "height", taxonomyData.heights);
+    renderCategoryFilterRow(compareRoomFiltersEl, "room", taxonomyData.rooms);
+  }
+
+  function makeCategorySelect(device, field, options) {
+    const select = document.createElement("select");
+    select.className = "cat-select";
+    select.dataset.address = device.address;
+    select.dataset.field = field;
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "—";
+    select.appendChild(empty);
+    for (const opt of options || []) {
+      const option = document.createElement("option");
+      option.value = opt.id;
+      option.textContent = opt.label;
+      select.appendChild(option);
+    }
+    select.value = device[field] || "";
+    select.addEventListener("click", (ev) => ev.stopPropagation());
+    select.addEventListener("mousedown", (ev) => ev.stopPropagation());
+    select.addEventListener("change", async (ev) => {
+      ev.stopPropagation();
+      const value = select.value === "" ? null : select.value;
+      select.disabled = true;
+      try {
+        const res = await fetch(
+          `/api/devices/${encodeURIComponent(device.address)}/categories`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ [field]: value }),
+          }
+        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${res.status}`);
+        }
+        const updated = await res.json();
+        const idx = devices.findIndex((d) => d.address === device.address);
+        if (idx >= 0) {
+          devices[idx] = { ...devices[idx], ...updated };
+        }
+        fillDeviceList();
+        updateOverview();
+        updateCurrent();
+      } catch (err) {
+        console.error(err);
+        select.value = device[field] || "";
+        overviewStatus.textContent = `Category update failed: ${err.message}`;
+      } finally {
+        select.disabled = false;
+      }
+    });
+    return select;
   }
 
   function setView(view) {
@@ -345,11 +629,23 @@
     } else if (!isOverview && tempChart && humChart) {
       tempChart.resize();
       humChart.resize();
+      if (dewChart) dewChart.resize();
     }
   }
 
+  /**
+   * Magnus formula (August-Roche-Magnus approximation).
+   * Returns dew point in °C.  Valid for −40 … +60 °C, 1 … 100 % RH.
+   */
+  function dewPoint(tempC, rh) {
+    const a = 17.625;
+    const b = 243.04; // °C
+    const alpha = (a * tempC) / (b + tempC) + Math.log(rh / 100.0);
+    return (b * alpha) / (a - alpha);
+  }
+
   function ensureCharts() {
-    if (tempChart && humChart) return;
+    if (tempChart && humChart && dewChart) return;
     tempChart = new Chart(document.getElementById("temp-chart"), {
       type: "line",
       data: { datasets: [] },
@@ -360,9 +656,14 @@
       data: { datasets: [] },
       options: structuredClone(chartDefaults),
     });
+    dewChart = new Chart(document.getElementById("dew-chart"), {
+      type: "line",
+      data: { datasets: [] },
+      options: structuredClone(chartDefaults),
+    });
   }
 
-  function makeDataset(label, color, data, fill) {
+  function makeDataset(label, color, data, fill, extra = {}) {
     return {
       label,
       data,
@@ -372,7 +673,84 @@
       tension: 0.25,
       pointRadius: 0,
       borderWidth: 2,
+      borderDash: [],
+      spanGaps: true,
+      ...extra,
     };
+  }
+
+  function clearProjections() {
+    if (!projectionsEl) return;
+    projectionsEl.hidden = true;
+    projectionsEl.innerHTML = "";
+  }
+
+  function renderProjections(forecast) {
+    if (!projectionsEl) return;
+    if (!showForecast || !forecast || !forecast.enabled) {
+      clearProjections();
+      return;
+    }
+
+    const cards = [];
+    const loc = forecast.location;
+    if (loc && (forecast.outdoor || []).length) {
+      const temps = forecast.outdoor.map((p) => p.temperature_c);
+      const hums = forecast.outdoor.map((p) => p.humidity);
+      const where = [loc.name, loc.admin1].filter(Boolean).join(", ");
+      cards.push(`
+        <article class="projection-card projection-weather">
+          <h4>Weather · ${escapeHtml(where || "Open-Meteo")}</h4>
+          <p class="projection-meta">
+            Temp ${Math.min(...temps).toFixed(1)}–${Math.max(...temps).toFixed(1)} °C
+            · Hum ${Math.min(...hums).toFixed(0)}–${Math.max(...hums).toFixed(0)} %
+            · next ${hours} h
+          </p>
+        </article>
+      `);
+    }
+
+    const projections = forecast.projections || {};
+    for (const device of selectedDevices()) {
+      const proj = projections[device.address];
+      if (!proj || !proj.summary) continue;
+      const s = proj.summary;
+      cards.push(`
+        <article class="projection-card" style="--device-color:${colorFor(device.address)}">
+          <h4>${escapeHtml(deviceLabel(device))} · projected</h4>
+          <p class="projection-meta">
+            Temp ${s.temp_min.toFixed(1)}–${s.temp_max.toFixed(1)} °C
+            · Hum ${s.humidity_min.toFixed(0)}–${s.humidity_max.toFixed(0)} %
+            · bias ${proj.bias_temp >= 0 ? "+" : ""}${proj.bias_temp.toFixed(1)} °C
+          </p>
+        </article>
+      `);
+    }
+
+    if (!cards.length) {
+      clearProjections();
+      return;
+    }
+    projectionsEl.hidden = false;
+    projectionsEl.innerHTML = cards.join("");
+  }
+
+  async function fetchForecast(addresses) {
+    if (!showForecast) {
+      return { enabled: false, outdoor: [], projections: {} };
+    }
+    await requestBrowserGeo(false);
+    const params = new URLSearchParams({ hours: String(hours) });
+    for (const address of addresses) {
+      params.append("address", address);
+    }
+    if (browserGeo) {
+      params.set("latitude", String(browserGeo.latitude));
+      params.set("longitude", String(browserGeo.longitude));
+    }
+    const res = await fetch(`/api/forecast?${params}`);
+    if (!res.ok) throw new Error(`forecast HTTP ${res.status}`);
+    return res.json();
   }
 
   function updateOverview() {
@@ -381,14 +759,14 @@
     const visible = filteredDevices();
     if (!devices.length) {
       overviewBody.innerHTML =
-        '<tr><td colspan="6" class="overview-empty">No devices detected</td></tr>';
+        '<tr><td colspan="9" class="overview-empty">No devices detected</td></tr>';
       overviewStatus.textContent = "Waiting for BLE devices…";
       return;
     }
     if (!visible.length) {
       overviewBody.innerHTML =
-        '<tr><td colspan="6" class="overview-empty">No sensors for this model</td></tr>';
-      overviewStatus.textContent = `0 / ${devices.length} sensor(s) · filter ${modelFilter}`;
+        '<tr><td colspan="9" class="overview-empty">No sensors for these filters</td></tr>';
+      overviewStatus.textContent = `0 / ${devices.length} sensor(s) · filters active`;
       return;
     }
 
@@ -397,21 +775,50 @@
       const tr = document.createElement("tr");
       tr.style.setProperty("--device-color", colorFor(device.address));
       const source = device.last_source || "—";
-      tr.innerHTML = `
-        <td>
-          <span class="overview-name">
-            <span class="device-swatch" aria-hidden="true"></span>
-            ${escapeHtml(deviceLabel(device))}
-          </span>
-          <span class="overview-meta">${escapeHtml(device.model)} · ${escapeHtml(device.address)}</span>
-        </td>
-        <td class="num temp">${fmtNum(device.temperature_c, 1, " °C")}</td>
-        <td class="num">${fmtNum(device.humidity, 1, " %")}</td>
-        <td class="num">${device.battery != null ? `${device.battery} %` : "—"}</td>
-        <td class="overview-source">${sourceHtml(source)}</td>
-        <td>${fmtTime(device.last_reading_ts || device.last_seen)}</td>
+
+      const nameTd = document.createElement("td");
+      nameTd.innerHTML = `
+        <span class="overview-name">
+          <span class="device-swatch" aria-hidden="true"></span>
+          ${escapeHtml(deviceLabel(device))}
+        </span>
+        <span class="overview-meta">${escapeHtml(device.model)} · ${escapeHtml(device.address)}</span>
       `;
-      tr.addEventListener("click", () => {
+
+      const zoneTd = document.createElement("td");
+      zoneTd.className = "cat-cell";
+      zoneTd.appendChild(makeCategorySelect(device, "zone", taxonomyData.zones));
+
+      const heightTd = document.createElement("td");
+      heightTd.className = "cat-cell";
+      heightTd.appendChild(makeCategorySelect(device, "height", taxonomyData.heights));
+
+      const roomTd = document.createElement("td");
+      roomTd.className = "cat-cell";
+      roomTd.appendChild(makeCategorySelect(device, "room", taxonomyData.rooms));
+
+      const tempTd = document.createElement("td");
+      tempTd.className = "num temp";
+      tempTd.textContent = fmtNum(device.temperature_c, 1, " °C");
+
+      const humTd = document.createElement("td");
+      humTd.className = "num";
+      humTd.textContent = fmtNum(device.humidity, 1, " %");
+
+      const battTd = document.createElement("td");
+      battTd.className = "num";
+      battTd.textContent = device.battery != null ? `${device.battery} %` : "—";
+
+      const sourceTd = document.createElement("td");
+      sourceTd.className = "overview-source";
+      sourceTd.innerHTML = sourceHtml(source);
+
+      const timeTd = document.createElement("td");
+      timeTd.textContent = fmtTime(device.last_reading_ts || device.last_seen);
+
+      tr.append(nameTd, zoneTd, heightTd, roomTd, tempTd, humTd, battTd, sourceTd, timeTd);
+      tr.addEventListener("click", (ev) => {
+        if (ev.target.closest("select, a, button")) return;
         selected = new Set([device.address]);
         persistSelection();
         fillDeviceList();
@@ -431,10 +838,18 @@
       temps.length >= 2
         ? ` · Δ ${(Math.max(...temps) - Math.min(...temps)).toFixed(1)} °C`
         : "";
-    const filterNote =
-      modelFilter === "all" ? "" : ` · ${modelFilter.toUpperCase()}`;
+    const activeCats = ["zone", "height", "room"]
+      .filter((k) => catFilters[k] !== "all")
+      .map((k) => catFilters[k]);
+    const filterNote = [
+      modelFilter === "all" ? "" : modelFilter.toUpperCase(),
+      ...activeCats,
+    ]
+      .filter(Boolean)
+      .join(" · ");
     overviewStatus.textContent =
-      `${ranked.length}${modelFilter === "all" ? "" : ` / ${devices.length}`} sensor(s)${filterNote}${span} · updated ${new Date().toLocaleTimeString("en-GB")}`;
+      `${ranked.length}${ranked.length === devices.length ? "" : ` / ${devices.length}`} sensor(s)` +
+      `${filterNote ? ` · ${filterNote}` : ""}${span} · updated ${new Date().toLocaleTimeString("en-GB")}`;
   }
 
   function updateCurrent() {
@@ -464,6 +879,14 @@
           <div class="metric">
             <span class="metric-label">Humidity</span>
             <span class="metric-value">${fmtNum(device.humidity, 1, " %")}</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Dew point</span>
+            <span class="metric-value">${
+              device.temperature_c != null && device.humidity != null && device.humidity > 0
+                ? fmtNum(dewPoint(device.temperature_c, device.humidity), 1, " °C")
+                : "—"
+            }</span>
           </div>
           <div class="metric">
             <span class="metric-label">Battery</span>
@@ -534,7 +957,14 @@
 
       const text = document.createElement("span");
       text.className = "device-item-text";
-      text.textContent = `${d.name} (${d.model})`;
+      const bits = [
+        categoryLabel("zone", d.zone),
+        categoryLabel("height", d.height),
+        categoryLabel("room", d.room),
+      ].filter((x) => x && x !== "—");
+      text.textContent = bits.length
+        ? `${d.name} (${bits.join(" · ")})`
+        : `${d.name} (${d.model})`;
 
       label.append(input, swatch, text);
       deviceList.appendChild(label);
@@ -544,9 +974,15 @@
   }
 
   async function loadDevices() {
-    const res = await fetch("/api/devices");
-    if (!res.ok) throw new Error(`devices HTTP ${res.status}`);
-    devices = await res.json();
+    const [devicesRes, taxRes] = await Promise.all([
+      fetch("/api/devices"),
+      fetch("/api/categories"),
+    ]);
+    if (!devicesRes.ok) throw new Error(`devices HTTP ${devicesRes.status}`);
+    devices = await devicesRes.json();
+    if (taxRes.ok) {
+      taxonomyData = await taxRes.json();
+    }
     syncModelFilterButtons();
     fillDeviceList();
     updateOverview();
@@ -567,22 +1003,31 @@
     if (!picked.length) {
       tempChart.data.datasets = [];
       humChart.data.datasets = [];
+      dewChart.data.datasets = [];
       tempChart.update();
       humChart.update();
+      dewChart.update();
+      clearProjections();
       statusEl.textContent = "Select at least one device…";
       historyLoaded = true;
       return;
     }
 
-    const results = await Promise.all(
-      picked.map(async (device) => {
-        const payload = await fetchHistory(device.address);
-        return { device, points: payload.points || [] };
-      })
-    );
+    const [results, forecast] = await Promise.all([
+      Promise.all(
+        picked.map(async (device) => {
+          const payload = await fetchHistory(device.address);
+          return { device, points: payload.points || [] };
+        })
+      ),
+      fetchForecast(picked.map((d) => d.address)).catch((err) => {
+        console.warn(err);
+        return { enabled: false, outdoor: [], projections: {}, error: err.message };
+      }),
+    ]);
 
     const multi = results.length > 1;
-    tempChart.data.datasets = results.map(({ device, points }) => {
+    const tempDatasets = results.map(({ device, points }) => {
       const color = colorFor(device.address);
       return makeDataset(
         deviceLabel(device),
@@ -591,7 +1036,7 @@
         !multi
       );
     });
-    humChart.data.datasets = results.map(({ device, points }) => {
+    const humDatasets = results.map(({ device, points }) => {
       const color = colorFor(device.address);
       return makeDataset(
         deviceLabel(device),
@@ -600,16 +1045,118 @@
         !multi
       );
     });
-    tempChart.options.plugins.legend.display = multi;
-    humChart.options.plugins.legend.display = multi;
+    const dewDatasets = results.map(({ device, points }) => {
+      const color = colorFor(device.address);
+      return makeDataset(
+        deviceLabel(device),
+        color,
+        points
+          .filter((p) => p.temperature_c != null && p.humidity != null && p.humidity > 0)
+          .map((p) => ({ x: p.ts * 1000, y: dewPoint(p.temperature_c, p.humidity) })),
+        !multi
+      );
+    });
+
+    if (forecast && forecast.enabled) {
+      const outdoor = forecast.outdoor || [];
+      if (outdoor.length) {
+        const weatherColor = "#c5c9c4";
+        const locName = (forecast.location && forecast.location.name) || "Weather";
+        tempDatasets.push(
+          makeDataset(
+            `${locName} (forecast)`,
+            weatherColor,
+            outdoor.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+            false,
+            { borderDash: [6, 4], borderWidth: 1.75 }
+          )
+        );
+        humDatasets.push(
+          makeDataset(
+            `${locName} (forecast)`,
+            weatherColor,
+            outdoor.map((p) => ({ x: p.ts * 1000, y: p.humidity })),
+            false,
+            { borderDash: [6, 4], borderWidth: 1.75 }
+          )
+        );
+        dewDatasets.push(
+          makeDataset(
+            `${locName} (forecast)`,
+            weatherColor,
+            outdoor
+              .filter((p) => p.humidity > 0)
+              .map((p) => ({ x: p.ts * 1000, y: dewPoint(p.temperature_c, p.humidity) })),
+            false,
+            { borderDash: [6, 4], borderWidth: 1.75 }
+          )
+        );
+      }
+
+      const projections = forecast.projections || {};
+      for (const { device } of results) {
+        const proj = projections[device.address];
+        if (!proj || !(proj.points || []).length) continue;
+        const color = colorFor(device.address);
+        tempDatasets.push(
+          makeDataset(
+            `${deviceLabel(device)} (proj.)`,
+            color,
+            proj.points.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+            false,
+            { borderDash: [2, 4], borderWidth: 1.5 }
+          )
+        );
+        humDatasets.push(
+          makeDataset(
+            `${deviceLabel(device)} (proj.)`,
+            color,
+            proj.points.map((p) => ({ x: p.ts * 1000, y: p.humidity })),
+            false,
+            { borderDash: [2, 4], borderWidth: 1.5 }
+          )
+        );
+        dewDatasets.push(
+          makeDataset(
+            `${deviceLabel(device)} (proj.)`,
+            color,
+            proj.points
+              .filter((p) => p.humidity > 0)
+              .map((p) => ({ x: p.ts * 1000, y: dewPoint(p.temperature_c, p.humidity) })),
+            false,
+            { borderDash: [2, 4], borderWidth: 1.5 }
+          )
+        );
+      }
+    }
+
+    tempChart.data.datasets = tempDatasets;
+    humChart.data.datasets = humDatasets;
+    dewChart.data.datasets = dewDatasets;
+    const showLegend = tempDatasets.length > 1;
+    tempChart.options.plugins.legend.display = showLegend;
+    humChart.options.plugins.legend.display = showLegend;
+    dewChart.options.plugins.legend.display = showLegend;
     tempChart.update();
     humChart.update();
+    dewChart.update();
+    renderProjections(forecast);
     historyLoaded = true;
 
     const totalPoints = results.reduce((n, r) => n + r.points.length, 0);
     const names = results.map((r) => deviceLabel(r.device)).join(", ");
+    let extra = "";
+    if (forecast && forecast.enabled && forecast.location) {
+      const src = forecast.location.source === "browser" ? "GPS" : "config";
+      const cache = forecast.cache_hit ? (forecast.stale ? ", stale cache" : ", cached") : "";
+      extra = ` · forecast ${forecast.location.name} (${src}${cache})`;
+    } else if (forecast && forecast.error) {
+      extra = ` · forecast off (${forecast.error})`;
+    } else if (showForecast && forecast && !forecast.enabled) {
+      extra = " · forecast off (allow location or set [weather] place)";
+    }
     statusEl.textContent =
-      `${names} · ${totalPoints} point(s) · window ${hours} h · updated ` +
+      `${names} · ${totalPoints} point(s) · window ${hours} h${extra} · updated ` +
       new Date().toLocaleTimeString("en-GB");
   }
 
@@ -698,6 +1245,102 @@
     });
   });
 
+  if (showForecastEl) {
+    showForecastEl.checked = showForecast;
+    showForecastEl.addEventListener("change", () => {
+      showForecast = showForecastEl.checked;
+      localStorage.setItem(FORECAST_KEY, showForecast ? "1" : "0");
+      if (!showForecast) clearProjections();
+      updateGeoStatus();
+      if (currentView === "compare") {
+        loadHistory().catch((err) => {
+          statusEl.textContent = `Error: ${err.message}`;
+        });
+      }
+    });
+  }
+
+  if (locateBtn) {
+    locateBtn.addEventListener("click", () => {
+      requestBrowserGeo(true)
+        .then(() => {
+          if (currentView === "compare" && showForecast) {
+            return loadHistory();
+          }
+        })
+        .catch((err) => {
+          statusEl.textContent = `Error: ${err.message}`;
+        });
+    });
+  }
+
+  async function waitForHealth(timeoutMs = 45000) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        const res = await fetch("/api/health", { cache: "no-store" });
+        if (res.ok) return true;
+      } catch {
+        // still down
+      }
+    }
+    return false;
+  }
+
+  if (restartBtn) {
+    restartBtn.addEventListener("click", async () => {
+      if (
+        !window.confirm(
+          "Restart Govee Charts now? The page will reload when the service is back."
+        )
+      ) {
+        return;
+      }
+      restartBtn.disabled = true;
+      if (restartStatusEl) {
+        restartStatusEl.hidden = false;
+        restartStatusEl.textContent = "Restarting…";
+      }
+      try {
+        const res = await fetch("/api/restart", { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        if (restartStatusEl) {
+          restartStatusEl.textContent = data.message || "Restarting…";
+        }
+        const ok = await waitForHealth();
+        if (ok) {
+          if (restartStatusEl) restartStatusEl.textContent = "Back online — reloading…";
+          window.location.reload();
+          return;
+        }
+        if (restartStatusEl) {
+          restartStatusEl.textContent =
+            "Service did not come back — if not under systemd, start it manually.";
+        }
+      } catch (err) {
+        // Expected while the process is down
+        if (restartStatusEl) {
+          restartStatusEl.textContent = "Waiting for service…";
+        }
+        const ok = await waitForHealth();
+        if (ok) {
+          window.location.reload();
+          return;
+        }
+        if (restartStatusEl) {
+          restartStatusEl.textContent = `Restart failed: ${err.message}`;
+        }
+      } finally {
+        restartBtn.disabled = false;
+      }
+    });
+  }
+
+  updateGeoStatus();
   setView(currentView);
   refresh();
   setInterval(refresh, 30000);

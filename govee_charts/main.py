@@ -22,12 +22,22 @@ from govee_charts.api import create_app
 from govee_charts.db import Database
 from govee_charts.federation import PeerPublisher
 from govee_charts.scanner import GoveeScanner, discover_once
+from govee_charts.sslutil import resolve_ssl_files
+from govee_charts.weather import WeatherConfig, WeatherService
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.toml"
 
 DEFAULTS: dict[str, Any] = {
-    "server": {"host": "127.0.0.1", "port": 8080},
+    "server": {
+        "host": "127.0.0.1",
+        "port": 8080,
+        "ssl": False,
+        "ssl_port": 8081,
+        "ssl_auto_generate": True,
+        "certfile": "data/ssl/cert.pem",
+        "keyfile": "data/ssl/key.pem",
+    },
     "scanner": {
         "enabled": True,
         "active": True,
@@ -42,6 +52,16 @@ DEFAULTS: dict[str, Any] = {
         "node_id": "",
         "token": "",
         "peers": [],
+    },
+    "weather": {
+        "enabled": False,
+        "place": "",
+        "latitude": None,
+        "longitude": None,
+        "timezone": "Europe/Paris",
+        "cache_seconds": 1800,
+        "forecast_hours": 48,
+        "cache_path": "data/weather_cache.json",
     },
     "labels": {},
 }
@@ -128,6 +148,9 @@ def parse_args() -> argparse.Namespace:
 async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> None:
     db = Database(resolve_db_path(cfg))
     await db.connect()
+    seeded = await db.seed_categories_from_names()
+    if seeded:
+        logging.info("Inferred categories for %d device(s) from labels", seeded)
 
     suffix_map = build_suffix_map(cfg["labels"])
     suffix_map.update(await db.suffix_map_from_devices())
@@ -159,6 +182,31 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     else:
         logging.info("BLE scanner disabled (scanner.enabled=false or --no-scanner)")
 
+    weather_cfg = WeatherConfig.from_dict(cfg.get("weather"))
+    weather = WeatherService(weather_cfg)
+    if weather.enabled:
+        if weather.has_config_location:
+            loc = weather_cfg.place or (
+                f"{weather_cfg.latitude},{weather_cfg.longitude}"
+            )
+            logging.info(
+                "Weather forecast enabled (config=%s, browser geolocation OK)",
+                loc,
+            )
+        else:
+            logging.info(
+                "Weather forecast enabled (browser geolocation; optional [weather] place fallback)"
+            )
+    else:
+        logging.info("Weather forecast disabled (set weather.enabled=true)")
+
+    servers: list[uvicorn.Server] = []
+
+    def request_restart() -> None:
+        logging.warning("Stopping HTTP listeners for restart")
+        for server in servers:
+            server.should_exit = True
+
     app = create_app(
         db,
         labels=cfg["labels"],
@@ -166,28 +214,63 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         node_id=fed["node_id"],
         peers=fed["peers"],
         suffix_map=suffix_map,
+        weather=weather,
+        on_restart=request_restart,
     )
 
     host = str(cfg["server"]["host"])
     port = int(cfg["server"]["port"])
-    config = uvicorn.Config(
+    ssl_port = int(cfg["server"].get("ssl_port") or 8081)
+    certfile, keyfile = resolve_ssl_files(cfg["server"])
+    display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+
+    http_config = uvicorn.Config(
         app,
         host=host,
         port=port,
         log_level="info",
         access_log=False,
     )
-    server = uvicorn.Server(config)
+    http_server = uvicorn.Server(http_config)
+    servers.append(http_server)
 
     logging.info(
         "Web UI on http://%s:%d (node_id=%s)",
-        host,
+        display_host,
         port,
         fed["node_id"],
     )
 
+    if certfile and keyfile:
+        https_config = uvicorn.Config(
+            app,
+            host=host,
+            port=ssl_port,
+            log_level="info",
+            access_log=False,
+            ssl_certfile=str(certfile),
+            ssl_keyfile=str(keyfile),
+        )
+        servers.append(uvicorn.Server(https_config))
+        logging.info(
+            "Web UI on https://%s:%d (TLS self-signed)",
+            display_host,
+            ssl_port,
+        )
+        logging.info(
+            "Accept the browser certificate warning once — needed for geolocation on LAN"
+        )
+
+    async def _serve(server: uvicorn.Server) -> None:
+        try:
+            await server.serve()
+        finally:
+            # If one listener stops, tear down the other(s)
+            for other in servers:
+                other.should_exit = True
+
     try:
-        await server.serve()
+        await asyncio.gather(*(_serve(s) for s in servers))
     finally:
         stop_event.set()
         if scan_task is not None:

@@ -6,7 +6,7 @@ PY          := $(BIN)/python
 MODULE      := -m govee_charts.main
 UNAME_S     := $(shell uname -s)
 
-.PHONY: help install venv deps config run serve discover \
+.PHONY: help install venv deps config run serve discover ssl \
 	systemd-install systemd-uninstall systemd-restart systemd-status \
 	launchd-install launchd-uninstall launchd-restart launchd-status \
 	restart service-status
@@ -14,7 +14,8 @@ UNAME_S     := $(shell uname -s)
 help:
 	@echo "Targets:"
 	@echo "  make install            Create venv, install deps, copy config if missing"
-	@echo "  make run                Run BLE collector + web UI (http://127.0.0.1:8080)"
+	@echo "  make ssl                Generate self-signed TLS cert (data/ssl/)"
+	@echo "  make run                Run BLE collector + web UI"
 	@echo "  make serve              Run web UI only (no BLE scanner)"
 	@echo "  make discover           Scan BLE Govee devices for 30s then exit"
 	@echo "  make systemd-install    Install systemd service (Linux, sudo, starts on boot)"
@@ -47,6 +48,10 @@ serve: deps config
 
 discover: deps config
 	$(PY) $(MODULE) --discover
+
+ssl:
+	chmod +x scripts/gen-ssl-cert.sh
+	./scripts/gen-ssl-cert.sh
 
 systemd-install: install
 	chmod +x scripts/install-systemd.sh

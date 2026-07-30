@@ -17,22 +17,38 @@
     <nav class="views" role="tablist" aria-label="Views">
       <button type="button" role="tab" data-view="overview" class="active" aria-selected="true">Overview</button>
       <button type="button" role="tab" data-view="compare" aria-selected="false">Compare</button>
+      <button type="button" id="restart-btn" class="restart-btn" title="Restart service">Restart</button>
     </nav>
+    <p class="restart-status" id="restart-status" hidden aria-live="polite"></p>
   </header>
 
   <main>
     <section id="view-overview" class="view" role="tabpanel" aria-label="Overview">
       <div class="overview-head">
         <h2>All sensors</h2>
-        <p class="overview-hint">Latest readings — click a column to sort</p>
+        <p class="overview-hint">Edit zone / height / room inline — click a row to compare charts</p>
       </div>
       <div class="model-filters" id="model-filters" role="group" aria-label="Filter by model"></div>
+      <div class="category-filters" id="category-filters" aria-label="Filter by category">
+        <div class="filter-row" id="zone-filters" role="group" aria-label="Zone"></div>
+        <div class="filter-row" id="height-filters" role="group" aria-label="Height"></div>
+        <div class="filter-row" id="room-filters" role="group" aria-label="Room"></div>
+      </div>
       <div class="overview-table-wrap">
         <table class="overview-table" id="overview-table">
           <thead>
             <tr>
               <th scope="col">
                 <button type="button" class="sort-btn" data-sort="name">Sensor</button>
+              </th>
+              <th scope="col">
+                <button type="button" class="sort-btn" data-sort="zone">Zone</button>
+              </th>
+              <th scope="col">
+                <button type="button" class="sort-btn" data-sort="height">Height</button>
+              </th>
+              <th scope="col">
+                <button type="button" class="sort-btn" data-sort="room">Room</button>
               </th>
               <th scope="col" class="num">
                 <button type="button" class="sort-btn" data-sort="temperature_c">Temperature</button>
@@ -52,7 +68,7 @@
             </tr>
           </thead>
           <tbody id="overview-body">
-            <tr><td colspan="6" class="overview-empty">Loading…</td></tr>
+            <tr><td colspan="9" class="overview-empty">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -70,6 +86,11 @@
             </div>
           </div>
           <div class="model-filters model-filters-inline" id="compare-model-filters" role="group" aria-label="Filter by model"></div>
+          <div class="category-filters category-filters-inline" id="compare-category-filters" aria-label="Filter by category">
+            <div class="filter-row" id="compare-zone-filters" role="group" aria-label="Zone"></div>
+            <div class="filter-row" id="compare-height-filters" role="group" aria-label="Height"></div>
+            <div class="filter-row" id="compare-room-filters" role="group" aria-label="Room"></div>
+          </div>
           <div id="device-list" class="device-list" role="group" aria-label="Devices to compare"></div>
         </div>
         <div class="ranges" role="group" aria-label="Time range">
@@ -78,9 +99,16 @@
           <button type="button" data-hours="24" class="active">24 h</button>
           <button type="button" data-hours="168">7 d</button>
         </div>
+        <label class="forecast-toggle">
+          <input type="checkbox" id="show-forecast" checked>
+          <span>Forecast &amp; projections</span>
+        </label>
+        <button type="button" id="locate-btn" class="linkish locate-btn" title="Use browser location">Locate</button>
+        <span class="geo-status" id="geo-status" aria-live="polite"></span>
       </section>
 
       <section class="current" id="current" aria-live="polite"></section>
+      <section class="projections" id="projections" hidden aria-live="polite"></section>
 
       <section class="charts">
         <figure class="chart-block">
@@ -90,6 +118,10 @@
         <figure class="chart-block">
           <figcaption>Humidity (%)</figcaption>
           <canvas id="hum-chart"></canvas>
+        </figure>
+        <figure class="chart-block">
+          <figcaption>Dew point (°C)</figcaption>
+          <canvas id="dew-chart"></canvas>
         </figure>
       </section>
 

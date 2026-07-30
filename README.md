@@ -45,7 +45,27 @@ make run        # collector + web UI
 make serve      # web UI only (no BLE scanner)
 ```
 
-Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080) (or `https://…` if SSL is enabled).
+
+## HTTPS (self-signed)
+
+HTTP stays on **8080** (federation, old bookmarks). HTTPS listens on **8081**
+so geolocation works via `https://192.168.x.x:8081`.
+
+```bash
+make ssl                 # generate data/ssl/cert.pem + key.pem (LAN SANs)
+# config.toml:
+# [server]
+# ssl = true
+# ssl_port = 8081
+make restart             # or make run
+```
+
+Open `https://<lan-ip>:8081`, accept the certificate warning once. Regenerate
+after a network change with `./scripts/gen-ssl-cert.sh --force`.
+
+If `ssl = true` and certs are missing, the app auto-runs cert generation
+(`ssl_auto_generate = true`).
 
 ## Run in the background
 
@@ -64,6 +84,10 @@ sudo ./scripts/install-systemd.sh --hub install
 Logs: `journalctl -u govee-charts -f` and `govee-charts.log` in the project directory.
 
 Remove: `sudo make systemd-uninstall`
+
+The unit uses `Restart=always` so the UI **Restart** button can stop the process
+and systemd brings it back. Re-install the unit after pulling this change:
+`sudo make systemd-install` (or copy the updated unit and `daemon-reload`).
 
 On Raspberry Pi, ensure the service user is in the `bluetooth` group:
 
@@ -128,12 +152,39 @@ See `config.example.toml`:
 - `scanner.adapters` — BlueZ adapters (`["hci0", "hci1"]`)
 - `federation.peers` — URLs of other instances
 - `federation.token` — shared secret for `POST /api/ingest`
+- `[weather]` — Open-Meteo hourly forecast + sensor projections (`place` or lat/lon)
 - `[labels]` — friendly names keyed by BLE MAC
+
+## Sensor categories
+
+On the **Overview** page, each sensor has editable **Zone** (interior/exterior),
+**Height** (high/mid/low), and **Room** (kitchen, bedroom, corridor, living, other).
+Values are stored in SQLite and can be filtered in Overview and Compare.
+On first start, empty categories are inferred from friendly labels when possible.
+
+Enable in `config.toml` (`weather.enabled = true`).
+
+1. **Browser geolocation** (preferred) — Compare view asks for location and
+   sends `latitude`/`longitude` to `/api/forecast`. Click **Locate** to refresh.
+2. **Config fallback** — optional `place = "City"` or `latitude`/`longitude`.
+
+Geolocation needs a **secure context** (`https://`, or `http://localhost` /
+`127.0.0.1`). Enable self-signed TLS (`make ssl` + `server.ssl = true`) for
+LAN IPs. Plain `http://192.168.x.x` is usually blocked by browsers.
+
+Forecast responses are cached on disk (`data/weather_cache.json`, default
+30 minutes via `cache_seconds`) to limit Open-Meteo calls.
+
+Projected series: `sensor(t) = weather(t) + (sensor_now − weather_now)`.
+Toggle via **Forecast & projections**. Data © [Open-Meteo](https://open-meteo.com/).
 
 ## API
 
-- `GET /api/devices` — known devices + latest reading
+- `GET /api/devices` — known devices + latest reading + categories
+- `GET /api/categories` — zone / height / room taxonomy
+- `PATCH /api/devices/{address}/categories` — update `{zone,height,room}`
 - `GET /api/history?address=…&hours=24` — time series
+- `GET /api/forecast?hours=24&address=…` — outdoor forecast + optional projections
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
 - `GET /api/health` — health + `node_id`
 

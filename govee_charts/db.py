@@ -57,14 +57,27 @@ class Database:
         await self._db.commit()
 
     async def _migrate(self) -> None:
-        cols = {
+        reading_cols = {
             row[1]
             for row in await (
                 await self.db.execute("PRAGMA table_info(readings)")
             ).fetchall()
         }
-        if "source" not in cols:
+        if "source" not in reading_cols:
             await self.db.execute("ALTER TABLE readings ADD COLUMN source TEXT")
+
+        device_cols = {
+            row[1]
+            for row in await (
+                await self.db.execute("PRAGMA table_info(devices)")
+            ).fetchall()
+        }
+        for col in ("zone", "height", "room"):
+            if col not in device_cols:
+                await self.db.execute(
+                    f"ALTER TABLE devices ADD COLUMN {col} TEXT"
+                )
+
         # Deduplicate before creating unique index (keep lowest id)
         await self.db.execute(
             """
@@ -221,6 +234,9 @@ class Database:
                 d.model,
                 d.first_seen,
                 d.last_seen,
+                d.zone,
+                d.height,
+                d.room,
                 r.temperature_c,
                 r.humidity,
                 r.battery,
@@ -239,6 +255,94 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def get_device(self, address: str) -> dict[str, Any] | None:
+        cursor = await self.db.execute(
+            """
+            SELECT
+                d.address,
+                d.name,
+                d.model,
+                d.first_seen,
+                d.last_seen,
+                d.zone,
+                d.height,
+                d.room,
+                r.temperature_c,
+                r.humidity,
+                r.battery,
+                r.rssi,
+                r.ts AS last_reading_ts,
+                r.source AS last_source
+            FROM devices d
+            LEFT JOIN readings r ON r.id = (
+                SELECT id FROM readings
+                WHERE address = d.address
+                ORDER BY ts DESC
+                LIMIT 1
+            )
+            WHERE d.address = ?
+            """,
+            (address.upper(),),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def update_device_categories(
+        self,
+        address: str,
+        *,
+        zone: str | None | object = ...,
+        height: str | None | object = ...,
+        room: str | None | object = ...,
+    ) -> dict[str, Any] | None:
+        """Update category fields. Ellipsis means leave unchanged."""
+        device = await self.get_device(address)
+        if device is None:
+            return None
+
+        fields: list[str] = []
+        values: list[Any] = []
+        if zone is not ...:
+            fields.append("zone = ?")
+            values.append(zone)
+        if height is not ...:
+            fields.append("height = ?")
+            values.append(height)
+        if room is not ...:
+            fields.append("room = ?")
+            values.append(room)
+        if not fields:
+            return device
+
+        values.append(address.upper())
+        await self.db.execute(
+            f"UPDATE devices SET {', '.join(fields)} WHERE address = ?",
+            values,
+        )
+        await self.db.commit()
+        return await self.get_device(address)
+
+    async def seed_categories_from_names(self) -> int:
+        """Infer categories for devices that still have all category fields empty."""
+        from govee_charts.categories import infer_from_label
+
+        devices = await self.list_devices()
+        updated = 0
+        for device in devices:
+            if device.get("zone") or device.get("height") or device.get("room"):
+                continue
+            inferred = infer_from_label(str(device.get("name") or ""))
+            if not any(inferred.values()):
+                continue
+            await self.update_device_categories(
+                device["address"],
+                zone=inferred["zone"],
+                height=inferred["height"],
+                room=inferred["room"],
+            )
+            updated += 1
+        return updated
 
     async def history(
         self,

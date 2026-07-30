@@ -11,8 +11,8 @@ Group=@GROUP@
 WorkingDirectory=@ROOT@
 Environment=PYTHONUNBUFFERED=1
 ExecStart=@ROOT@/venv/bin/python -m govee_charts.main@EXTRA_ARGS@
-Restart=on-failure
-RestartSec=15
+Restart=always
+RestartSec=3
 TimeoutStopSec=30
 
 # BlueZ via D-Bus (user must be in the bluetooth group on Debian / Raspberry Pi OS)
