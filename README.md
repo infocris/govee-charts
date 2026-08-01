@@ -175,8 +175,75 @@ LAN IPs. Plain `http://192.168.x.x` is usually blocked by browsers.
 Forecast responses are cached on disk (`data/weather_cache.json`, default
 30 minutes via `cache_seconds`) to limit Open-Meteo calls.
 
-Projected series: `sensor(t) = weather(t) + (sensor_now − weather_now)`.
-Toggle via **Forecast & projections**. Data © [Open-Meteo](https://open-meteo.com/).
+Projected temperatures use a simple **RC thermal model**: the sensor
+relaxes toward `weather(t) + Δ` with time constant `τ` fitted from recent
+history (Open-Meteo `past_days` + local readings). If history is too short,
+the legacy instant offset `sensor = weather + (sensor_now − weather_now)`
+is used. Exterior-zone sensors use a short fixed `τ`. Humidity stays on a
+constant bias.
+
+### Apartment layout (optional)
+
+Set `[apartment] enabled = true` in `config.toml` (see `config.example.toml`)
+to project rooms as a **multi-node RC network**:
+
+- Corridor hub linked to every room (no direct outdoor coupling)
+- Kitchen + living: southwest façades; bedroom: northeast
+- Capacities from floor area × 2.5 m ceiling; wall/door conductances by edge type
+- Passive nodes (bathroom, WC) without sensors
+- Solar bias from Open-Meteo **shortwave radiation** and **cloud cover**,
+  weighted by façade orientation and local hour (SW stronger in afternoon)
+- **Wind** from Open-Meteo (`wind_speed_10m`, `wind_direction_10m`): on the
+  Facades view, window open periods are split into **natural OK** (wind hits a
+  façade or drives cross-ventilation NE↔SW above ~1.5 m/s) vs **mechanical
+  preferred** (calm, parallel wind, or windows should stay closed)
+
+
+Requires sensors with `room` categories and at least two mapped rooms including
+enough coverage to activate the network (falls back to per-sensor RC otherwise).
+
+The **Facades** view edits which compass orientations each room faces outdoors
+(saved under `data/apartment_overrides.json`) and shows live solar bias from
+shortwave radiation / cloud cover, plus current wind and natural vs mechanical
+ventilation hints.
+
+On the Compare **Temperature** chart, optional **Window open / close** bands
+compare the first selected interior sensor to outdoor air (±0.5 °C): green =
+opening would cool **and** outdoor dew point is safely below indoor air
+temperature, amber = opening would heat, blue-grey = outdoor is cooler but
+too humid (keep closed). Past + projected future.
+
+Toggle via **Forecast & projections** / **Window open / close**. Optional
+**Window alerts** uses the browser Notification API (HTTPS or localhost) and
+notifies when advice changes per interior room (open / close / too humid),
+checked about every 30 s while the page is open.
+
+### Door / window history
+
+With `[doors] enabled = true`, Govee Charts listens to MQTT contact sensors
+(Home Assistant discovery and/or ring-mqtt) and stores **open/closed** events
+in SQLite. Optional `ha_db_path` imports existing Home Assistant recorder
+history on startup. Query via `/api/doors` and `/api/doors/history`.
+
+On the **Overview** page, **Doors & windows** lets you assign each contact a
+**kind** (`door` / `window` / `other`) and a **room** (same room taxonomy as
+temperature sensors, including bathroom / WC). Name-based inference runs once
+when a contact is first seen; edits use `PATCH /api/doors/{sensor_id}`.
+
+### HVAC / power history (AC + Ecojoko)
+
+With `[hvac] enabled = true`, Govee Charts polls the Home Assistant REST API
+for a climate entity (e.g. Tuya AC) and a power sensor (e.g. Little Monkey /
+Ecojoko realtime watts). Create a **long-lived access token** in HA
+(Profile → Security) and set `hvac.ha_token` or `hvac.ha_token_file`.
+
+On startup, optional `hvac.ha_db_path` imports existing recorder history.
+The Compare **Temperature** chart can overlay **AC on** bands and a secondary
+**power (W)** axis (toggle **AC & power**).
+
+Query via `/api/hvac`, `/api/hvac/history`, `/api/power/history`.
+
+Data © [Open-Meteo](https://open-meteo.com/).
 
 ## API
 
@@ -185,6 +252,14 @@ Toggle via **Forecast & projections**. Data © [Open-Meteo](https://open-meteo.c
 - `PATCH /api/devices/{address}/categories` — update `{zone,height,room}`
 - `GET /api/history?address=…&hours=24` — time series
 - `GET /api/forecast?hours=24&address=…` — outdoor forecast + optional projections
+- `GET /api/apartment` — layout, façades, linked sensors, live solar gains
+- `PATCH /api/apartment/rooms/{id}` — update `{exterior:[…]}` orientations
+- `GET /api/doors` — latest door/window open/closed state (+ room / kind)
+- `PATCH /api/doors/{sensor_id}` — update `{room,kind,name}` for a contact
+- `GET /api/doors/history?hours=168&sensor_id=…` — open/close event history
+- `GET /api/hvac` — latest climate + power snapshot
+- `GET /api/hvac/history?hours=168` — climate events + active bands
+- `GET /api/power/history?hours=168` — power samples (W)
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
 - `GET /api/health` — health + `node_id`
 

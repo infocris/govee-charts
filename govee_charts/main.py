@@ -20,8 +20,15 @@ import uvicorn
 from govee_charts.address import build_suffix_map
 from govee_charts.api import create_app
 from govee_charts.db import Database
+from govee_charts.doors import DoorMqttListener, DoorsConfig, import_ha_door_history
 from govee_charts.federation import PeerPublisher
+from govee_charts.hvac import HvacConfig, HvacHaPoller, import_ha_hvac_history
 from govee_charts.scanner import GoveeScanner, discover_once
+from govee_charts.apartment import (
+    ApartmentLayout,
+    default_apartment_dict,
+    load_overrides,
+)
 from govee_charts.sslutil import resolve_ssl_files
 from govee_charts.weather import WeatherConfig, WeatherService
 
@@ -61,7 +68,37 @@ DEFAULTS: dict[str, Any] = {
         "timezone": "Europe/Paris",
         "cache_seconds": 1800,
         "forecast_hours": 48,
+        "calib_hours": 48,
+        "tau_min_hours": 0.5,
+        "tau_max_hours": 24,
+        "tau_default_hours": 3,
         "cache_path": "data/weather_cache.json",
+    },
+    "apartment": default_apartment_dict(),
+    "doors": {
+        "enabled": False,
+        "mqtt_host": "127.0.0.1",
+        "mqtt_port": 1883,
+        "mqtt_username": "hass",
+        "mqtt_password": "",
+        "mqtt_password_file": "",
+        "discovery_prefix": "homeassistant",
+        "ring_topic": "ring/#",
+        "retention_days": 365,
+        "ha_db_path": "",
+        "ha_device_registry": "",
+        "names": {},
+    },
+    "hvac": {
+        "enabled": False,
+        "ha_url": "http://127.0.0.1:8123",
+        "ha_token": "",
+        "ha_token_file": "",
+        "climate_entity": "climate.medion_smart_mobile_camping_ac_p502_md37735",
+        "power_entity": "sensor.infocris_consommation_temps_reel",
+        "poll_seconds": 15,
+        "retention_days": 365,
+        "ha_db_path": "",
     },
     "labels": {},
 }
@@ -151,6 +188,9 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     seeded = await db.seed_categories_from_names()
     if seeded:
         logging.info("Inferred categories for %d device(s) from labels", seeded)
+    door_meta = await db.backfill_door_sensors()
+    if door_meta:
+        logging.info("Created metadata for %d door sensor(s)", door_meta)
 
     suffix_map = build_suffix_map(cfg["labels"])
     suffix_map.update(await db.suffix_map_from_devices())
@@ -165,6 +205,8 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
 
     stop_event = asyncio.Event()
     scan_task: asyncio.Task[None] | None = None
+    door_task: asyncio.Task[None] | None = None
+    hvac_task: asyncio.Task[None] | None = None
     scanner_enabled = enable_scanner and bool(cfg["scanner"].get("enabled", True))
     if scanner_enabled:
         scanner = GoveeScanner(
@@ -182,8 +224,66 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     else:
         logging.info("BLE scanner disabled (scanner.enabled=false or --no-scanner)")
 
+    doors_cfg = DoorsConfig.from_dict(cfg.get("doors"))
+    if doors_cfg.enabled:
+        if doors_cfg.ha_db_path:
+            try:
+                n_imp = await import_ha_door_history(db, doors_cfg.ha_db_path)
+                if n_imp:
+                    logging.info("Imported %d door event(s) from Home Assistant", n_imp)
+            except Exception:
+                logging.exception("Failed to import Home Assistant door history")
+        pruned = await db.prune_door_events(doors_cfg.retention_days)
+        if pruned:
+            logging.info("Pruned %d old door event(s)", pruned)
+        listener = DoorMqttListener(db, doors_cfg)
+        door_task = asyncio.create_task(listener.run(stop_event), name="door-mqtt")
+        logging.info(
+            "Door historization enabled (MQTT %s:%d)",
+            doors_cfg.mqtt_host,
+            doors_cfg.mqtt_port,
+        )
+    else:
+        logging.info("Door historization disabled (set doors.enabled=true)")
+
+    hvac_cfg = HvacConfig.from_dict(cfg.get("hvac"))
+    if hvac_cfg.enabled:
+        if hvac_cfg.ha_db_path:
+            try:
+                n_hvac, n_power = await import_ha_hvac_history(db, hvac_cfg)
+                if n_hvac or n_power:
+                    logging.info(
+                        "Imported %d HVAC event(s) and %d power sample(s) from Home Assistant",
+                        n_hvac,
+                        n_power,
+                    )
+            except Exception:
+                logging.exception("Failed to import Home Assistant HVAC/power history")
+        pruned_h = await db.prune_hvac_events(hvac_cfg.retention_days)
+        pruned_p = await db.prune_power_samples(hvac_cfg.retention_days)
+        if pruned_h:
+            logging.info("Pruned %d old HVAC event(s)", pruned_h)
+        if pruned_p:
+            logging.info("Pruned %d old power sample(s)", pruned_p)
+        poller = HvacHaPoller(db, hvac_cfg)
+        hvac_task = asyncio.create_task(poller.run(stop_event), name="hvac-ha-poll")
+        logging.info(
+            "HVAC historization enabled (HA %s, poll %.0fs)",
+            hvac_cfg.ha_url,
+            hvac_cfg.poll_seconds,
+        )
+    else:
+        logging.info("HVAC historization disabled (set hvac.enabled=true)")
+
     weather_cfg = WeatherConfig.from_dict(cfg.get("weather"))
-    weather = WeatherService(weather_cfg)
+    apt_raw = dict(cfg.get("apartment") or {})
+    if not apt_raw.get("timezone") and cfg.get("weather", {}).get("timezone"):
+        apt_raw["timezone"] = cfg["weather"]["timezone"]
+    apartment = ApartmentLayout.from_dict(apt_raw)
+    n_ovr = apartment.apply_overrides(load_overrides())
+    if n_ovr:
+        logging.info("Applied façade overrides for %d room(s)", n_ovr)
+    weather = WeatherService(weather_cfg, apartment=apartment)
     if weather.enabled:
         if weather.has_config_location:
             loc = weather_cfg.place or (
@@ -196,6 +296,13 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         else:
             logging.info(
                 "Weather forecast enabled (browser geolocation; optional [weather] place fallback)"
+            )
+        if apartment.enabled:
+            logging.info(
+                "Apartment network enabled (%d rooms, floor %d/%d)",
+                len(apartment.rooms),
+                apartment.floor,
+                apartment.floors_total,
             )
     else:
         logging.info("Weather forecast disabled (set weather.enabled=true)")
@@ -273,14 +380,20 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         await asyncio.gather(*(_serve(s) for s in servers))
     finally:
         stop_event.set()
-        if scan_task is not None:
+        for task, label in (
+            (scan_task, "BLE scanner"),
+            (door_task, "Door MQTT"),
+            (hvac_task, "HVAC HA poll"),
+        ):
+            if task is None:
+                continue
             try:
-                await asyncio.wait_for(scan_task, timeout=15.0)
+                await asyncio.wait_for(task, timeout=15.0)
             except asyncio.TimeoutError:
-                logging.warning("BLE scanner stop timed out — cancelling")
-                scan_task.cancel()
+                logging.warning("%s stop timed out — cancelling", label)
+                task.cancel()
                 try:
-                    await scan_task
+                    await task
                 except (asyncio.CancelledError, Exception):
                     pass
         await publisher.stop()

@@ -8,4 +8,6 @@ data/*.db-*
 data/weather_cache.json
 data/weather_cache.tmp
 data/ssl/
+data/apartment_overrides.json
+data/apartment_overrides.tmp
 config.toml

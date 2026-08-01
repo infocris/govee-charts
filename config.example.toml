@@ -47,6 +47,133 @@ place = ""
 timezone = "Europe/Paris"
 cache_seconds = 1800
 forecast_hours = 48
+# RC projection: fit Δ and τ from sensor history vs outdoor past_days
+calib_hours = 48
+tau_min_hours = 0.5
+tau_max_hours = 24
+tau_default_hours = 3
+
+# Multi-room RC network (corridor hub). Maps device.room → node.
+# Set enabled = true when sensors have room categories assigned.
+[apartment]
+enabled = false
+ceiling_m = 2.5
+area_m2 = 35.0
+floor = 3
+floors_total = 7
+timezone = "Europe/Paris"
+
+[[apartment.rooms]]
+id = "bedroom"
+area_m2 = 10.9
+exterior = ["ne"]
+label = "Bedroom"
+
+[[apartment.rooms]]
+id = "living"
+area_m2 = 10.8
+exterior = ["sw"]
+label = "Living room"
+
+[[apartment.rooms]]
+id = "kitchen"
+area_m2 = 5.6
+exterior = ["sw"]
+label = "Kitchen"
+
+[[apartment.rooms]]
+id = "corridor"
+area_m2 = 4.0
+exterior = []
+label = "Corridor"
+
+[[apartment.rooms]]
+id = "bathroom"
+area_m2 = 2.5
+exterior = []
+label = "Bathroom"
+
+[[apartment.rooms]]
+id = "wc"
+area_m2 = 1.2
+exterior = []
+label = "WC"
+
+[[apartment.edges]]
+a = "corridor"
+b = "bedroom"
+kind = "door"
+
+[[apartment.edges]]
+a = "corridor"
+b = "living"
+kind = "door"
+
+[[apartment.edges]]
+a = "corridor"
+b = "kitchen"
+kind = "door"
+
+[[apartment.edges]]
+a = "corridor"
+b = "bathroom"
+kind = "door"
+
+[[apartment.edges]]
+a = "corridor"
+b = "wc"
+kind = "door"
+
+[[apartment.edges]]
+a = "kitchen"
+b = "living"
+kind = "wall_partial"
+
+[[apartment.edges]]
+a = "kitchen"
+b = "wc"
+kind = "wall"
+
+[[apartment.edges]]
+a = "living"
+b = "wc"
+kind = "wall"
+
+[[apartment.edges]]
+a = "bedroom"
+b = "bathroom"
+kind = "wall"
+
+# Door / window contact historization via MQTT (Home Assistant / ring-mqtt).
+# Stores open/close timestamps in SQLite for API use.
+[doors]
+enabled = false
+mqtt_host = "127.0.0.1"
+mqtt_port = 1883
+mqtt_username = "hass"
+# Prefer a password file over putting secrets in this template:
+# mqtt_password_file = "/path/to/.mqtt_password"
+mqtt_password = ""
+discovery_prefix = "homeassistant"
+ring_topic = "ring/#"
+retention_days = 365
+# Optional one-shot import of existing HA recorder history:
+# ha_db_path = "/path/to/home-assistant_v2.db"
+
+# HVAC / power historization via Home Assistant REST (Tuya climate + Ecojoko, …).
+# Create a long-lived access token in HA: Profile → Security → Long-lived access tokens.
+[hvac]
+enabled = false
+ha_url = "http://127.0.0.1:8123"
+# Prefer a token file over putting secrets in this template:
+# ha_token_file = "/path/to/.ha_token"
+ha_token = ""
+climate_entity = "climate.medion_smart_mobile_camping_ac_p502_md37735"
+power_entity = "sensor.infocris_consommation_temps_reel"
+poll_seconds = 15
+retention_days = 365
+# Optional one-shot import from HA recorder SQLite on startup:
+# ha_db_path = "/path/to/home-assistant_v2.db"
 
 # Optional friendly labels keyed by BLE MAC (uppercase).
 # Also used to map macOS UUID addresses to real MACs via the Govee name suffix

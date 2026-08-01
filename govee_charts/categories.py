@@ -6,7 +6,16 @@ from typing import Any
 
 ZONES = ("interior", "exterior")
 HEIGHTS = ("high", "mid", "low")
-ROOMS = ("kitchen", "bedroom", "corridor", "living", "other")
+ROOMS = (
+    "kitchen",
+    "bedroom",
+    "corridor",
+    "living",
+    "bathroom",
+    "wc",
+    "other",
+)
+CONTACT_KINDS = ("door", "window", "other")
 
 ZONE_LABELS = {
     "interior": "Interior",
@@ -22,6 +31,13 @@ ROOM_LABELS = {
     "bedroom": "Bedroom",
     "corridor": "Corridor",
     "living": "Living room",
+    "bathroom": "Bathroom",
+    "wc": "WC",
+    "other": "Other",
+}
+CONTACT_KIND_LABELS = {
+    "door": "Door",
+    "window": "Window",
     "other": "Other",
 }
 
@@ -41,10 +57,22 @@ _ALIASES = {
     "cuisine": "kitchen",
     "chambre": "bedroom",
     "couloir": "corridor",
+    "entrée": "corridor",
+    "entree": "corridor",
     "séjour": "living",
     "sejour": "living",
     "salon": "living",
+    "sdb": "bathroom",
+    "salle de bain": "bathroom",
+    "bathroom": "bathroom",
+    "wc": "wc",
+    "toilettes": "wc",
     "autre": "other",
+    "porte": "door",
+    "door": "door",
+    "fenêtre": "window",
+    "fenetre": "window",
+    "window": "window",
 }
 
 
@@ -53,6 +81,9 @@ def taxonomy() -> dict[str, Any]:
         "zones": [{"id": z, "label": ZONE_LABELS[z]} for z in ZONES],
         "heights": [{"id": h, "label": HEIGHT_LABELS[h]} for h in HEIGHTS],
         "rooms": [{"id": r, "label": ROOM_LABELS[r]} for r in ROOMS],
+        "contact_kinds": [
+            {"id": k, "label": CONTACT_KIND_LABELS[k]} for k in CONTACT_KINDS
+        ],
     }
 
 
@@ -85,6 +116,24 @@ def normalize_patch(
     return out
 
 
+def normalize_door_patch(
+    *,
+    room: Any = ...,
+    kind: Any = ...,
+    name: Any = ...,
+) -> dict[str, str | None]:
+    """Partial update for door/window contact metadata."""
+    out: dict[str, str | None] = {}
+    if room is not ...:
+        out["room"] = _norm_choice(room, ROOMS)
+    if kind is not ...:
+        out["kind"] = _norm_choice(kind, CONTACT_KINDS)
+    if name is not ...:
+        text = None if name is None else str(name).strip()
+        out["name"] = text or None
+    return out
+
+
 def infer_from_label(label: str) -> dict[str, str | None]:
     """Best-effort inference from an existing friendly label."""
     text = (label or "").lower()
@@ -111,7 +160,13 @@ def infer_from_label(label: str) -> dict[str, str | None]:
         room = "kitchen"
     elif "chambre" in text or "bedroom" in text:
         room = "bedroom"
-    elif "couloir" in text or "corridor" in text or "hall" in text:
+    elif any(k in text for k in ("sdb", "salle de bain", "bathroom", "bain")):
+        room = "bathroom"
+    elif text.strip() in ("wc",) or "toilettes" in text or text.endswith(" wc"):
+        room = "wc"
+    elif any(
+        k in text for k in ("couloir", "corridor", "hall", "entrée", "entree")
+    ):
         room = "corridor"
     elif any(k in text for k in ("séjour", "sejour", "salon", "living")):
         room = "living"
@@ -126,3 +181,36 @@ def infer_from_label(label: str) -> dict[str, str | None]:
         zone = "interior"
 
     return {"zone": zone, "height": height, "room": room}
+
+
+def infer_contact_from_label(label: str) -> dict[str, str | None]:
+    """Infer contact kind + room from a door/window sensor name."""
+    text = (label or "").lower()
+    kind: str | None = None
+    if any(k in text for k in ("fenêtre", "fenetre", "window", "baie")):
+        kind = "window"
+    elif any(k in text for k in ("porte", "door", "portail")):
+        kind = "door"
+    elif label.strip():
+        kind = "other"
+
+    room: str | None = None
+    if "cuisine" in text or "kitchen" in text:
+        room = "kitchen"
+    elif "chambre" in text or "bedroom" in text:
+        room = "bedroom"
+    elif any(k in text for k in ("sdb", "salle de bain", "bathroom", "bain")):
+        room = "bathroom"
+    elif "toilettes" in text or text.strip() in ("wc",) or " wc" in text:
+        room = "wc"
+    elif any(
+        k in text for k in ("couloir", "corridor", "hall", "entrée", "entree")
+    ):
+        room = "corridor"
+    elif any(k in text for k in ("séjour", "sejour", "salon", "living")):
+        room = "living"
+    elif "arrière" in text or "arriere" in text:
+        # e.g. "Fenêtre arrière" → bedroom in this apartment
+        room = "bedroom"
+
+    return {"kind": kind, "room": room}

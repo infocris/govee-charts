@@ -17,6 +17,7 @@
     <nav class="views" role="tablist" aria-label="Views">
       <button type="button" role="tab" data-view="overview" class="active" aria-selected="true">Overview</button>
       <button type="button" role="tab" data-view="compare" aria-selected="false">Compare</button>
+      <button type="button" role="tab" data-view="facades" aria-selected="false">Facades</button>
       <button type="button" id="restart-btn" class="restart-btn" title="Restart service">Restart</button>
     </nav>
     <p class="restart-status" id="restart-status" hidden aria-live="polite"></p>
@@ -73,6 +74,28 @@
         </table>
       </div>
       <p class="status" id="overview-status">Loading…</p>
+
+      <div class="overview-head overview-head-secondary">
+        <h2>Doors &amp; windows</h2>
+        <p class="overview-hint">Contact sensors — set kind (door/window) and room</p>
+      </div>
+      <div class="overview-table-wrap">
+        <table class="overview-table" id="doors-table">
+          <thead>
+            <tr>
+              <th scope="col">Sensor</th>
+              <th scope="col">State</th>
+              <th scope="col">Kind</th>
+              <th scope="col">Room</th>
+              <th scope="col">Updated</th>
+            </tr>
+          </thead>
+          <tbody id="doors-body">
+            <tr><td colspan="5" class="overview-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="status" id="doors-status" hidden></p>
     </section>
 
     <section id="view-compare" class="view" role="tabpanel" aria-label="Compare" hidden>
@@ -80,16 +103,18 @@
         <div class="field field-devices">
           <div class="field-head">
             <span>Devices</span>
-            <div class="device-actions">
-              <button type="button" id="select-all" class="linkish">All</button>
-              <button type="button" id="select-none" class="linkish">None</button>
-            </div>
           </div>
           <div class="model-filters model-filters-inline" id="compare-model-filters" role="group" aria-label="Filter by model"></div>
           <div class="category-filters category-filters-inline" id="compare-category-filters" aria-label="Filter by category">
             <div class="filter-row" id="compare-zone-filters" role="group" aria-label="Zone"></div>
             <div class="filter-row" id="compare-height-filters" role="group" aria-label="Height"></div>
             <div class="filter-row" id="compare-room-filters" role="group" aria-label="Room"></div>
+          </div>
+          <div class="device-list-head">
+            <div class="device-actions">
+              <button type="button" id="select-all" class="linkish">All</button>
+              <button type="button" id="select-none" class="linkish">None</button>
+            </div>
           </div>
           <div id="device-list" class="device-list" role="group" aria-label="Devices to compare"></div>
         </div>
@@ -103,16 +128,53 @@
           <input type="checkbox" id="show-forecast" checked>
           <span>Forecast &amp; projections</span>
         </label>
+        <label class="forecast-toggle">
+          <input type="checkbox" id="show-window-bands" checked>
+          <span>Window open / close</span>
+        </label>
+        <label class="forecast-toggle">
+          <input type="checkbox" id="show-hvac" checked>
+          <span>AC &amp; power</span>
+        </label>
+        <label class="forecast-toggle">
+          <input type="checkbox" id="window-notify">
+          <span>Window alerts</span>
+        </label>
         <button type="button" id="locate-btn" class="linkish locate-btn" title="Use browser location">Locate</button>
         <span class="geo-status" id="geo-status" aria-live="polite"></span>
       </section>
 
-      <section class="current" id="current" aria-live="polite"></section>
-      <section class="projections" id="projections" hidden aria-live="polite"></section>
+      <div class="hvac-status" id="hvac-status" hidden aria-live="polite"></div>
+
+      <details class="compare-fold" id="fold-current">
+        <summary class="compare-fold-summary">
+          Current readings
+          <span class="compare-fold-meta" id="fold-current-meta"></span>
+        </summary>
+        <section class="current" id="current" aria-live="polite"></section>
+      </details>
+      <details class="compare-fold" id="fold-projections" hidden>
+        <summary class="compare-fold-summary">
+          Forecast &amp; projections
+          <span class="compare-fold-meta" id="fold-projections-meta"></span>
+        </summary>
+        <section class="projections" id="projections" aria-live="polite"></section>
+      </details>
 
       <section class="charts">
         <figure class="chart-block">
-          <figcaption>Temperature (°C)</figcaption>
+          <figcaption>
+            Temperature (°C)
+            <span class="window-legend" id="window-legend" hidden>
+              <span class="window-swatch window-swatch-open"></span> open cools
+              <span class="window-swatch window-swatch-close"></span> open heats
+              <span class="window-swatch window-swatch-humid"></span> too humid
+            </span>
+            <span class="window-legend hvac-legend" id="hvac-legend" hidden>
+              <span class="window-swatch window-swatch-hvac"></span> AC on
+              <span class="power-legend-note">· power (W) on right axis</span>
+            </span>
+          </figcaption>
           <canvas id="temp-chart"></canvas>
         </figure>
         <figure class="chart-block">
@@ -126,6 +188,44 @@
       </section>
 
       <p class="status" id="status">Loading…</p>
+    </section>
+
+    <section id="view-facades" class="view" role="tabpanel" aria-label="Facades" hidden>
+      <div class="overview-head">
+        <h2>Facades</h2>
+        <p class="overview-hint">
+          Set which compass orientations each room faces outdoors.
+          Empty = no exterior contact (e.g. corridor). Saved immediately.
+        </p>
+      </div>
+      <p class="facade-meta" id="facade-meta" aria-live="polite">Loading…</p>
+      <div class="facade-outdoor" id="facade-outdoor" hidden aria-live="polite"></div>
+
+      <section class="charts facade-charts" id="facade-charts" hidden></section>
+
+      <details class="compare-fold" id="fold-facade-setup" open>
+        <summary class="compare-fold-summary">
+          Façade setup
+          <span class="compare-fold-meta">orientations &amp; sensors</span>
+        </summary>
+        <div class="overview-table-wrap">
+          <table class="overview-table facade-table" id="facade-table">
+            <thead>
+              <tr>
+                <th scope="col">Room</th>
+                <th scope="col">Area</th>
+                <th scope="col">Exterior façades</th>
+                <th scope="col">Solar / vent</th>
+                <th scope="col">Sensors</th>
+              </tr>
+            </thead>
+            <tbody id="facade-body">
+              <tr><td colspan="5" class="overview-empty">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </details>
+      <p class="status" id="facade-status">Loading…</p>
     </section>
   </main>
 
