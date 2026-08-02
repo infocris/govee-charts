@@ -25,6 +25,17 @@
   const facadeOutdoorEl = document.getElementById("facade-outdoor");
   const facadeChartsEl = document.getElementById("facade-charts");
   const facadeStatusEl = document.getElementById("facade-status");
+  const windowBannerEl = document.getElementById("window-banner");
+  const windowBannerTitleEl = document.getElementById("window-banner-title");
+  const windowBannerDetailEl = document.getElementById("window-banner-detail");
+  const backfillPanelEl = document.getElementById("backfill-panel");
+  const backfillCurrentEl = document.getElementById("backfill-current");
+  const backfillQueueEl = document.getElementById("backfill-queue");
+  const backfillStatusEl = document.getElementById("backfill-status");
+  const backfillPauseBtn = document.getElementById("backfill-pause");
+  const backfillRefreshBtn = document.getElementById("backfill-refresh");
+  let backfillTimer = null;
+  let backfillSnapshot = null;
 
   const PALETTE = [
     "#e8a87c",
@@ -50,6 +61,10 @@
   const FOLD_PROJ_KEY = "govee-charts.foldProjections";
   const GEO_KEY = "govee-charts.geo";
   const CAT_FILTER_KEY = "govee-charts.catFilters";
+  const CHART_HEIGHT_KEY = "govee-charts.chartHeight";
+  const CHART_HEIGHT_DEFAULT = 260;
+  const CHART_HEIGHT_MIN = 160;
+  const CHART_HEIGHT_MAX = 520;
 
   let hours = 24;
   let devices = [];
@@ -93,6 +108,8 @@
   const foldProjectionsMetaEl = document.getElementById("fold-projections-meta");
   const locateBtn = document.getElementById("locate-btn");
   const geoStatusEl = document.getElementById("geo-status");
+  const chartHeightEl = document.getElementById("chart-height");
+  const chartHeightValueEl = document.getElementById("chart-height-value");
   const zoneFiltersEl = document.getElementById("zone-filters");
   const heightFiltersEl = document.getElementById("height-filters");
   const roomFiltersEl = document.getElementById("room-filters");
@@ -139,6 +156,54 @@
       },
     },
   };
+
+  /** Persist legend visibility across 30s dataset rebuilds (keyed by dataset label). */
+  const legendHidden = {
+    temp: new Map(),
+    hum: new Map(),
+    dew: new Map(),
+  };
+
+  function legendChartKey(chart) {
+    if (chart === tempChart) return "temp";
+    if (chart === humChart) return "hum";
+    if (chart === dewChart) return "dew";
+    return null;
+  }
+
+  function onLegendClick(_event, legendItem, legend) {
+    const chart = legend.chart;
+    const index = legendItem.datasetIndex;
+    if (index == null || index < 0) return;
+    const ds = chart.data.datasets[index];
+    if (!ds) return;
+    if (chart.isDatasetVisible(index)) {
+      chart.hide(index);
+    } else {
+      chart.show(index);
+    }
+    const key = legendChartKey(chart);
+    if (key && ds.label != null) {
+      legendHidden[key].set(String(ds.label), !chart.isDatasetVisible(index));
+    }
+  }
+
+  function withLegendState(chartKey, datasets) {
+    const map = legendHidden[chartKey] || new Map();
+    return datasets.map((ds) => {
+      const label = ds.label != null ? String(ds.label) : "";
+      if (label && map.has(label)) {
+        return { ...ds, hidden: map.get(label) };
+      }
+      return { ...ds };
+    });
+  }
+
+  function bindChartLegend(chart) {
+    if (!chart || !chart.options || !chart.options.plugins) return;
+    if (!chart.options.plugins.legend) chart.options.plugins.legend = {};
+    chart.options.plugins.legend.onClick = onLegendClick;
+  }
 
   function loadStoredGeo() {
     try {
@@ -279,6 +344,36 @@
   function persistCatFilters() {
     localStorage.setItem(CAT_FILTER_KEY, JSON.stringify(catFilters));
   }
+
+  function loadChartHeight() {
+    const raw = Number(localStorage.getItem(CHART_HEIGHT_KEY));
+    if (!Number.isFinite(raw)) return CHART_HEIGHT_DEFAULT;
+    const stepped = Math.round(raw / 20) * 20;
+    return Math.min(CHART_HEIGHT_MAX, Math.max(CHART_HEIGHT_MIN, stepped));
+  }
+
+  function resizeAllCharts() {
+    if (tempChart) tempChart.resize();
+    if (humChart) humChart.resize();
+    if (dewChart) dewChart.resize();
+    facadeChartInstances.forEach((c) => c.resize());
+  }
+
+  function applyChartHeight(px, { persist = true } = {}) {
+    const height = Math.min(
+      CHART_HEIGHT_MAX,
+      Math.max(CHART_HEIGHT_MIN, Math.round(Number(px) || CHART_HEIGHT_DEFAULT))
+    );
+    document.documentElement.style.setProperty("--chart-height", `${height}px`);
+    if (chartHeightEl) chartHeightEl.value = String(height);
+    if (chartHeightValueEl) chartHeightValueEl.textContent = `${height} px`;
+    if (persist) localStorage.setItem(CHART_HEIGHT_KEY, String(height));
+    resizeAllCharts();
+    return height;
+  }
+
+  let chartHeight = loadChartHeight();
+  applyChartHeight(chartHeight, { persist: false });
 
   function loadPersistedSelection() {
     try {
@@ -443,6 +538,165 @@
       hour: "2-digit",
       minute: "2-digit",
     });
+  }
+
+  function rssiLevel(rssi) {
+    const v = Number(rssi);
+    if (!Number.isFinite(v)) return null;
+    if (v >= -60) return 4;
+    if (v >= -70) return 3;
+    if (v >= -80) return 2;
+    return 1;
+  }
+
+  function rssiClass(rssi) {
+    const level = rssiLevel(rssi);
+    if (level == null) return "rssi-unknown";
+    if (level >= 4) return "rssi-strong";
+    if (level >= 3) return "rssi-good";
+    if (level >= 2) return "rssi-fair";
+    return "rssi-weak";
+  }
+
+  function rssiHtml(rssi) {
+    if (rssi == null || Number.isNaN(Number(rssi))) {
+      return '<span class="rssi rssi-unknown">—</span>';
+    }
+    const level = rssiLevel(rssi) || 0;
+    const bars = [1, 2, 3, 4]
+      .map(
+        (n) =>
+          `<span class="rssi-bar${n <= level ? " on" : ""}" style="--n:${n}"></span>`
+      )
+      .join("");
+    return (
+      `<span class="rssi ${rssiClass(rssi)}" title="${Number(rssi)} dBm">` +
+      `<span class="rssi-bars" aria-hidden="true">${bars}</span>` +
+      `<span class="rssi-dbm">${Number(rssi)} dBm</span>` +
+      `</span>`
+    );
+  }
+
+  function phaseLabel(phase) {
+    const map = { hour: "1 h", day: "24 h", week: "7 d", deep: "deep" };
+    return map[phase] || phase || "—";
+  }
+
+  function renderBackfill(data) {
+    backfillSnapshot = data;
+    if (!backfillPanelEl) return;
+    if (!data || data.worker === "disabled" || data.enabled === false) {
+      backfillPanelEl.hidden = true;
+      return;
+    }
+    backfillPanelEl.hidden = false;
+
+    const current = data.current;
+    const queue = data.queue || [];
+    const totals = data.totals || {};
+
+    if (backfillPauseBtn) {
+      backfillPauseBtn.textContent = data.paused ? "Resume" : "Pause";
+      backfillPauseBtn.disabled = false;
+    }
+
+    if (!current) {
+      backfillCurrentEl.innerHTML =
+        `<p class="backfill-idle">` +
+        (data.paused
+          ? "Paused"
+          : data.worker === "idle" && !(totals.pending > 0)
+            ? "Queue empty — waiting for gaps"
+            : `Worker ${escapeHtml(data.worker || "idle")} · ${Number(totals.pending) || 0} job(s) pending`) +
+        `</p>`;
+    } else {
+      const done = Number(current.samples_done) || 0;
+      const expected = Math.max(Number(current.samples_expected) || 0, done);
+      const pct = expected > 0 ? Math.min(100, Math.round((100 * done) / expected)) : 0;
+      const lastTs = current.last_sample_ts
+        ? new Date(Number(current.last_sample_ts) * 1000).toLocaleString("en-GB", {
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : "—";
+      const lastTemp =
+        current.last_sample_temp != null && Number.isFinite(Number(current.last_sample_temp))
+          ? `${Number(current.last_sample_temp).toFixed(1)} °C`
+          : "—";
+      const batt =
+        current.battery != null && Number.isFinite(Number(current.battery))
+          ? `${Number(current.battery)} %`
+          : "—";
+      const remaining = Math.max(0, expected - done);
+      backfillCurrentEl.innerHTML = `
+        <div class="backfill-job">
+          <div class="backfill-job-title">
+            <strong>${escapeHtml(current.name || current.address || "Sensor")}</strong>
+            · phase ${escapeHtml(phaseLabel(current.phase))}
+          </div>
+          <div class="backfill-progress" aria-hidden="true"><span style="width:${pct}%"></span></div>
+          <div class="backfill-job-meta">
+            <span>${done} / ${expected || "?"} samples · ${remaining} left</span>
+            <span>Last ${escapeHtml(lastTs)} · ${escapeHtml(lastTemp)}</span>
+            <span>${rssiHtml(current.rssi)}</span>
+            <span>Battery ${escapeHtml(batt)}</span>
+          </div>
+        </div>`;
+    }
+
+    if (backfillQueueEl) {
+      if (!queue.length) {
+        backfillQueueEl.hidden = true;
+        backfillQueueEl.innerHTML = "";
+      } else {
+        backfillQueueEl.hidden = false;
+        backfillQueueEl.innerHTML = queue
+          .slice(0, 12)
+          .map(
+            (q) =>
+              `<li><span class="q-name">${escapeHtml(q.name || q.address)}</span>` +
+              `<span>${escapeHtml(phaseLabel(q.phase))} · ~${Number(q.samples_expected) || 0} missing · ${Number(q.jobs) || 0} job(s)</span></li>`
+          )
+          .join("");
+      }
+    }
+
+    if (backfillStatusEl) {
+      backfillStatusEl.textContent =
+        `pending ${totals.pending || 0} · done ${totals.done || 0}` +
+        (totals.failed ? ` · failed ${totals.failed}` : "") +
+        (data.config && data.config.min_rssi != null
+          ? ` · min RSSI ${data.config.min_rssi} dBm`
+          : "");
+    }
+  }
+
+  async function loadBackfill() {
+    try {
+      const res = await fetch("/api/backfill");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      renderBackfill(data);
+      syncBackfillPolling();
+    } catch (err) {
+      if (backfillPanelEl) backfillPanelEl.hidden = true;
+      console.warn("backfill status:", err);
+    }
+  }
+
+  function syncBackfillPolling() {
+    const shouldPoll =
+      currentView === "overview" &&
+      backfillPanelEl &&
+      !backfillPanelEl.hidden;
+    if (shouldPoll && !backfillTimer) {
+      backfillTimer = setInterval(loadBackfill, 2500);
+    } else if (!shouldPoll && backfillTimer) {
+      clearInterval(backfillTimer);
+      backfillTimer = null;
+    }
   }
 
   function deviceLabel(device) {
@@ -633,6 +887,7 @@
           doorSensors[idx] = { ...doorSensors[idx], ...updated };
         }
         updateDoorsTable();
+        updateWindowBanner(null).catch((err) => console.warn(err));
       } catch (err) {
         select.value = sensor[field] || "";
         if (doorsStatus) {
@@ -798,6 +1053,7 @@
         facadeChartInstances.forEach((c) => c.resize());
       }
     }
+    syncBackfillPolling();
   }
 
   async function loadFacades() {
@@ -1566,6 +1822,209 @@
     return null;
   }
 
+  /**
+   * Prefer window contacts for a room; fall back to doors if none tagged window.
+   */
+  function contactsForRoom(roomId) {
+    const room = String(roomId || "").toLowerCase();
+    if (!room) return [];
+    const inRoom = doorSensors.filter(
+      (s) => String(s.room || "").toLowerCase() === room
+    );
+    const windows = inRoom.filter((s) => (s.kind || "") === "window");
+    if (windows.length) return windows;
+    return inRoom.filter((s) => (s.kind || "") === "door");
+  }
+
+  function roomOpeningState(roomId) {
+    const contacts = contactsForRoom(roomId);
+    const openOnes = contacts.filter((s) => s.state === "open");
+    const closedOnes = contacts.filter((s) => s.state === "closed");
+    return {
+      contacts,
+      known: contacts.length > 0,
+      anyOpen: openOnes.length > 0,
+      openNames: openOnes.map((s) => s.name || s.sensor_id),
+      closedCount: closedOnes.length,
+      openCount: openOnes.length,
+    };
+  }
+
+  function roomDisplayName(roomId, device) {
+    const fromTax = categoryLabel("room", roomId);
+    if (fromTax && fromTax !== "—") return fromTax;
+    if (device) return deviceLabel(device);
+    return roomId;
+  }
+
+  function outdoorNowFromForecast(fc) {
+    if (!fc || !(fc.outdoor || []).length) return null;
+    const now = Date.now() / 1000;
+    return fc.outdoor.reduce((best, p) => {
+      if (!best) return p;
+      return Math.abs(p.ts - now) < Math.abs(best.ts - now) ? p : best;
+    }, null);
+  }
+
+  /**
+   * Cross climate advice with live contact state → banner actions.
+   */
+  function buildWindowBannerModel(forecast) {
+    const outdoorNow = outdoorNowFromForecast(forecast);
+    if (!outdoorNow || outdoorNow.temperature_c == null) {
+      return { tone: "idle", title: "", detail: "", hidden: true };
+    }
+
+    const rooms = interiorRoomDevices();
+    if (!rooms.length) {
+      return { tone: "idle", title: "", detail: "", hidden: true };
+    }
+
+    const closeNow = [];
+    const openNow = [];
+    const okOpen = [];
+    const okClosed = [];
+    const openContactNames = [];
+    let humidBias = false;
+
+    for (const [room, device] of rooms) {
+      const openings = roomOpeningState(room);
+      if (!openings.known) continue;
+
+      const tin = Number(device.temperature_c);
+      const text = Number(outdoorNow.temperature_c);
+      const kind = windowAdviceKind(
+        tin,
+        text,
+        outdoorNow.humidity,
+        WINDOW_DELTA_C
+      );
+      const label = roomDisplayName(room, device);
+      for (const name of openings.openNames) {
+        if (!openContactNames.includes(name)) openContactNames.push(name);
+      }
+
+      if (kind === "close" || kind === "humid") {
+        if (kind === "humid") humidBias = true;
+        if (openings.anyOpen) closeNow.push(label);
+        else okClosed.push(label);
+      } else if (kind === "open") {
+        if (openings.anyOpen) okOpen.push(label);
+        else openNow.push(label);
+      }
+    }
+
+    if (
+      !closeNow.length &&
+      !openNow.length &&
+      !okOpen.length &&
+      !okClosed.length
+    ) {
+      const hasContacts = doorSensors.some(
+        (s) => s.kind === "window" || s.kind === "door"
+      );
+      return {
+        hidden: false,
+        tone: "idle",
+        title: hasContacts
+          ? "No interior rooms with both a sensor and a contact"
+          : "No door/window contacts linked to rooms",
+        detail: hasContacts
+          ? "Assign a room on Overview → Doors & windows to include them here."
+          : "Enable [doors] and map contacts to rooms on Overview.",
+      };
+    }
+
+    const outT = Number(outdoorNow.temperature_c).toFixed(1);
+    let climateBit = `Outdoor ${outT} °C`;
+    if (outdoorNow.humidity != null && outdoorNow.humidity > 0) {
+      const dew = dewPoint(outdoorNow.temperature_c, outdoorNow.humidity);
+      climateBit += ` · dew ${dew.toFixed(1)} °C · RH ${Number(outdoorNow.humidity).toFixed(0)} %`;
+    }
+    const openBit = openContactNames.length
+      ? `Open now: ${openContactNames.join(", ")}`
+      : "All tracked openings closed";
+
+    const join = (arr) => arr.join(", ");
+
+    let tone = "idle";
+    let title = "No strong window action";
+    let detail = `${climateBit}. Indoor and outdoor temperatures are close. ${openBit}.`;
+
+    if (closeNow.length) {
+      tone = humidBias ? "humid" : "close";
+      title = `Close windows — ${join(closeNow)}`;
+      detail = humidBias
+        ? `${climateBit}. Outdoor is cooler but too humid while openings are still open. ${openBit}.`
+        : `${climateBit}. Outdoor air is warmer than indoors. ${openBit}.`;
+      if (openNow.length) {
+        detail = `${detail} Also open: ${join(openNow)}.`;
+      }
+    } else if (openNow.length) {
+      tone = "open";
+      title = `Open windows — ${join(openNow)}`;
+      detail = `${climateBit}. Outdoor is cooler and dry enough. ${openBit}.`;
+    } else if (okOpen.length) {
+      tone = "ok";
+      title = `Windows OK open — ${join(okOpen)}`;
+      detail = `${climateBit}. Cooling with outdoor air. ${openBit}.`;
+      if (okClosed.length) {
+        detail = `${detail} Closed OK: ${join(okClosed)}.`;
+      }
+    } else if (okClosed.length) {
+      tone = "ok";
+      title = `Windows OK closed — ${join(okClosed)}`;
+      detail = `${climateBit}. ${openBit}.`;
+    }
+
+    return { hidden: false, tone, title, detail };
+  }
+
+  function renderWindowBanner(model) {
+    if (!windowBannerEl) return;
+    if (!model || model.hidden) {
+      windowBannerEl.hidden = true;
+      return;
+    }
+    windowBannerEl.hidden = false;
+    windowBannerEl.className = `window-banner window-banner-tone-${model.tone || "idle"}`;
+    if (windowBannerTitleEl) windowBannerTitleEl.textContent = model.title || "";
+    if (windowBannerDetailEl) windowBannerDetailEl.textContent = model.detail || "";
+  }
+
+  async function updateWindowBanner(forecast) {
+    let fc = forecast;
+    if (!fc || !fc.enabled) {
+      const addrs = interiorRoomDevices().map(([, d]) => d.address);
+      if (!addrs.length) {
+        renderWindowBanner({ hidden: true });
+        return;
+      }
+      try {
+        fc = await fetchForecast(addrs);
+      } catch (err) {
+        console.warn(err);
+        renderWindowBanner({
+          hidden: false,
+          tone: "idle",
+          title: "Window advice unavailable",
+          detail: err.message || "Could not load outdoor forecast.",
+        });
+        return;
+      }
+    }
+    if (!fc || !fc.enabled) {
+      renderWindowBanner({
+        hidden: false,
+        tone: "idle",
+        title: "Window advice needs outdoor weather",
+        detail: "Allow location or set [weather] place in config.",
+      });
+      return;
+    }
+    renderWindowBanner(buildWindowBannerModel(fc));
+  }
+
   async function ensureNotifyPermission() {
     if (!("Notification" in window)) {
       return "unsupported";
@@ -1810,7 +2269,12 @@
   }
 
   function ensureCharts() {
-    if (tempChart && humChart && dewChart) return;
+    if (tempChart && humChart && dewChart) {
+      bindChartLegend(tempChart);
+      bindChartLegend(humChart);
+      bindChartLegend(dewChart);
+      return;
+    }
     const tempOpts = structuredClone(chartDefaults);
     tempOpts.plugins.windowBands = { bands: [] };
     tempOpts.plugins.hvacBands = { bands: [] };
@@ -1829,14 +2293,20 @@
       data: { datasets: [] },
       options: structuredClone(chartDefaults),
     });
+    bindChartLegend(tempChart);
+    bindChartLegend(humChart);
+    bindChartLegend(dewChart);
   }
 
   function makeDataset(label, color, data, fill, extra = {}) {
+    const colorText = String(color || "");
+    const hexBody = colorText.startsWith("#") ? colorText.slice(1) : colorText;
+    const hexOk = !colorText.startsWith("rgba") && /^[0-9a-fA-F]{6}$/.test(hexBody);
     return {
       label,
       data,
       borderColor: color,
-      backgroundColor: fill ? hexToRgba(color, 0.12) : "transparent",
+      backgroundColor: fill && hexOk ? hexToRgba(colorText.startsWith("#") ? colorText : `#${hexBody}`, 0.12) : "transparent",
       fill,
       tension: 0.25,
       pointRadius: 0,
@@ -1899,21 +2369,41 @@
       const delta = proj.bias_temp;
       const deltaTxt = `${delta >= 0 ? "+" : ""}${delta.toFixed(1)} °C`;
       let modelTxt = `Δ ${deltaTxt}`;
-      if (proj.model === "network") {
+      if (proj.model === "network" || proj.model === "network_open") {
         const room = proj.room ? String(proj.room) : "room";
-        modelTxt = `network · ${room} · Δ ${deltaTxt}`;
+        const openBit = proj.model === "network_open" ? " · windows open" : "";
+        modelTxt = `network · ${room}${openBit} · Δ ${deltaTxt}`;
+      } else if (proj.model === "rc_open") {
+        modelTxt = `τ ${Number(proj.tau_hours).toFixed(1)} h open · Δ ${deltaTxt}`;
+      } else if (proj.model === "rc_closed") {
+        modelTxt = `τ ${Number(proj.tau_hours).toFixed(1)} h closed · Δ ${deltaTxt}`;
       } else if (proj.model === "rc" && proj.tau_hours > 0) {
         modelTxt = `τ ${Number(proj.tau_hours).toFixed(1)} h · Δ ${deltaTxt}`;
       } else if (proj.model === "offset") {
         modelTxt = `offset · Δ ${deltaTxt}`;
+      }
+      let scenarioTxt = "";
+      const scenarios = proj.window_scenarios || {};
+      const closed = scenarios.windows_closed;
+      const opened = scenarios.windows_open;
+      if (closed && closed.summary && opened && opened.summary) {
+        const cSrc = closed.source && closed.source !== "default" ? `/${closed.source}` : "";
+        const oSrc = opened.source && opened.source !== "default" ? `/${opened.source}` : "";
+        scenarioTxt =
+          ` · closed${cSrc} ${Number(closed.summary.temp_min).toFixed(1)}–${Number(closed.summary.temp_max).toFixed(1)} °C` +
+          ` · open${oSrc} ${Number(opened.summary.temp_min).toFixed(1)}–${Number(opened.summary.temp_max).toFixed(1)} °C`;
       }
       cards.push(`
         <article class="projection-card" style="--device-color:${colorFor(device.address)}">
           <h4>${escapeHtml(deviceLabel(device))} · projected</h4>
           <p class="projection-meta">
             Temp ${s.temp_min.toFixed(1)}–${s.temp_max.toFixed(1)} °C
-            · Hum ${s.humidity_min.toFixed(0)}–${s.humidity_max.toFixed(0)} %
-            · ${modelTxt}
+            · Hum ${
+              s.humidity_min != null && s.humidity_max != null
+                ? `${s.humidity_min.toFixed(0)}–${s.humidity_max.toFixed(0)} %`
+                : "—"
+            }
+            · ${modelTxt}${scenarioTxt}
           </p>
         </article>
       `);
@@ -1957,13 +2447,13 @@
     const visible = filteredDevices();
     if (!devices.length) {
       overviewBody.innerHTML =
-        '<tr><td colspan="9" class="overview-empty">No devices detected</td></tr>';
+        '<tr><td colspan="10" class="overview-empty">No devices detected</td></tr>';
       overviewStatus.textContent = "Waiting for BLE devices…";
       return;
     }
     if (!visible.length) {
       overviewBody.innerHTML =
-        '<tr><td colspan="9" class="overview-empty">No sensors for these filters</td></tr>';
+        '<tr><td colspan="10" class="overview-empty">No sensors for these filters</td></tr>';
       overviewStatus.textContent = `0 / ${devices.length} sensor(s) · filters active`;
       return;
     }
@@ -2007,6 +2497,10 @@
       battTd.className = "num";
       battTd.textContent = device.battery != null ? `${device.battery} %` : "—";
 
+      const rssiTd = document.createElement("td");
+      rssiTd.className = "num rssi-cell";
+      rssiTd.innerHTML = rssiHtml(device.rssi);
+
       const sourceTd = document.createElement("td");
       sourceTd.className = "overview-source";
       sourceTd.innerHTML = sourceHtml(source);
@@ -2014,7 +2508,18 @@
       const timeTd = document.createElement("td");
       timeTd.textContent = fmtTime(device.last_reading_ts || device.last_seen);
 
-      tr.append(nameTd, zoneTd, heightTd, roomTd, tempTd, humTd, battTd, sourceTd, timeTd);
+      tr.append(
+        nameTd,
+        zoneTd,
+        heightTd,
+        roomTd,
+        tempTd,
+        humTd,
+        battTd,
+        rssiTd,
+        sourceTd,
+        timeTd
+      );
       tr.addEventListener("click", (ev) => {
         if (ev.target.closest("select, a, button")) return;
         selected = new Set([device.address]);
@@ -2094,6 +2599,10 @@
           <div class="metric">
             <span class="metric-label">Battery</span>
             <span class="metric-value">${device.battery != null ? `${device.battery} %` : "—"}</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Signal</span>
+            <span class="metric-value metric-rssi">${rssiHtml(device.rssi)}</span>
           </div>
           <div class="metric">
             <span class="metric-label">Last reading</span>
@@ -2363,6 +2872,32 @@
               { borderDash: [2, 4], borderWidth: 1.5 }
             )
           );
+
+          const scenarios = proj.window_scenarios || {};
+          const closedPts = (scenarios.windows_closed && scenarios.windows_closed.points) || [];
+          const openPts = (scenarios.windows_open && scenarios.windows_open.points) || [];
+          if (closedPts.length) {
+            tempDatasets.push(
+              makeDataset(
+                `${deviceLabel(device)} (windows closed)`,
+                color,
+                closedPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [8, 4], borderWidth: 1.35 }
+              )
+            );
+          }
+          if (openPts.length) {
+            tempDatasets.push(
+              makeDataset(
+                `${deviceLabel(device)} (windows open)`,
+                color,
+                openPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [1, 3], borderWidth: 1.85 }
+              )
+            );
+          }
         }
       }
     }
@@ -2403,13 +2938,16 @@
       setTempPowerScale(false);
     }
 
-    tempChart.data.datasets = tempDatasets;
-    humChart.data.datasets = humDatasets;
-    dewChart.data.datasets = dewDatasets;
+    tempChart.data.datasets = withLegendState("temp", tempDatasets);
+    humChart.data.datasets = withLegendState("hum", humDatasets);
+    dewChart.data.datasets = withLegendState("dew", dewDatasets);
     const showLegend = tempDatasets.length > 1;
     tempChart.options.plugins.legend.display = showLegend;
     humChart.options.plugins.legend.display = showLegend;
     dewChart.options.plugins.legend.display = showLegend;
+    bindChartLegend(tempChart);
+    bindChartLegend(humChart);
+    bindChartLegend(dewChart);
 
     let windowExtra = "";
     if (
@@ -2469,6 +3007,7 @@
     }
     historyLoaded = true;
     evaluateWindowNotifications(forecast).catch((err) => console.warn(err));
+    updateWindowBanner(forecast).catch((err) => console.warn(err));
 
     const totalPoints = results.reduce((n, r) => n + r.points.length, 0);
     const names = results.map((r) => deviceLabel(r.device)).join(", ");
@@ -2495,8 +3034,14 @@
         await loadHistory();
       } else if (currentView === "facades") {
         await loadFacades();
-      } else if (windowNotify) {
-        await evaluateWindowNotifications(null);
+        await updateWindowBanner(null);
+      } else {
+        const bannerPromise = updateWindowBanner(null);
+        if (windowNotify) {
+          await evaluateWindowNotifications(null);
+        }
+        await bannerPromise;
+        await loadBackfill();
       }
     } catch (err) {
       console.error(err);
@@ -2589,6 +3134,15 @@
         });
       }
     });
+  }
+
+  if (chartHeightEl) {
+    chartHeightEl.value = String(chartHeight);
+    const onHeightInput = () => {
+      chartHeight = applyChartHeight(chartHeightEl.value);
+    };
+    chartHeightEl.addEventListener("input", onHeightInput);
+    chartHeightEl.addEventListener("change", onHeightInput);
   }
 
   if (showWindowBandsEl) {
@@ -2731,6 +3285,41 @@
   }
 
   updateGeoStatus();
+
+  if (backfillPauseBtn) {
+    backfillPauseBtn.addEventListener("click", async () => {
+      const paused = Boolean(backfillSnapshot && backfillSnapshot.paused);
+      backfillPauseBtn.disabled = true;
+      try {
+        const res = await fetch(
+          paused ? "/api/backfill/resume" : "/api/backfill/pause",
+          { method: "POST" }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        renderBackfill(await res.json());
+        syncBackfillPolling();
+      } catch (err) {
+        console.warn(err);
+      } finally {
+        backfillPauseBtn.disabled = false;
+      }
+    });
+  }
+  if (backfillRefreshBtn) {
+    backfillRefreshBtn.addEventListener("click", async () => {
+      backfillRefreshBtn.disabled = true;
+      try {
+        const res = await fetch("/api/backfill/refresh", { method: "POST" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        renderBackfill(await res.json());
+        syncBackfillPolling();
+      } catch (err) {
+        console.warn(err);
+      } finally {
+        backfillRefreshBtn.disabled = false;
+      }
+    });
+  }
 
   // Collapsible panels — default collapsed; remember open state
   if (foldCurrentEl) {

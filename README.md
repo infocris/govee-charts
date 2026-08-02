@@ -260,6 +260,8 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `GET /api/hvac` — latest climate + power snapshot
 - `GET /api/hvac/history?hours=168` — climate events + active bands
 - `GET /api/power/history?hours=168` — power samples (W)
+- `GET /api/backfill` — GATT history backfill queue snapshot
+- `POST /api/backfill/pause` / `resume` / `refresh` — control the backfill worker
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
 - `GET /api/health` — health + `node_id`
 
@@ -267,3 +269,4 @@ Data © [Open-Meteo](https://open-meteo.com/).
 
 - Soft-blocked Bluetooth: `rfkill unblock bluetooth`
 - No Govee cloud API — BLE only
+- Optional GATT history backfill (`[backfill]`) recovers onboard minute samples for gaps missed by live ads. One device at a time; lookback up to ~20 days. Prefer sensors with RSSI ≥ `min_rssi` (default −75 dBm).

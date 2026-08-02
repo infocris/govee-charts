@@ -175,6 +175,17 @@ retention_days = 365
 # Optional one-shot import from HA recorder SQLite on startup:
 # ha_db_path = "/path/to/home-assistant_v2.db"
 
+# Recover onboard minute history via GATT for gaps missed by live BLE ads.
+# Single worker; newest windows first (1 h → 24 h → 7 d → deeper day chunks).
+# Requires local BLE scanner. Devices farther than min_rssi are deferred.
+[backfill]
+enabled = true
+lookback_days = 20
+poll_seconds = 30
+max_job_minutes = 60
+min_rssi = -75
+seen_max_age_seconds = 600
+
 # Optional friendly labels keyed by BLE MAC (uppercase).
 # Also used to map macOS UUID addresses to real MACs via the Govee name suffix
 # (e.g. GVH5075_1270 → A4:C1:38:???:12:70).

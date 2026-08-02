@@ -9,6 +9,15 @@
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
 <body>
+  <aside id="window-banner" class="window-banner" hidden aria-live="polite">
+    <div class="window-banner-inner">
+      <span class="window-banner-swatch" aria-hidden="true"></span>
+      <div class="window-banner-copy">
+        <strong class="window-banner-title" id="window-banner-title"></strong>
+        <span class="window-banner-detail" id="window-banner-detail"></span>
+      </div>
+    </div>
+  </aside>
   <header class="top">
     <div class="brand">Govee Charts</div>
     <p class="tagline">Temperature and humidity — local BLE scan</p>
@@ -29,6 +38,22 @@
         <h2>All sensors</h2>
         <p class="overview-hint">Edit zone / height / room inline — click a row to compare charts</p>
       </div>
+
+      <div class="backfill-panel" id="backfill-panel" hidden>
+        <div class="backfill-head">
+          <h3>History backfill</h3>
+          <div class="backfill-actions">
+            <button type="button" class="backfill-btn" id="backfill-refresh" title="Re-scan gaps">Refresh</button>
+            <button type="button" class="backfill-btn" id="backfill-pause" title="Pause or resume">Pause</button>
+          </div>
+        </div>
+        <div class="backfill-current" id="backfill-current">
+          <p class="backfill-idle" id="backfill-idle">Queue empty — waiting for gaps</p>
+        </div>
+        <ul class="backfill-queue" id="backfill-queue" hidden></ul>
+        <p class="backfill-status" id="backfill-status"></p>
+      </div>
+
       <div class="model-filters" id="model-filters" role="group" aria-label="Filter by model"></div>
       <div class="category-filters" id="category-filters" aria-label="Filter by category">
         <div class="filter-row" id="zone-filters" role="group" aria-label="Zone"></div>
@@ -60,6 +85,9 @@
               <th scope="col" class="num">
                 <button type="button" class="sort-btn" data-sort="battery">Battery</button>
               </th>
+              <th scope="col" class="num">
+                <button type="button" class="sort-btn" data-sort="rssi">Signal</button>
+              </th>
               <th scope="col">
                 <button type="button" class="sort-btn" data-sort="last_source">Source</button>
               </th>
@@ -69,7 +97,7 @@
             </tr>
           </thead>
           <tbody id="overview-body">
-            <tr><td colspan="9" class="overview-empty">Loading…</td></tr>
+            <tr><td colspan="10" class="overview-empty">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -142,6 +170,11 @@
         </label>
         <button type="button" id="locate-btn" class="linkish locate-btn" title="Use browser location">Locate</button>
         <span class="geo-status" id="geo-status" aria-live="polite"></span>
+        <label class="chart-height-control" for="chart-height">
+          <span>Chart height</span>
+          <input type="range" id="chart-height" min="160" max="520" step="20" value="260">
+          <span class="chart-height-value" id="chart-height-value">260 px</span>
+        </label>
       </section>
 
       <div class="hvac-status" id="hvac-status" hidden aria-live="polite"></div>

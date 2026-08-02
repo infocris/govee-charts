@@ -5,8 +5,10 @@ PIP         := $(BIN)/pip
 PY          := $(BIN)/python
 MODULE      := -m govee_charts.main
 UNAME_S     := $(shell uname -s)
+AGENT_CHAT_ID_FILE := .cursor/agent-chat-id
+AGENT_CHAT_ID ?= $(shell test -f $(AGENT_CHAT_ID_FILE) && tr -d '[:space:]' < $(AGENT_CHAT_ID_FILE))
 
-.PHONY: help install venv deps config run serve discover ssl \
+.PHONY: help install venv deps config run serve discover ssl agent agent-ls agent-new \
 	systemd-install systemd-uninstall systemd-restart systemd-status \
 	launchd-install launchd-uninstall launchd-restart launchd-status \
 	restart service-status
@@ -18,6 +20,9 @@ help:
 	@echo "  make run                Run BLE collector + web UI"
 	@echo "  make serve              Run web UI only (no BLE scanner)"
 	@echo "  make discover           Scan BLE Govee devices for 30s then exit"
+	@echo "  make agent              Resume the pinned Cursor agent for this project"
+	@echo "  make agent-ls           List Cursor agent sessions"
+	@echo "  make agent-new          Create a chat and pin its id in $(AGENT_CHAT_ID_FILE)"
 	@echo "  make systemd-install    Install systemd service (Linux, sudo, starts on boot)"
 	@echo "  make systemd-uninstall  Remove systemd service"
 	@echo "  make launchd-install    Install LaunchAgent (macOS, starts at login)"
@@ -52,6 +57,49 @@ discover: deps config
 ssl:
 	chmod +x scripts/gen-ssl-cert.sh
 	./scripts/gen-ssl-cert.sh
+
+# Resume the project Cursor agent (chat id in .cursor/agent-chat-id).
+agent:
+	@if [ -z "$(AGENT_CHAT_ID)" ]; then \
+		echo "No agent chat id. Run: make agent-new"; \
+		echo "Or set AGENT_CHAT_ID=... / write $(AGENT_CHAT_ID_FILE)"; \
+		exit 1; \
+	fi
+	@echo "Resuming agent $(AGENT_CHAT_ID)"
+	@if command -v cursor-agent >/dev/null 2>&1; then \
+		cursor-agent --workspace "$(CURDIR)" --trust --resume="$(AGENT_CHAT_ID)"; \
+	elif command -v cursor >/dev/null 2>&1; then \
+		cursor agent --workspace "$(CURDIR)" --trust --resume="$(AGENT_CHAT_ID)"; \
+	else \
+		echo "cursor-agent / cursor not found in PATH"; \
+		exit 1; \
+	fi
+
+agent-ls:
+	@if command -v cursor-agent >/dev/null 2>&1; then \
+		cursor-agent ls; \
+	elif command -v cursor >/dev/null 2>&1; then \
+		cursor agent ls; \
+	else \
+		echo "cursor-agent / cursor not found in PATH"; \
+		exit 1; \
+	fi
+
+agent-new:
+	@mkdir -p .cursor
+	@if command -v cursor-agent >/dev/null 2>&1; then \
+		id=$$(cursor-agent create-chat); \
+	elif command -v cursor >/dev/null 2>&1; then \
+		id=$$(cursor agent create-chat); \
+	else \
+		echo "cursor-agent / cursor not found in PATH"; \
+		exit 1; \
+	fi; \
+	id=$$(printf '%s' "$$id" | tr -d '[:space:]'); \
+	if [ -z "$$id" ]; then echo "create-chat returned empty id"; exit 1; fi; \
+	printf '%s\n' "$$id" > $(AGENT_CHAT_ID_FILE); \
+	echo "Pinned $$id in $(AGENT_CHAT_ID_FILE)"; \
+	echo "Resume with: make agent"
 
 systemd-install: install
 	chmod +x scripts/install-systemd.sh

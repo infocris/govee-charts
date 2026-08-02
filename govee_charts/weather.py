@@ -31,6 +31,10 @@ _MIN_ALIGNED = 12
 _ALIGN_MAX_GAP_S = 2700.0
 # Exterior sensors track outdoor weather quickly.
 _EXTERIOR_TAU_HOURS = 0.25
+# What-if: open windows couple strongly to outdoor air (≈20 min).
+_WINDOW_OPEN_TAU_HOURS = 0.35
+# Minimum aligned samples to trust a regime-specific RC fit.
+_MIN_REGIME_ALIGNED = 6
 
 
 @dataclass(frozen=True)
@@ -185,9 +189,11 @@ def fit_rc(
     tau_min_hours: float,
     tau_max_hours: float,
     tau_default_hours: float,
+    min_aligned: int | None = None,
 ) -> tuple[str, float, float]:
     """Fit Δ then τ. Returns (model, bias_temp, tau_hours)."""
-    if len(pairs) < _MIN_ALIGNED:
+    need = _MIN_ALIGNED if min_aligned is None else max(3, int(min_aligned))
+    if len(pairs) < need:
         return "offset", 0.0, 0.0
 
     deltas = [t_int - t_ext for _, t_int, t_ext in pairs]
@@ -230,6 +236,227 @@ def simulate_rc_temp(
         out.append(t)
         prev_ts = ts
     return out
+
+
+def _future_outdoor_from(
+    forecast_outdoor: list[dict[str, Any]],
+    *,
+    start_ts: float,
+    until: float,
+) -> list[dict[str, Any]]:
+    """Hourly outdoor points strictly after start_ts (Open-Meteo hour grid)."""
+    return [
+        p
+        for p in forecast_outdoor
+        if float(p["ts"]) > float(start_ts) and float(p["ts"]) <= float(until)
+    ]
+
+
+def _anchor_temp_points(
+    future_points: list[dict[str, Any]],
+    *,
+    ts0: float,
+    t0: float,
+    humidity: float | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Prepend a point at the simulation start so chart series begin at 'now'
+    instead of the next Open-Meteo hour.
+    """
+    anchor: dict[str, Any] = {
+        "ts": float(ts0),
+        "temperature_c": round(float(t0), 2),
+    }
+    if humidity is not None:
+        anchor["humidity"] = round(max(0.0, min(100.0, float(humidity))), 2)
+    trimmed = [p for p in future_points if float(p["ts"]) > float(ts0) + 1.0]
+    return [anchor, *trimmed]
+
+
+def build_window_scenarios(
+    outdoor_future: list[dict[str, Any]],
+    *,
+    t0: float,
+    ts0: float,
+    closed_delta: float,
+    closed_tau_hours: float,
+    open_tau_hours: float = _WINDOW_OPEN_TAU_HOURS,
+    open_delta: float = 0.0,
+    closed_source: str = "default",
+    open_source: str = "default",
+    anchor_ts: float | None = None,
+) -> dict[str, Any]:
+    """
+    What-if indoor temperatures driven only by outdoor forecast.
+
+    - windows_closed: slow building RC (fitted Δ / τ)
+    - windows_open: fast exchange toward outdoor air (Δ ≈ 0)
+    """
+    closed_tau = max(1e-3, float(closed_tau_hours))
+    open_tau = max(1e-3, float(open_tau_hours))
+    chart_ts = float(anchor_ts if anchor_ts is not None else ts0)
+    closed_temps = simulate_rc_temp(
+        outdoor_future,
+        t0=t0,
+        ts0=ts0,
+        delta=float(closed_delta),
+        tau_hours=closed_tau,
+    )
+    open_temps = simulate_rc_temp(
+        outdoor_future,
+        t0=t0,
+        ts0=ts0,
+        delta=float(open_delta),
+        tau_hours=open_tau,
+    )
+
+    def _pack(
+        temps: list[float], delta: float, tau: float, source: str
+    ) -> dict[str, Any]:
+        points = _anchor_temp_points(
+            [
+                {"ts": p["ts"], "temperature_c": round(temp, 2)}
+                for p, temp in zip(outdoor_future, temps)
+            ],
+            ts0=chart_ts,
+            t0=t0,
+        )
+        vals = [pt["temperature_c"] for pt in points]
+        return {
+            "tau_hours": round(tau, 2),
+            "bias_temp": round(delta, 2),
+            "source": source,
+            "points": points,
+            "summary": {
+                "temp_min": min(vals) if vals else None,
+                "temp_max": max(vals) if vals else None,
+            },
+        }
+
+    return {
+        "windows_closed": _pack(
+            closed_temps, closed_delta, closed_tau, closed_source
+        ),
+        "windows_open": _pack(open_temps, open_delta, open_tau, open_source),
+    }
+
+
+def _opening_state_at(
+    timeline: list[tuple[float, str]], ts: float
+) -> str | None:
+    if not timeline:
+        return None
+    state = timeline[0][1]
+    for et, st in timeline:
+        if et <= ts:
+            state = st
+        else:
+            break
+    return state
+
+
+def split_pairs_by_opening(
+    pairs: list[tuple[float, float, float]],
+    timeline: list[tuple[float, str]],
+) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
+    """Split aligned (ts, T_int, T_ext) pairs into open vs closed regimes."""
+    open_pairs: list[tuple[float, float, float]] = []
+    closed_pairs: list[tuple[float, float, float]] = []
+    for pair in pairs:
+        state = _opening_state_at(timeline, pair[0])
+        if state == "open":
+            open_pairs.append(pair)
+        elif state == "closed":
+            closed_pairs.append(pair)
+    return open_pairs, closed_pairs
+
+
+def fit_opening_regimes(
+    pairs: list[tuple[float, float, float]],
+    timeline: list[tuple[float, str]],
+    *,
+    tau_min_hours: float,
+    tau_max_hours: float,
+    tau_default_hours: float,
+) -> dict[str, Any]:
+    """
+    Fit separate RC (Δ, τ) for windows-open and windows-closed periods.
+
+    Falls back to priors when a regime has too few aligned samples.
+    """
+    open_pairs, closed_pairs = split_pairs_by_opening(pairs, timeline)
+
+    closed_model, closed_delta, closed_tau = fit_rc(
+        closed_pairs if len(closed_pairs) >= _MIN_REGIME_ALIGNED else pairs,
+        tau_min_hours=tau_min_hours,
+        tau_max_hours=tau_max_hours,
+        tau_default_hours=tau_default_hours,
+        min_aligned=_MIN_REGIME_ALIGNED,
+    )
+    if len(closed_pairs) >= _MIN_REGIME_ALIGNED and closed_model == "rc":
+        closed_source = "history"
+    elif closed_model == "rc":
+        closed_source = "mixed"
+    else:
+        closed_delta = (
+            _median([t_int - t_ext for _, t_int, t_ext in closed_pairs])
+            if closed_pairs
+            else (
+                _median([t_int - t_ext for _, t_int, t_ext in pairs])
+                if pairs
+                else 0.0
+            )
+        )
+        closed_tau = float(tau_default_hours)
+        closed_source = "default"
+
+    if len(open_pairs) >= _MIN_REGIME_ALIGNED:
+        open_model, open_delta, open_tau = fit_rc(
+            open_pairs,
+            tau_min_hours=min(tau_min_hours, _WINDOW_OPEN_TAU_HOURS),
+            tau_max_hours=min(tau_max_hours, 6.0),
+            tau_default_hours=_WINDOW_OPEN_TAU_HOURS,
+            min_aligned=_MIN_REGIME_ALIGNED,
+        )
+        if open_model == "rc":
+            open_source = "history"
+        else:
+            open_delta = _median(
+                [t_int - t_ext for _, t_int, t_ext in open_pairs]
+            )
+            open_tau = _WINDOW_OPEN_TAU_HOURS
+            open_source = "offset"
+    elif open_pairs:
+        open_delta = _median([t_int - t_ext for _, t_int, t_ext in open_pairs])
+        open_tau = _WINDOW_OPEN_TAU_HOURS
+        open_source = "offset"
+    else:
+        open_delta = 0.0
+        open_tau = _WINDOW_OPEN_TAU_HOURS
+        open_source = "default"
+
+    # Open coupling should not be slower than closed.
+    if open_source in ("history", "offset") and closed_source in (
+        "history",
+        "mixed",
+        "default",
+    ):
+        open_tau = min(open_tau, max(_WINDOW_OPEN_TAU_HOURS, closed_tau * 0.5))
+
+    return {
+        "windows_closed": {
+            "delta": float(closed_delta),
+            "tau_hours": float(closed_tau),
+            "source": closed_source,
+            "samples": len(closed_pairs),
+        },
+        "windows_open": {
+            "delta": float(open_delta),
+            "tau_hours": float(open_tau),
+            "source": open_source,
+            "samples": len(open_pairs),
+        },
+    }
 
 
 class WeatherService:
@@ -606,9 +833,9 @@ class WeatherService:
         if not layout.can_network_project(set(by_room.keys())):
             return None
 
-        future_outdoor = [
-            p for p in forecast_outdoor if p["ts"] >= now and p["ts"] <= until
-        ]
+        future_outdoor = _future_outdoor_from(
+            forecast_outdoor, start_ts=now, until=until
+        )
         if not future_outdoor:
             return None
 
@@ -650,19 +877,79 @@ class WeatherService:
             )
 
             bias_temp = instant_bias
-            if layout.rooms[room].faces_exterior:
-                calib_since = now - self.cfg.calib_hours * 3600.0
-                history = await db.history(addr, self.cfg.calib_hours)
-                pairs = _align_hourly(
-                    forecast_outdoor,
-                    history,
-                    since=calib_since,
-                    until=now,
+            closed_tau = self.cfg.tau_default_hours
+            closed_delta = float(instant_bias)
+            open_tau = _WINDOW_OPEN_TAU_HOURS
+            open_delta = 0.0
+            closed_source = "default"
+            open_source = "default"
+            opening_samples = {"open": 0, "closed": 0}
+            timeline = await db.room_contact_timeline(
+                room, hours=self.cfg.calib_hours
+            )
+            calib_since = now - self.cfg.calib_hours * 3600.0
+            history = await db.history(addr, self.cfg.calib_hours)
+            pairs = _align_hourly(
+                forecast_outdoor,
+                history,
+                since=calib_since,
+                until=now,
+            )
+            if len(pairs) >= 3:
+                bias_temp = _median(
+                    [t_int - t_ext for _, t_int, t_ext in pairs]
                 )
-                if len(pairs) >= 3:
-                    bias_temp = _median(
-                        [t_int - t_ext for _, t_int, t_ext in pairs]
-                    )
+                closed_delta = float(bias_temp)
+            if pairs and timeline:
+                regimes = fit_opening_regimes(
+                    pairs,
+                    timeline,
+                    tau_min_hours=self.cfg.tau_min_hours,
+                    tau_max_hours=self.cfg.tau_max_hours,
+                    tau_default_hours=self.cfg.tau_default_hours,
+                )
+                closed_fit = regimes["windows_closed"]
+                open_fit = regimes["windows_open"]
+                closed_delta = float(closed_fit["delta"])
+                closed_tau = float(closed_fit["tau_hours"])
+                closed_source = str(closed_fit["source"])
+                open_delta = float(open_fit["delta"])
+                open_tau = float(open_fit["tau_hours"])
+                open_source = str(open_fit["source"])
+                opening_samples = {
+                    "open": int(open_fit["samples"]),
+                    "closed": int(closed_fit["samples"]),
+                }
+            elif pairs:
+                model_rc, fitted_delta, fitted_tau = fit_rc(
+                    pairs,
+                    tau_min_hours=self.cfg.tau_min_hours,
+                    tau_max_hours=self.cfg.tau_max_hours,
+                    tau_default_hours=self.cfg.tau_default_hours,
+                )
+                if model_rc == "rc":
+                    closed_delta = fitted_delta
+                    closed_tau = fitted_tau
+                    closed_source = "mixed"
+
+            current_open = _opening_state_at(timeline, last_ts)
+            # When windows are open, outdoor air dominates over the closed
+            # apartment network for this room's forward projection.
+            if current_open == "open":
+                temps = simulate_rc_temp(
+                    future_outdoor,
+                    t0=float(device["temperature_c"]),
+                    ts0=last_ts,
+                    delta=open_delta,
+                    tau_hours=open_tau,
+                )
+                proj_model = "network_open"
+                proj_tau = open_tau
+                proj_bias = open_delta
+            else:
+                proj_model = "network"
+                proj_tau = 0.0
+                proj_bias = bias_temp
 
             points: list[dict[str, Any]] = []
             for p, temp in zip(future_outdoor, temps):
@@ -676,22 +963,42 @@ class WeatherService:
                         ),
                     }
                 )
+            points = _anchor_temp_points(
+                points,
+                ts0=now,
+                t0=float(device["temperature_c"]),
+                humidity=last_hum,
+            )
             temp_vals = [p["temperature_c"] for p in points]
-            hum_vals = [p["humidity"] for p in points]
+            hum_vals = [p["humidity"] for p in points if "humidity" in p]
             projections[addr] = {
                 "name": device.get("name") or addr,
-                "model": "network",
+                "model": proj_model,
                 "room": room,
-                "tau_hours": 0.0,
-                "bias_temp": round(bias_temp, 2),
+                "tau_hours": round(proj_tau, 2),
+                "bias_temp": round(proj_bias, 2),
                 "bias_humidity": round(bias_hum, 2),
                 "points": points,
                 "summary": {
                     "temp_min": min(temp_vals),
                     "temp_max": max(temp_vals),
-                    "humidity_min": min(hum_vals),
-                    "humidity_max": max(hum_vals),
+                    "humidity_min": min(hum_vals) if hum_vals else None,
+                    "humidity_max": max(hum_vals) if hum_vals else None,
                 },
+                "opening_state": current_open,
+                "opening_samples": opening_samples,
+                "window_scenarios": build_window_scenarios(
+                    future_outdoor,
+                    t0=float(device["temperature_c"]),
+                    ts0=last_ts,
+                    closed_delta=closed_delta,
+                    closed_tau_hours=closed_tau,
+                    open_delta=open_delta,
+                    open_tau_hours=open_tau,
+                    closed_source=closed_source,
+                    open_source=open_source,
+                    anchor_ts=now,
+                ),
             }
 
         return projections if projections else None
@@ -721,11 +1028,9 @@ class WeatherService:
         instant_bias_temp = float(last_temp) - float(outdoor_now["temperature_c"])
         bias_hum = float(last_hum) - float(outdoor_now["humidity"])
 
-        future_outdoor = [
-            p
-            for p in forecast_outdoor
-            if p["ts"] >= now and p["ts"] <= until
-        ]
+        future_outdoor = _future_outdoor_from(
+            forecast_outdoor, start_ts=now, until=until
+        )
         if not future_outdoor:
             return None
 
@@ -733,6 +1038,8 @@ class WeatherService:
         model = "offset"
         bias_temp = instant_bias_temp
         tau_hours = 0.0
+        regimes = None
+        current_open = None
 
         if zone == "exterior":
             # Fast tracking of outdoor air; Δ from recent median when possible.
@@ -766,6 +1073,22 @@ class WeatherService:
                 since=calib_since,
                 until=now,
             )
+            room = (device.get("room") or "").strip().lower()
+            timeline = (
+                await db.room_contact_timeline(room, hours=self.cfg.calib_hours)
+                if room and room != "other"
+                else []
+            )
+            regimes = None
+            if timeline and pairs:
+                regimes = fit_opening_regimes(
+                    pairs,
+                    timeline,
+                    tau_min_hours=self.cfg.tau_min_hours,
+                    tau_max_hours=self.cfg.tau_max_hours,
+                    tau_default_hours=self.cfg.tau_default_hours,
+                )
+
             model, fitted_delta, fitted_tau = fit_rc(
                 pairs,
                 tau_min_hours=self.cfg.tau_min_hours,
@@ -775,6 +1098,24 @@ class WeatherService:
             if model == "rc":
                 bias_temp = fitted_delta
                 tau_hours = fitted_tau
+            else:
+                bias_temp = instant_bias_temp
+                tau_hours = 0.0
+
+            # If openings are currently open/closed, prefer the matching regime.
+            current_open = _opening_state_at(timeline, float(last_ts))
+            if regimes and current_open == "open":
+                open_fit = regimes["windows_open"]
+                bias_temp = float(open_fit["delta"])
+                tau_hours = float(open_fit["tau_hours"])
+                model = "rc_open"
+            elif regimes and current_open == "closed":
+                closed_fit = regimes["windows_closed"]
+                bias_temp = float(closed_fit["delta"])
+                tau_hours = float(closed_fit["tau_hours"])
+                model = "rc_closed"
+
+            if model in ("rc", "rc_open", "rc_closed") and tau_hours > 0:
                 temps = simulate_rc_temp(
                     future_outdoor,
                     t0=float(last_temp),
@@ -786,6 +1127,7 @@ class WeatherService:
                 # Instant equilibrium (legacy offset).
                 bias_temp = instant_bias_temp
                 tau_hours = 0.0
+                model = "offset"
                 temps = [
                     float(p["temperature_c"]) + bias_temp for p in future_outdoor
                 ]
@@ -802,10 +1144,16 @@ class WeatherService:
                     ),
                 }
             )
+        points = _anchor_temp_points(
+            points,
+            ts0=now,
+            t0=float(last_temp),
+            humidity=float(last_hum),
+        )
 
         temp_vals = [p["temperature_c"] for p in points]
-        hum_vals = [p["humidity"] for p in points]
-        return {
+        hum_vals = [p["humidity"] for p in points if "humidity" in p]
+        result: dict[str, Any] = {
             "name": device.get("name") or addr,
             "model": model,
             "tau_hours": round(tau_hours, 2),
@@ -815,10 +1163,46 @@ class WeatherService:
             "summary": {
                 "temp_min": min(temp_vals),
                 "temp_max": max(temp_vals),
-                "humidity_min": min(hum_vals),
-                "humidity_max": max(hum_vals),
+                "humidity_min": min(hum_vals) if hum_vals else None,
+                "humidity_max": max(hum_vals) if hum_vals else None,
             },
         }
+        if zone != "exterior":
+            if regimes:
+                closed_fit = regimes["windows_closed"]
+                open_fit = regimes["windows_open"]
+                result["window_scenarios"] = build_window_scenarios(
+                    future_outdoor,
+                    t0=float(last_temp),
+                    ts0=float(last_ts),
+                    closed_delta=float(closed_fit["delta"]),
+                    closed_tau_hours=float(closed_fit["tau_hours"]),
+                    open_delta=float(open_fit["delta"]),
+                    open_tau_hours=float(open_fit["tau_hours"]),
+                    closed_source=str(closed_fit["source"]),
+                    open_source=str(open_fit["source"]),
+                    anchor_ts=now,
+                )
+                result["opening_state"] = current_open
+                result["opening_samples"] = {
+                    "open": int(open_fit["samples"]),
+                    "closed": int(closed_fit["samples"]),
+                }
+            else:
+                closed_tau = (
+                    tau_hours
+                    if model in ("rc", "rc_closed") and tau_hours > 0
+                    else self.cfg.tau_default_hours
+                )
+                result["window_scenarios"] = build_window_scenarios(
+                    future_outdoor,
+                    t0=float(last_temp),
+                    ts0=float(last_ts),
+                    closed_delta=float(bias_temp),
+                    closed_tau_hours=float(closed_tau),
+                    anchor_ts=now,
+                )
+        return result
 
     async def build_response(
         self,

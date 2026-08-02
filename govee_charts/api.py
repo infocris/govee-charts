@@ -23,6 +23,7 @@ from govee_charts.apartment import (
     save_overrides,
     ventilation_mode,
 )
+from govee_charts.backfill import BackfillService
 from govee_charts.categories import normalize_door_patch, normalize_patch, taxonomy
 from govee_charts.db import Database
 from govee_charts.decode import Reading
@@ -82,6 +83,7 @@ def create_app(
     suffix_map: dict[str, str] | None = None,
     weather: WeatherService | None = None,
     on_restart: Callable[[], None] | None = None,
+    backfill: BackfillService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Govee Charts", docs_url=None, redoc_url=None)
     app.state.db = db
@@ -92,6 +94,7 @@ def create_app(
     app.state.peers = [p.rstrip("/") for p in (peers or []) if p.strip()]
     app.state.weather = weather
     app.state.on_restart = on_restart
+    app.state.backfill = backfill
     app.state.restart_scheduled = False
 
     @app.get("/")
@@ -105,6 +108,53 @@ def create_app(
             "node_id": app.state.node_id,
             "systemd": bool(os.environ.get("INVOCATION_ID")),
         }
+
+    @app.get("/api/backfill")
+    async def api_backfill() -> dict[str, Any]:
+        """Live GATT history backfill queue snapshot."""
+        service: BackfillService | None = app.state.backfill
+        if service is None:
+            return {
+                "enabled": False,
+                "paused": False,
+                "worker": "disabled",
+                "current": None,
+                "queue": [],
+                "totals": {
+                    "pending": 0,
+                    "running": 0,
+                    "done": 0,
+                    "failed": 0,
+                },
+                "config": None,
+            }
+        return await service.snapshot()
+
+    @app.post("/api/backfill/pause")
+    async def api_backfill_pause() -> dict[str, Any]:
+        service: BackfillService | None = app.state.backfill
+        if service is None:
+            raise HTTPException(status_code=503, detail="Backfill not available")
+        service.pause()
+        return await service.snapshot()
+
+    @app.post("/api/backfill/resume")
+    async def api_backfill_resume() -> dict[str, Any]:
+        service: BackfillService | None = app.state.backfill
+        if service is None:
+            raise HTTPException(status_code=503, detail="Backfill not available")
+        service.resume()
+        return await service.snapshot()
+
+    @app.post("/api/backfill/refresh")
+    async def api_backfill_refresh() -> dict[str, Any]:
+        service: BackfillService | None = app.state.backfill
+        if service is None:
+            raise HTTPException(status_code=503, detail="Backfill not available")
+        enqueued = await service.refresh_gaps(force=True)
+        snap = await service.snapshot()
+        snap["enqueued"] = enqueued
+        return snap
 
     @app.post("/api/restart")
     async def api_restart() -> dict[str, Any]:

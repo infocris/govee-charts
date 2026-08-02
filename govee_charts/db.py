@@ -99,6 +99,32 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_power_samples_entity_ts
                 ON power_samples(entity_id, ts);
+
+            CREATE TABLE IF NOT EXISTS backfill_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                window_start REAL NOT NULL,
+                window_end REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                priority INTEGER NOT NULL,
+                samples_done INTEGER NOT NULL DEFAULT 0,
+                samples_expected INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                updated_at REAL NOT NULL,
+                UNIQUE(address, phase, window_start, window_end)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_backfill_jobs_status_pri
+                ON backfill_jobs(status, priority, window_end DESC);
+
+            CREATE TABLE IF NOT EXISTS backfill_state (
+                address TEXT PRIMARY KEY,
+                last_success_ts REAL,
+                last_attempt_ts REAL,
+                last_rssi INTEGER,
+                last_battery INTEGER
+            );
             """
         )
         await self._migrate()
@@ -661,6 +687,144 @@ class Database:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def room_contact_timeline(
+        self,
+        room: str,
+        *,
+        hours: float = 168.0,
+    ) -> list[tuple[float, str]]:
+        """
+        Debounced open/closed timeline for a room's exterior openings.
+
+        Prefers `window` contacts; falls back to `door`. Dedupes HA entity_id
+        vs Ring UUID by normalized name (same rule as list_door_sensors).
+        Returns sorted (ts, state) change points ('open' / 'closed').
+        """
+        room = (room or "").strip().lower()
+        if not room:
+            return []
+
+        since = time.time() - hours * 3600.0
+        cursor = await self.db.execute(
+            """
+            SELECT
+                e.sensor_id,
+                COALESCE(m.name, e.name) AS name,
+                e.state,
+                e.ts,
+                COALESCE(m.kind, '') AS kind
+            FROM door_events e
+            LEFT JOIN door_sensors m ON m.sensor_id = e.sensor_id
+            WHERE e.ts >= ?
+              AND lower(COALESCE(m.room, '')) = ?
+            ORDER BY e.ts ASC
+            """,
+            (since, room),
+        )
+        rows = [dict(row) for row in await cursor.fetchall()]
+        if not rows:
+            return []
+
+        import unicodedata
+
+        def _norm_name(value: str) -> str:
+            text = unicodedata.normalize("NFKD", value or "")
+            text = "".join(c for c in text if not unicodedata.combining(c))
+            text = text.replace("'", " ").replace("'", " ")
+            return " ".join(text.lower().split())
+
+        by_name: dict[str, list[dict[str, Any]]] = {}
+        kinds_by_name: dict[str, str] = {}
+        for row in rows:
+            key = _norm_name(str(row.get("name") or "")) or str(
+                row.get("sensor_id") or ""
+            )
+            sid = str(row.get("sensor_id") or "")
+            is_ha = sid.startswith("binary_sensor.")
+            kind = str(row.get("kind") or "").lower()
+            prev_kind = kinds_by_name.get(key)
+            if key not in by_name:
+                by_name[key] = []
+                kinds_by_name[key] = kind
+            # Prefer Ring UUID stream over HA import for the same label.
+            if is_ha and by_name[key] and not str(
+                by_name[key][0].get("sensor_id") or ""
+            ).startswith("binary_sensor."):
+                continue
+            if not is_ha and by_name[key] and str(
+                by_name[key][0].get("sensor_id") or ""
+            ).startswith("binary_sensor."):
+                by_name[key] = []
+                kinds_by_name[key] = kind
+            by_name[key].append(row)
+            if kind:
+                kinds_by_name[key] = kind
+
+        prefer_windows = any(k == "window" for k in kinds_by_name.values())
+        selected: list[list[dict[str, Any]]] = []
+        for key, events in by_name.items():
+            kind = kinds_by_name.get(key) or ""
+            if prefer_windows and kind not in ("window", ""):
+                continue
+            if not prefer_windows and kind not in ("door", "window", ""):
+                continue
+            selected.append(events)
+
+        if not selected:
+            return []
+
+        # Per-contact debounce, then OR across contacts (any open → open).
+        dwell_s = 120.0
+
+        def _debounce(events: list[dict[str, Any]]) -> list[tuple[float, str]]:
+            pts: list[tuple[float, str]] = []
+            for ev in events:
+                ts = float(ev["ts"])
+                st = str(ev["state"]).lower().strip()
+                if st not in ("open", "closed"):
+                    continue
+                if not pts:
+                    pts.append((ts, st))
+                    continue
+                prev_ts, prev_st = pts[-1]
+                if st == prev_st:
+                    continue
+                if ts - prev_ts < dwell_s:
+                    if len(pts) >= 2:
+                        pts.pop()
+                        if pts[-1][1] == st:
+                            continue
+                        pts.append((ts, st))
+                    else:
+                        pts[-1] = (ts, st)
+                else:
+                    pts.append((ts, st))
+            return pts
+
+        per_contact = [_debounce(evs) for evs in selected]
+        per_contact = [p for p in per_contact if p]
+        if not per_contact:
+            return []
+
+        change_ts = sorted({ts for series in per_contact for ts, _ in series})
+
+        def _state_at(series: list[tuple[float, str]], ts: float) -> str:
+            state = series[0][1]
+            for et, st in series:
+                if et <= ts:
+                    state = st
+                else:
+                    break
+            return state
+
+        combined: list[tuple[float, str]] = []
+        for ts in change_ts:
+            any_open = any(_state_at(series, ts) == "open" for series in per_contact)
+            state = "open" if any_open else "closed"
+            if not combined or combined[-1][1] != state:
+                combined.append((ts, state))
+        return combined
+
     async def prune_door_events(self, retention_days: float) -> int:
         if retention_days <= 0:
             return 0
@@ -895,3 +1059,318 @@ class Database:
         )
         await self.db.commit()
         return cursor.rowcount
+
+    async def last_battery(self, address: str) -> int | None:
+        cursor = await self.db.execute(
+            """
+            SELECT battery FROM readings
+            WHERE address = ? AND battery IS NOT NULL
+            ORDER BY ts DESC
+            LIMIT 1
+            """,
+            (address.upper(),),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        try:
+            batt = int(row[0])
+        except (TypeError, ValueError):
+            return None
+        return batt if 0 <= batt <= 100 else None
+
+    async def reading_minutes(
+        self,
+        address: str,
+        start_ts: float,
+        end_ts: float,
+    ) -> set[int]:
+        """Return set of unix-minute indexes that already have a reading."""
+        cursor = await self.db.execute(
+            """
+            SELECT CAST(ts / 60 AS INTEGER) AS minute
+            FROM readings
+            WHERE address = ? AND ts >= ? AND ts < ?
+            """,
+            (address.upper(), float(start_ts), float(end_ts)),
+        )
+        rows = await cursor.fetchall()
+        return {int(row[0]) for row in rows}
+
+    async def reset_running_backfill_jobs(self) -> int:
+        """Mark interrupted running jobs as pending again (startup recovery)."""
+        now = time.time()
+        cursor = await self.db.execute(
+            """
+            UPDATE backfill_jobs
+            SET status = 'pending', error = NULL, updated_at = ?
+            WHERE status = 'running'
+            """,
+            (now,),
+        )
+        await self.db.commit()
+        return cursor.rowcount
+
+    async def enqueue_backfill_job(
+        self,
+        *,
+        address: str,
+        phase: str,
+        window_start: float,
+        window_end: float,
+        priority: int,
+        samples_expected: int,
+    ) -> int | None:
+        """Insert a pending job if that window is not already queued/done recently."""
+        address = address.upper()
+        now = time.time()
+        cursor = await self.db.execute(
+            """
+            INSERT OR IGNORE INTO backfill_jobs
+                (address, phase, window_start, window_end, status, priority,
+                 samples_done, samples_expected, error, updated_at)
+            VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NULL, ?)
+            """,
+            (
+                address,
+                phase,
+                float(window_start),
+                float(window_end),
+                int(priority),
+                int(samples_expected),
+                now,
+            ),
+        )
+        await self.db.commit()
+        if cursor.rowcount <= 0:
+            # Re-open failed/deferred jobs for the same window.
+            cursor = await self.db.execute(
+                """
+                UPDATE backfill_jobs
+                SET status = 'pending',
+                    priority = ?,
+                    samples_done = 0,
+                    samples_expected = ?,
+                    error = NULL,
+                    updated_at = ?
+                WHERE address = ?
+                  AND phase = ?
+                  AND window_start = ?
+                  AND window_end = ?
+                  AND status IN ('failed', 'deferred', 'done')
+                """,
+                (
+                    int(priority),
+                    int(samples_expected),
+                    now,
+                    address,
+                    phase,
+                    float(window_start),
+                    float(window_end),
+                ),
+            )
+            await self.db.commit()
+            if cursor.rowcount <= 0:
+                return None
+        cursor = await self.db.execute(
+            """
+            SELECT id FROM backfill_jobs
+            WHERE address = ? AND phase = ? AND window_start = ? AND window_end = ?
+            """,
+            (address, phase, float(window_start), float(window_end)),
+        )
+        row = await cursor.fetchone()
+        return int(row[0]) if row else None
+
+    async def list_backfill_jobs(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            cursor = await self.db.execute(
+                f"""
+                SELECT id, address, phase, window_start, window_end, status,
+                       priority, samples_done, samples_expected, error, updated_at
+                FROM backfill_jobs
+                WHERE status IN ({placeholders})
+                ORDER BY priority ASC, window_end DESC, id ASC
+                LIMIT ?
+                """,
+                (*statuses, int(limit)),
+            )
+        else:
+            cursor = await self.db.execute(
+                """
+                SELECT id, address, phase, window_start, window_end, status,
+                       priority, samples_done, samples_expected, error, updated_at
+                FROM backfill_jobs
+                ORDER BY priority ASC, window_end DESC, id ASC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_backfill_job(self, job_id: int) -> dict[str, Any] | None:
+        cursor = await self.db.execute(
+            """
+            SELECT id, address, phase, window_start, window_end, status,
+                   priority, samples_done, samples_expected, error, updated_at
+            FROM backfill_jobs
+            WHERE id = ?
+            """,
+            (int(job_id),),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def update_backfill_job(
+        self,
+        job_id: int,
+        *,
+        status: str | None = None,
+        samples_done: int | None = None,
+        samples_expected: int | None = None,
+        error: str | None | object = ...,
+    ) -> None:
+        fields: list[str] = ["updated_at = ?"]
+        values: list[Any] = [time.time()]
+        if status is not None:
+            fields.append("status = ?")
+            values.append(status)
+        if samples_done is not None:
+            fields.append("samples_done = ?")
+            values.append(int(samples_done))
+        if samples_expected is not None:
+            fields.append("samples_expected = ?")
+            values.append(int(samples_expected))
+        if error is not ...:
+            fields.append("error = ?")
+            values.append(error)
+        values.append(int(job_id))
+        await self.db.execute(
+            f"UPDATE backfill_jobs SET {', '.join(fields)} WHERE id = ?",
+            values,
+        )
+        await self.db.commit()
+
+    async def backfill_job_counts(self) -> dict[str, int]:
+        cursor = await self.db.execute(
+            """
+            SELECT status, COUNT(*) AS n
+            FROM backfill_jobs
+            GROUP BY status
+            """
+        )
+        rows = await cursor.fetchall()
+        return {str(row[0]): int(row[1]) for row in rows}
+
+    async def get_backfill_state(self, address: str) -> dict[str, Any] | None:
+        cursor = await self.db.execute(
+            """
+            SELECT address, last_success_ts, last_attempt_ts, last_rssi, last_battery
+            FROM backfill_state
+            WHERE address = ?
+            """,
+            (address.upper(),),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def upsert_backfill_state(
+        self,
+        address: str,
+        *,
+        last_success_ts: float | None = None,
+        last_attempt_ts: float | None = None,
+        last_rssi: int | None = None,
+        last_battery: int | None = None,
+        success: bool = False,
+    ) -> None:
+        address = address.upper()
+        now = time.time()
+        attempt = last_attempt_ts if last_attempt_ts is not None else now
+        existing = await self.get_backfill_state(address)
+        success_ts = (
+            last_success_ts
+            if last_success_ts is not None
+            else (now if success else (existing or {}).get("last_success_ts"))
+        )
+        rssi = last_rssi if last_rssi is not None else (existing or {}).get("last_rssi")
+        battery = (
+            last_battery
+            if last_battery is not None
+            else (existing or {}).get("last_battery")
+        )
+        await self.db.execute(
+            """
+            INSERT INTO backfill_state
+                (address, last_success_ts, last_attempt_ts, last_rssi, last_battery)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                last_success_ts = excluded.last_success_ts,
+                last_attempt_ts = excluded.last_attempt_ts,
+                last_rssi = COALESCE(excluded.last_rssi, backfill_state.last_rssi),
+                last_battery = COALESCE(excluded.last_battery, backfill_state.last_battery)
+            """,
+            (address, success_ts, attempt, rssi, battery),
+        )
+        await self.db.commit()
+
+    async def insert_gatt_readings(
+        self,
+        *,
+        address: str,
+        display_name: str,
+        model: str,
+        samples: list[tuple[float, float, float]],
+        battery: int,
+        rssi: int | None,
+        source: str = "gatt-history",
+    ) -> int:
+        """Bulk INSERT OR IGNORE GATT history samples. samples: (ts, temp, humidity)."""
+        address = address.upper()
+        if not samples:
+            return 0
+        now = time.time()
+        first_ts = min(ts for ts, _, _ in samples)
+        last_ts = max(ts for ts, _, _ in samples)
+        await self.db.execute(
+            """
+            INSERT INTO devices (address, name, model, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                name = excluded.name,
+                model = excluded.model,
+                last_seen = MAX(devices.last_seen, excluded.last_seen),
+                first_seen = MIN(devices.first_seen, excluded.first_seen)
+            """,
+            (address, display_name, model, first_ts, max(last_ts, now)),
+        )
+        before = await self.reading_minutes(
+            address,
+            min(ts for ts, _, _ in samples) - 1.0,
+            max(ts for ts, _, _ in samples) + 61.0,
+        )
+        await self.db.executemany(
+            """
+            INSERT OR IGNORE INTO readings
+                (address, ts, temperature_c, humidity, battery, rssi, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (address, float(ts), float(temp), float(hum), int(battery), rssi, source)
+                for ts, temp, hum in samples
+            ],
+        )
+        await self.db.commit()
+        after = await self.reading_minutes(
+            address,
+            min(ts for ts, _, _ in samples) - 1.0,
+            max(ts for ts, _, _ in samples) + 61.0,
+        )
+        return max(0, len(after) - len(before))

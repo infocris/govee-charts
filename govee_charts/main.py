@@ -19,6 +19,7 @@ import uvicorn
 
 from govee_charts.address import build_suffix_map
 from govee_charts.api import create_app
+from govee_charts.backfill import BackfillConfig, BackfillService
 from govee_charts.db import Database
 from govee_charts.doors import DoorMqttListener, DoorsConfig, import_ha_door_history
 from govee_charts.federation import PeerPublisher
@@ -99,6 +100,14 @@ DEFAULTS: dict[str, Any] = {
         "poll_seconds": 15,
         "retention_days": 365,
         "ha_db_path": "",
+    },
+    "backfill": {
+        "enabled": True,
+        "lookback_days": 20,
+        "poll_seconds": 30,
+        "max_job_minutes": 60,
+        "min_rssi": -75,
+        "seen_max_age_seconds": 600,
     },
     "labels": {},
 }
@@ -207,6 +216,7 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     scan_task: asyncio.Task[None] | None = None
     door_task: asyncio.Task[None] | None = None
     hvac_task: asyncio.Task[None] | None = None
+    backfill_task: asyncio.Task[None] | None = None
     scanner_enabled = enable_scanner and bool(cfg["scanner"].get("enabled", True))
     if scanner_enabled:
         scanner = GoveeScanner(
@@ -223,6 +233,20 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         scan_task = asyncio.create_task(scanner.run(stop_event), name="ble-scanner")
     else:
         logging.info("BLE scanner disabled (scanner.enabled=false or --no-scanner)")
+
+    backfill_cfg = BackfillConfig.from_dict(cfg.get("backfill"))
+    backfill: BackfillService | None = None
+    if backfill_cfg.enabled and scanner_enabled:
+        backfill = BackfillService(db, backfill_cfg, labels=cfg["labels"])
+        backfill_task = asyncio.create_task(
+            backfill.run(stop_event), name="gatt-backfill"
+        )
+    elif backfill_cfg.enabled and not scanner_enabled:
+        logging.info(
+            "GATT history backfill skipped (needs local BLE scanner)"
+        )
+    else:
+        logging.info("GATT history backfill disabled (set backfill.enabled=true)")
 
     doors_cfg = DoorsConfig.from_dict(cfg.get("doors"))
     if doors_cfg.enabled:
@@ -323,6 +347,7 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         suffix_map=suffix_map,
         weather=weather,
         on_restart=request_restart,
+        backfill=backfill,
     )
 
     host = str(cfg["server"]["host"])
@@ -384,6 +409,7 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
             (scan_task, "BLE scanner"),
             (door_task, "Door MQTT"),
             (hvac_task, "HVAC HA poll"),
+            (backfill_task, "GATT backfill"),
         ):
             if task is None:
                 continue
