@@ -37,8 +37,13 @@
   const backfillRefreshBtn = document.getElementById("backfill-refresh");
   const backfillJobsBody = document.getElementById("backfill-jobs-body");
   const backfillRecentBody = document.getElementById("backfill-recent-body");
+  const backfillSensorListEl = document.getElementById("backfill-sensor-list");
+  const backfillSensorsHintEl = document.getElementById("backfill-sensors-hint");
+  const backfillSelectAllBtn = document.getElementById("backfill-select-all");
+  const backfillClearAllBtn = document.getElementById("backfill-clear-all");
   let backfillTimer = null;
   let backfillSnapshot = null;
+  let backfillDeviceBusy = false;
 
   const PALETTE = [
     "#e8a87c",
@@ -679,6 +684,150 @@
       .join("");
   }
 
+  function renderBackfillSensors(devices, serviceEnabled) {
+    if (!backfillSensorListEl) return;
+    const rows = Array.isArray(devices) ? devices : [];
+    const anyOn = rows.some((d) => d.enabled);
+    if (backfillSensorsHintEl) {
+      if (!serviceEnabled) {
+        backfillSensorsHintEl.hidden = true;
+      } else if (!rows.length) {
+        backfillSensorsHintEl.hidden = false;
+        backfillSensorsHintEl.textContent = "No eligible Govee sensors found.";
+      } else if (!anyOn) {
+        backfillSensorsHintEl.hidden = false;
+        backfillSensorsHintEl.textContent =
+          "No sensors selected — enable at least one to enqueue GATT recovery.";
+      } else {
+        backfillSensorsHintEl.hidden = true;
+      }
+    }
+    if (backfillSelectAllBtn) {
+      backfillSelectAllBtn.disabled =
+        !serviceEnabled || !rows.length || backfillDeviceBusy;
+    }
+    if (backfillClearAllBtn) {
+      backfillClearAllBtn.disabled =
+        !serviceEnabled || !rows.length || backfillDeviceBusy;
+    }
+    if (!rows.length) {
+      backfillSensorListEl.innerHTML =
+        `<li class="overview-empty">No eligible sensors</li>`;
+      return;
+    }
+    backfillSensorListEl.innerHTML = rows
+      .map((d) => {
+        const safe = String(d.address || "").replace(/:/g, "");
+        const id = `bf-dev-${escapeHtml(safe)}`;
+        const meta = [
+          d.local_best ? "★" : null,
+          d.rssi != null ? `${Number(d.rssi)} dBm` : null,
+          d.queued_jobs ? `${Number(d.queued_jobs)} job(s)` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return (
+          `<li><label for="${id}">` +
+          `<input type="checkbox" id="${id}" data-address="${escapeHtml(d.address)}" ` +
+          (d.enabled ? "checked " : "") +
+          (!serviceEnabled || backfillDeviceBusy ? "disabled " : "") +
+          `/>` +
+          `<span>${escapeHtml(d.name || d.address)}</span>` +
+          (meta
+            ? ` <span class="backfill-sensor-meta">${escapeHtml(meta)}</span>`
+            : "") +
+          `</label></li>`
+        );
+      })
+      .join("");
+  }
+
+  async function setBackfillDevice(address, enabled) {
+    backfillDeviceBusy = true;
+    try {
+      const res = await fetch("/api/backfill/devices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address, enabled: Boolean(enabled) }),
+      });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = body.detail;
+        } catch (_) {
+          /* ignore */
+        }
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
+      renderBackfill(await res.json());
+      syncBackfillPolling();
+    } finally {
+      backfillDeviceBusy = false;
+      if (backfillSnapshot) {
+        renderBackfillSensors(
+          backfillSnapshot.devices,
+          !(
+            !backfillSnapshot ||
+            backfillSnapshot.worker === "disabled" ||
+            backfillSnapshot.enabled === false
+          )
+        );
+      }
+    }
+  }
+
+  async function setBackfillDevicesBulk(enabled) {
+    const devices = (backfillSnapshot && backfillSnapshot.devices) || [];
+    const targets = devices.filter((d) => Boolean(d.enabled) !== Boolean(enabled));
+    if (!targets.length) return;
+    backfillDeviceBusy = true;
+    renderBackfillSensors(
+      devices,
+      Boolean(backfillSnapshot && backfillSnapshot.enabled !== false)
+    );
+    try {
+      let last = null;
+      for (const d of targets) {
+        const res = await fetch("/api/backfill/devices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            address: d.address,
+            enabled: Boolean(enabled),
+          }),
+        });
+        if (!res.ok) {
+          let detail = res.statusText;
+          try {
+            const body = await res.json();
+            if (body && body.detail) detail = body.detail;
+          } catch (_) {
+            /* ignore */
+          }
+          throw new Error(detail || `HTTP ${res.status}`);
+        }
+        last = await res.json();
+      }
+      if (last) {
+        renderBackfill(last);
+        syncBackfillPolling();
+      }
+    } finally {
+      backfillDeviceBusy = false;
+      if (backfillSnapshot) {
+        renderBackfillSensors(
+          backfillSnapshot.devices,
+          !(
+            !backfillSnapshot ||
+            backfillSnapshot.worker === "disabled" ||
+            backfillSnapshot.enabled === false
+          )
+        );
+      }
+    }
+  }
+
   function renderBackfill(data) {
     backfillSnapshot = data;
     if (!backfillPanelEl || !backfillCurrentEl) return;
@@ -693,9 +842,12 @@
       backfillRefreshBtn.disabled = disabled;
     }
 
+    renderBackfillSensors(data && data.devices, !disabled);
+
     const current = data && data.current;
     const queue = (data && data.queue) || [];
     const totals = (data && data.totals) || {};
+    const anyOn = ((data && data.devices) || []).some((d) => d.enabled);
 
     if (disabled) {
       backfillCurrentEl.innerHTML =
@@ -705,9 +857,11 @@
         `<p class="backfill-idle">` +
         (data.paused
           ? "Paused"
-          : data.worker === "idle" && !(totals.pending > 0)
-            ? "Queue empty — waiting for gaps"
-            : `Worker ${escapeHtml(data.worker || "idle")} · ${Number(totals.pending) || 0} job(s) pending`) +
+          : !anyOn
+            ? "Idle — no sensors selected"
+            : data.worker === "idle" && !(totals.pending > 0)
+              ? "Queue empty — waiting for gaps"
+              : `Worker ${escapeHtml(data.worker || "idle")} · ${Number(totals.pending) || 0} job(s) pending`) +
         `</p>`;
     } else {
       const done = Number(current.samples_done) || 0;
@@ -3444,6 +3598,31 @@
       } finally {
         backfillRefreshBtn.disabled = false;
       }
+    });
+  }
+
+  if (backfillSensorListEl) {
+    backfillSensorListEl.addEventListener("change", (ev) => {
+      const input = ev.target;
+      if (!(input instanceof HTMLInputElement) || input.type !== "checkbox") {
+        return;
+      }
+      const address = input.dataset.address;
+      if (!address) return;
+      setBackfillDevice(address, input.checked).catch((err) => {
+        console.warn(err);
+        input.checked = !input.checked;
+      });
+    });
+  }
+  if (backfillSelectAllBtn) {
+    backfillSelectAllBtn.addEventListener("click", () => {
+      setBackfillDevicesBulk(true).catch((err) => console.warn(err));
+    });
+  }
+  if (backfillClearAllBtn) {
+    backfillClearAllBtn.addEventListener("click", () => {
+      setBackfillDevicesBulk(false).catch((err) => console.warn(err));
     });
   }
 

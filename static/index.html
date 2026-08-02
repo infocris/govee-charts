@@ -253,8 +253,24 @@
       <div class="overview-head">
         <h2>History backfill</h2>
         <p class="overview-hint">
-          GATT recovery queue — newest gaps first; shared over federation as node_id/gatt
+          GATT recovery queue — newest gaps first; shared over federation as node_id/gatt.
+          Select sensors below to opt in (none by default).
         </p>
+      </div>
+
+      <div class="overview-head overview-head-secondary">
+        <h2>Sensors</h2>
+        <p class="overview-hint">Enable individual sensors for GATT history recovery</p>
+      </div>
+      <div class="backfill-sensors" id="backfill-sensors">
+        <div class="backfill-sensors-actions">
+          <button type="button" class="backfill-btn" id="backfill-select-all">Select all</button>
+          <button type="button" class="backfill-btn" id="backfill-clear-all">Clear all</button>
+        </div>
+        <p class="backfill-sensors-hint" id="backfill-sensors-hint" hidden></p>
+        <ul class="backfill-sensor-list" id="backfill-sensor-list">
+          <li class="overview-empty">Loading…</li>
+        </ul>
       </div>
 
       <div class="backfill-panel" id="backfill-panel">

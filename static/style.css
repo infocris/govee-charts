@@ -245,6 +245,53 @@ main {
   background: color-mix(in srgb, var(--bg) 88%, var(--accent, #7cb8e8) 12%);
 }
 
+.backfill-sensors {
+  margin: 0 0 1.25rem;
+}
+
+.backfill-sensors-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.backfill-sensors-hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.backfill-sensor-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.35rem 1rem;
+}
+
+.backfill-sensor-list li {
+  margin: 0;
+}
+
+.backfill-sensor-list label {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.backfill-sensor-list input {
+  flex-shrink: 0;
+}
+
+.backfill-sensor-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .backfill-head {
   display: flex;
   align-items: baseline;

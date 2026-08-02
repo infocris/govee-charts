@@ -123,7 +123,8 @@ class Database:
                 last_success_ts REAL,
                 last_attempt_ts REAL,
                 last_rssi INTEGER,
-                last_battery INTEGER
+                last_battery INTEGER,
+                enabled INTEGER NOT NULL DEFAULT 0
             );
             """
         )
@@ -168,6 +169,18 @@ class Database:
                 ON readings(address, ts)
             """
         )
+
+        state_cols = {
+            row[1]
+            for row in await (
+                await self.db.execute("PRAGMA table_info(backfill_state)")
+            ).fetchall()
+        }
+        if state_cols and "enabled" not in state_cols:
+            # Opt-in default: existing rows stay disabled until selected in the UI.
+            await self.db.execute(
+                "ALTER TABLE backfill_state ADD COLUMN enabled INTEGER NOT NULL DEFAULT 0"
+            )
 
     async def _merge_alias_devices(self) -> None:
         """Merge UUID / alias device rows onto canonical BLE MAC addresses."""
@@ -1127,6 +1140,50 @@ class Database:
         await self.db.commit()
         return cursor.rowcount
 
+    async def clear_open_backfill_jobs_except(
+        self, enabled_addresses: set[str] | list[str]
+    ) -> int:
+        """Drop pending/deferred jobs for addresses not in the enabled set."""
+        enabled = {str(a).upper() for a in enabled_addresses if a}
+        if not enabled:
+            return await self.clear_open_backfill_jobs()
+        placeholders = ",".join("?" for _ in enabled)
+        cursor = await self.db.execute(
+            f"""
+            DELETE FROM backfill_jobs
+            WHERE status IN ('pending', 'deferred')
+              AND address NOT IN ({placeholders})
+            """,
+            tuple(enabled),
+        )
+        await self.db.commit()
+        return cursor.rowcount
+
+    async def cancel_open_backfill_jobs(self, address: str) -> int:
+        """Remove pending/deferred and cancel running jobs for one address."""
+        address = address.upper()
+        now = time.time()
+        cursor = await self.db.execute(
+            """
+            DELETE FROM backfill_jobs
+            WHERE address = ? AND status IN ('pending', 'deferred')
+            """,
+            (address,),
+        )
+        deleted = int(cursor.rowcount or 0)
+        cursor = await self.db.execute(
+            """
+            UPDATE backfill_jobs
+            SET status = 'cancelled',
+                error = 'disabled by user',
+                updated_at = ?
+            WHERE address = ? AND status = 'running'
+            """,
+            (now, address),
+        )
+        await self.db.commit()
+        return deleted + int(cursor.rowcount or 0)
+
     async def recent_gatt_readings(self, limit: int = 100) -> list[dict[str, Any]]:
         """Newest GATT-recovered rows by insert id (recovery order proxy)."""
         limit = max(1, min(int(limit), 500))
@@ -1428,14 +1485,58 @@ class Database:
     async def get_backfill_state(self, address: str) -> dict[str, Any] | None:
         cursor = await self.db.execute(
             """
-            SELECT address, last_success_ts, last_attempt_ts, last_rssi, last_battery
+            SELECT address, last_success_ts, last_attempt_ts, last_rssi,
+                   last_battery, COALESCE(enabled, 0) AS enabled
             FROM backfill_state
             WHERE address = ?
             """,
             (address.upper(),),
         )
         row = await cursor.fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        out = dict(row)
+        out["enabled"] = bool(int(out.get("enabled") or 0))
+        return out
+
+    async def list_backfill_enabled(self) -> set[str]:
+        """Addresses opted in for GATT history backfill."""
+        cursor = await self.db.execute(
+            """
+            SELECT address FROM backfill_state
+            WHERE COALESCE(enabled, 0) = 1
+            """
+        )
+        return {str(row[0]).upper() for row in await cursor.fetchall()}
+
+    async def is_backfill_enabled(self, address: str) -> bool:
+        cursor = await self.db.execute(
+            """
+            SELECT COALESCE(enabled, 0) FROM backfill_state
+            WHERE address = ?
+            """,
+            (address.upper(),),
+        )
+        row = await cursor.fetchone()
+        return bool(row and int(row[0] or 0) == 1)
+
+    async def set_backfill_enabled(self, address: str, enabled: bool) -> bool:
+        """Persist opt-in flag. Returns the stored enabled value."""
+        address = address.upper()
+        flag = 1 if enabled else 0
+        await self.db.execute(
+            """
+            INSERT INTO backfill_state
+                (address, last_success_ts, last_attempt_ts, last_rssi,
+                 last_battery, enabled)
+            VALUES (?, NULL, NULL, NULL, NULL, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                enabled = excluded.enabled
+            """,
+            (address, flag),
+        )
+        await self.db.commit()
+        return bool(flag)
 
     async def upsert_backfill_state(
         self,
@@ -1462,18 +1563,21 @@ class Database:
             if last_battery is not None
             else (existing or {}).get("last_battery")
         )
+        enabled = 1 if (existing or {}).get("enabled") else 0
         await self.db.execute(
             """
             INSERT INTO backfill_state
-                (address, last_success_ts, last_attempt_ts, last_rssi, last_battery)
-            VALUES (?, ?, ?, ?, ?)
+                (address, last_success_ts, last_attempt_ts, last_rssi,
+                 last_battery, enabled)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(address) DO UPDATE SET
                 last_success_ts = excluded.last_success_ts,
                 last_attempt_ts = excluded.last_attempt_ts,
                 last_rssi = COALESCE(excluded.last_rssi, backfill_state.last_rssi),
-                last_battery = COALESCE(excluded.last_battery, backfill_state.last_battery)
+                last_battery = COALESCE(excluded.last_battery, backfill_state.last_battery),
+                enabled = backfill_state.enabled
             """,
-            (address, success_ts, attempt, rssi, battery),
+            (address, success_ts, attempt, rssi, battery, enabled),
         )
         await self.db.commit()
 

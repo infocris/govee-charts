@@ -262,8 +262,9 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `GET /api/hvac` — latest climate + power snapshot
 - `GET /api/hvac/history?hours=168` — climate events + active bands
 - `GET /api/power/history?hours=168` — power samples (W)
-- `GET /api/backfill` — GATT history backfill queue + last recovered readings / jobs
+- `GET /api/backfill` — GATT history backfill queue + selected sensors + last recovered readings / jobs
 - `POST /api/backfill/pause` / `resume` / `refresh` — control the backfill worker
+- `POST /api/backfill/devices` — opt a sensor in/out (`{address, enabled}`)
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
 - `GET /api/health` — health + `node_id`
 
@@ -271,4 +272,4 @@ Data © [Open-Meteo](https://open-meteo.com/).
 
 - Soft-blocked Bluetooth: `rfkill unblock bluetooth`
 - No Govee cloud API — BLE only
-- Optional GATT history backfill (`[backfill]`) recovers onboard minute samples for gaps missed by live ads. One device at a time; lookback up to ~20 days. Prefer sensors with RSSI ≥ `min_rssi` (default −75 dBm). With federation, recovered history is shared as `{node_id}/gatt` and the best-RSSI node does the pull.
+- Optional GATT history backfill (`[backfill]`) recovers onboard minute samples for gaps missed by live ads. Opt-in per sensor in the Backfill UI (none selected by default). One device at a time; lookback up to ~20 days. Prefer sensors with RSSI ≥ `min_rssi` (default −75 dBm). With federation, recovered history is shared as `{node_id}/gatt` and the best-RSSI node does the pull.

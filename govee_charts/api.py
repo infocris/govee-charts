@@ -74,6 +74,13 @@ class FacadePatch(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class BackfillDevicePatch(BaseModel):
+    address: str = Field(min_length=1)
+    enabled: bool
+
+    model_config = {"extra": "forbid"}
+
+
 def create_app(
     db: Database,
     *,
@@ -126,6 +133,7 @@ def create_app(
                 "worker": "disabled",
                 "current": None,
                 "queue": [],
+                "devices": [],
                 "totals": {
                     "pending": 0,
                     "running": 0,
@@ -180,6 +188,30 @@ def create_app(
         enqueued = await service.refresh_gaps(force=True)
         snap = await service.snapshot()
         snap["enqueued"] = enqueued
+        snap["recent"] = await db.recent_gatt_readings(limit=recent_limit)
+        snap["recent_jobs"] = await db.recent_backfill_jobs(limit=job_limit)
+        return snap
+
+    @app.post("/api/backfill/devices")
+    async def api_backfill_device(
+        payload: BackfillDevicePatch,
+        recent_limit: int = Query(100, ge=1, le=500),
+        job_limit: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        """Enable or disable GATT backfill for one sensor (opt-in)."""
+        service: BackfillService | None = app.state.backfill
+        if service is None:
+            raise HTTPException(status_code=503, detail="Backfill not available")
+        try:
+            result = await service.set_device_enabled(
+                payload.address, payload.enabled
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        snap = await service.snapshot()
+        snap["device_update"] = result
         snap["recent"] = await db.recent_gatt_readings(limit=recent_limit)
         snap["recent_jobs"] = await db.recent_backfill_jobs(limit=job_limit)
         return snap
