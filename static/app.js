@@ -751,7 +751,12 @@
           .slice(0, 20)
           .map(
             (q) =>
-              `<li><span class="q-name">${escapeHtml(q.name || q.address)}</span>` +
+              `<li><span class="q-name">${escapeHtml(q.name || q.address)}` +
+              (q.local_best
+                ? ' <span class="backfill-local-best" title="Best local signal">★</span>'
+                : "") +
+              (q.rssi != null ? ` <span class="overview-meta">${Number(q.rssi)} dBm</span>` : "") +
+              `</span>` +
               `<span>${escapeHtml(phaseLabel(q.phase))} · ~${Number(q.samples_expected) || 0} missing · ${Number(q.jobs) || 0} job(s)</span></li>`
           )
           .join("");

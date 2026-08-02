@@ -109,8 +109,9 @@ DEFAULTS: dict[str, Any] = {
         "min_rssi": -75,
         "seen_max_age_seconds": 600,
         "federation_share": True,
-        "rssi_prefer_margin_db": 0,
+        "rssi_prefer_margin_db": 3,
         "peer_signal_cache_seconds": 45,
+        "rebuild_seconds": 900,
     },
     "labels": {},
 }
@@ -221,6 +222,7 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     hvac_task: asyncio.Task[None] | None = None
     backfill_task: asyncio.Task[None] | None = None
     scanner_enabled = enable_scanner and bool(cfg["scanner"].get("enabled", True))
+    scanner: GoveeScanner | None = None
     if scanner_enabled:
         scanner = GoveeScanner(
             db,
@@ -246,6 +248,7 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
             labels=cfg["labels"],
             node_id=fed["node_id"],
             publisher=publisher,
+            scanner=scanner,
         )
         backfill_task = asyncio.create_task(
             backfill.run(stop_event), name="gatt-backfill"

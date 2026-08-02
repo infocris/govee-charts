@@ -127,6 +127,26 @@ class GoveeScanner:
         self._last_sample: dict[str, float] = {}
         self._latest: dict[str, Reading] = {}
         self._lock = asyncio.Lock()
+        # When set, adapter loops stop scanning so GATT connects can proceed.
+        self._gatt_pause = asyncio.Event()
+        self._gatt_pause_depth = 0
+        self._gatt_pause_lock = asyncio.Lock()
+
+    async def pause_for_gatt(self) -> None:
+        """Temporarily stop BLE scanning (nested-safe) for a GATT session."""
+        async with self._gatt_pause_lock:
+            self._gatt_pause_depth += 1
+            if self._gatt_pause_depth == 1:
+                self._gatt_pause.set()
+        # Give BlueZ / adapter loops time to stop.
+        await asyncio.sleep(1.0)
+
+    async def resume_after_gatt(self) -> None:
+        async with self._gatt_pause_lock:
+            self._gatt_pause_depth = max(0, self._gatt_pause_depth - 1)
+            if self._gatt_pause_depth == 0:
+                self._gatt_pause.clear()
+        await asyncio.sleep(0.5)
 
     def display_name(self, reading: Reading) -> str:
         if reading.address in self.labels:
@@ -216,6 +236,15 @@ class GoveeScanner:
             self.on_advertisement(device, adv, adapter=adapter)
 
         while not stop_event.is_set():
+            # Yield the adapter while GATT backfill needs an exclusive connect.
+            while self._gatt_pause.is_set() and not stop_event.is_set():
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass
+            if stop_event.is_set():
+                break
+
             scanner = BleakScanner(
                 detection_callback=cb,
                 **_scanner_kwargs(adapter, mode),
@@ -281,7 +310,9 @@ class GoveeScanner:
             started = last_adv
             logger.info("BLE scanner listening on %s (mode=%s)", label, mode)
             try:
-                while not stop_event.is_set():
+                while (
+                    not stop_event.is_set() and not self._gatt_pause.is_set()
+                ):
                     try:
                         await asyncio.wait_for(stop_event.wait(), timeout=5.0)
                     except asyncio.TimeoutError:

@@ -1156,13 +1156,14 @@ class Database:
         return [dict(row) for row in rows]
 
     async def recent_backfill_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Most recently updated backfill jobs (any status)."""
+        """Most recently updated backfill jobs, excluding still-pending ones."""
         limit = max(1, min(int(limit), 200))
         cursor = await self.db.execute(
             """
             SELECT id, address, phase, window_start, window_end, status,
                    priority, samples_done, samples_expected, error, updated_at
             FROM backfill_jobs
+            WHERE status != 'pending'
             ORDER BY updated_at DESC, id DESC
             LIMIT ?
             """,
@@ -1231,7 +1232,7 @@ class Database:
                   AND phase = ?
                   AND window_start = ?
                   AND window_end = ?
-                  AND status IN ('failed', 'deferred', 'done')
+                  AND status IN ('failed', 'deferred')
                 """,
                 (
                     int(priority),
@@ -1288,6 +1289,87 @@ class Database:
             )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def summarize_backfill_queue(self) -> list[dict[str, Any]]:
+        """Aggregate all pending/deferred jobs per device (no row limit)."""
+        cursor = await self.db.execute(
+            """
+            SELECT
+                address,
+                COUNT(*) AS jobs,
+                COALESCE(SUM(samples_expected), 0) AS samples_expected,
+                MIN(priority) AS priority
+            FROM backfill_jobs
+            WHERE status IN ('pending', 'deferred')
+            GROUP BY address
+            """
+        )
+        rows = await cursor.fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            addr = str(row[0]).upper()
+            pri = int(row[3])
+            phase_cur = await self.db.execute(
+                """
+                SELECT phase FROM backfill_jobs
+                WHERE address = ? AND status IN ('pending', 'deferred')
+                ORDER BY priority ASC, window_end DESC, id ASC
+                LIMIT 1
+                """,
+                (addr,),
+            )
+            phase_row = await phase_cur.fetchone()
+            out.append(
+                {
+                    "address": addr,
+                    "jobs": int(row[1]),
+                    "samples_expected": int(row[2]),
+                    "priority": pri,
+                    "phase": str(phase_row[0]) if phase_row else "hour",
+                }
+            )
+        return out
+
+    async def local_rssi_map(self, node_id: str) -> dict[str, int]:
+        """Latest RSSI from readings produced by this node (not peer ingest)."""
+        node_id = str(node_id).strip()
+        gatt = f"{node_id}/gatt"
+        cursor = await self.db.execute(
+            """
+            SELECT r.address, r.rssi
+            FROM readings r
+            INNER JOIN (
+                SELECT address, MAX(ts) AS mts
+                FROM readings
+                WHERE source = ? OR source = ?
+                GROUP BY address
+            ) latest
+              ON latest.address = r.address AND latest.mts = r.ts
+            WHERE r.rssi IS NOT NULL
+            """,
+            (node_id, gatt),
+        )
+        out: dict[str, int] = {}
+        for row in await cursor.fetchall():
+            try:
+                out[str(row[0]).upper()] = int(row[1])
+            except (TypeError, ValueError):
+                continue
+        cursor = await self.db.execute(
+            """
+            SELECT address, last_rssi FROM backfill_state
+            WHERE last_rssi IS NOT NULL
+            """
+        )
+        for row in await cursor.fetchall():
+            addr = str(row[0]).upper()
+            if addr in out:
+                continue
+            try:
+                out[addr] = int(row[1])
+            except (TypeError, ValueError):
+                continue
+        return out
 
     async def get_backfill_job(self, job_id: int) -> dict[str, Any] | None:
         cursor = await self.db.execute(

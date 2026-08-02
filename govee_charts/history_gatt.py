@@ -121,7 +121,25 @@ async def download_history(
     t0 = time.perf_counter()
 
     try:
-        device = await BleakScanner.find_device_by_address(address, timeout=timeout)
+        device = None
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                device = await BleakScanner.find_device_by_address(
+                    address, timeout=timeout
+                )
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if "inprogress" in str(exc).lower().replace(" ", "") and attempt < 2:
+                    await asyncio.sleep(2.0 * (attempt + 1))
+                    continue
+                break
+        if last_exc is not None and device is None:
+            result.error = f"scan failed: {last_exc}"
+            result.duration_s = time.perf_counter() - t0
+            return result
     except Exception as exc:
         result.error = f"scan failed: {exc}"
         result.duration_s = time.perf_counter() - t0

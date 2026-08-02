@@ -11,6 +11,7 @@ from typing import Any
 from govee_charts.db import Database
 from govee_charts.federation import PeerPublisher, gatt_source
 from govee_charts.history_gatt import MAX_HISTORY_MINUTES, download_history
+from govee_charts.scanner import GoveeScanner
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +34,16 @@ class BackfillConfig:
     connect_timeout: float = 25.0
     weak_rssi_backoff_seconds: float = 300.0
     federation_share: bool = True
-    rssi_prefer_margin_db: float = 0.0
+    # Defer only when a peer is at least this many dB stronger (ties → local).
+    rssi_prefer_margin_db: float = 3.0
     peer_signal_cache_seconds: float = 45.0
+    # Full pending-queue rebuild interval (incremental enqueue otherwise).
+    rebuild_seconds: float = 900.0
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> BackfillConfig:
         raw = raw or {}
+        margin_raw = raw.get("rssi_prefer_margin_db")
         return cls(
             enabled=bool(raw.get("enabled", True)),
             lookback_days=float(raw.get("lookback_days") or 20.0),
@@ -53,9 +58,14 @@ class BackfillConfig:
                 30.0, float(raw.get("weak_rssi_backoff_seconds") or 300.0)
             ),
             federation_share=bool(raw.get("federation_share", True)),
-            rssi_prefer_margin_db=float(raw.get("rssi_prefer_margin_db") or 0.0),
+            rssi_prefer_margin_db=float(
+                3.0 if margin_raw is None else margin_raw
+            ),
             peer_signal_cache_seconds=max(
                 5.0, float(raw.get("peer_signal_cache_seconds") or 45.0)
+            ),
+            rebuild_seconds=max(
+                60.0, float(raw.get("rebuild_seconds") or 900.0)
             ),
         )
 
@@ -156,6 +166,7 @@ class BackfillService:
     labels: dict[str, str] = field(default_factory=dict)
     node_id: str = "local"
     publisher: PeerPublisher | None = None
+    scanner: GoveeScanner | None = None
 
     def __post_init__(self) -> None:
         self._paused = False
@@ -163,6 +174,7 @@ class BackfillService:
         self._live = LiveJobProgress()
         self._refresh_lock = asyncio.Lock()
         self._last_refresh_ts = 0.0
+        self._last_rebuild_ts = 0.0
         self._rr_cursor = 0
         self._weak_backoff: dict[str, float] = {}
 
@@ -186,39 +198,45 @@ class BackfillService:
 
     async def snapshot(self) -> dict[str, Any]:
         counts = await self.db.backfill_job_counts()
-        pending = await self.db.list_backfill_jobs(
-            statuses=["pending", "deferred"], limit=200
-        )
         devices = {d["address"].upper(): d for d in await self.db.list_devices()}
+        local_rssi = await self.db.local_rssi_map(self.node_id)
+        peer_rssi = await self._peer_best_rssi_map()
+        margin = max(0.0, float(self.cfg.rssi_prefer_margin_db))
 
-        # Summarize queue per device (waiting only).
-        by_addr: dict[str, dict[str, Any]] = {}
-        for job in pending:
-            if self._live.job_id and job["id"] == self._live.job_id:
-                continue
-            addr = str(job["address"]).upper()
-            entry = by_addr.get(addr)
-            if entry is None:
-                dev = devices.get(addr) or {}
-                entry = {
-                    "address": addr,
-                    "name": self._label(addr, str(dev.get("name") or addr)),
-                    "phase": job["phase"],
-                    "jobs": 0,
-                    "samples_expected": 0,
-                    "priority": job["priority"],
-                }
-                by_addr[addr] = entry
-            entry["jobs"] += 1
-            entry["samples_expected"] += int(job.get("samples_expected") or 0)
-            # Keep the highest-priority (lowest number) phase label.
-            if int(job["priority"]) < int(entry["priority"]):
-                entry["phase"] = job["phase"]
-                entry["priority"] = job["priority"]
+        summaries = await self.db.summarize_backfill_queue()
+        queue: list[dict[str, Any]] = []
+        for row in summaries:
+            addr = str(row["address"]).upper()
+            if self._live.job_id and self._live.address == addr and self._worker == "busy":
+                # Still show device but note current job is active; keep in list.
+                pass
+            dev = devices.get(addr) or {}
+            local = local_rssi.get(addr)
+            peer = peer_rssi.get(addr)
+            local_best = False
+            if local is not None:
+                local_best = peer is None or peer <= local + margin
+            entry = {
+                "address": addr,
+                "name": self._label(addr, str(dev.get("name") or addr)),
+                "phase": row.get("phase") or "hour",
+                "jobs": int(row.get("jobs") or 0),
+                "samples_expected": int(row.get("samples_expected") or 0),
+                "priority": int(row.get("priority") or 0),
+                "rssi": local,
+                "local_best": local_best,
+            }
+            queue.append(entry)
 
-        queue = sorted(
-            by_addr.values(),
-            key=lambda e: (int(e["priority"]), -int(e["samples_expected"]), e["name"]),
+        queue.sort(
+            key=lambda e: (
+                # Local-best first, then phase priority, then stronger RSSI.
+                0 if e.get("local_best") else 1,
+                int(e["priority"]),
+                -(e["rssi"] if e.get("rssi") is not None else -999),
+                -int(e["samples_expected"]),
+                e["name"],
+            )
         )
 
         live = self._live
@@ -266,6 +284,7 @@ class BackfillService:
                 "min_rssi": self.cfg.min_rssi,
                 "federation_share": self.cfg.federation_share,
                 "rssi_prefer_margin_db": self.cfg.rssi_prefer_margin_db,
+                "rebuild_seconds": self.cfg.rebuild_seconds,
             },
         }
 
@@ -282,18 +301,26 @@ class BackfillService:
                 and now - self._last_refresh_ts < self.cfg.poll_seconds
             ):
                 return 0
-            # Quantize to the minute so band edges do not drift every poll
-            # (which would otherwise accumulate duplicate pending windows).
-            now = float(int(now // 60) * 60)
-            self._last_refresh_ts = time.time()
 
-            cleared = await self.db.clear_open_backfill_jobs()
-            if cleared:
-                logger.info("Cleared %d open backfill job(s) before rebuild", cleared)
+            # Quantize to the minute so band edges stay stable across polls.
+            now_q = float(int(now // 60) * 60)
+            self._last_refresh_ts = now
+
+            rebuild = force or (
+                not self._last_rebuild_ts
+                or now - self._last_rebuild_ts >= self.cfg.rebuild_seconds
+            )
+            if rebuild:
+                cleared = await self.db.clear_open_backfill_jobs()
+                self._last_rebuild_ts = now
+                if cleared:
+                    logger.info(
+                        "Cleared %d open backfill job(s) before rebuild", cleared
+                    )
 
             devices = await self.db.list_devices()
             enqueued = 0
-            bands = _phase_bands(now, self.cfg.lookback_days)
+            bands = _phase_bands(now_q, self.cfg.lookback_days)
             for device in devices:
                 addr = str(device["address"]).upper()
                 model = str(device.get("model") or "").lower()
@@ -323,8 +350,84 @@ class BackfillService:
                         if job_id is not None:
                             enqueued += 1
             if enqueued:
-                logger.info("Backfill enqueued %d job(s)", enqueued)
+                logger.info(
+                    "Backfill enqueued %d job(s)%s",
+                    enqueued,
+                    " (rebuild)" if rebuild else "",
+                )
             return enqueued
+
+    async def _local_rssi_map(self) -> dict[str, int | None]:
+        """Latest known local RSSI per address (this node's readings / state)."""
+        typed: dict[str, int | None] = {
+            addr: rssi for addr, rssi in (await self.db.local_rssi_map(self.node_id)).items()
+        }
+        # Ensure every known device key exists for scoring.
+        for device in await self.db.list_devices():
+            addr = str(device.get("address") or "").upper()
+            if addr and addr not in typed:
+                typed[addr] = None
+        return typed
+
+    async def _peer_best_rssi_map(self) -> dict[str, int]:
+        """Best fresh peer RSSI per address (empty if no federation)."""
+        pub = self.publisher
+        if pub is None or not pub.enabled:
+            return {}
+        peers = await pub.peer_device_signals(
+            cache_seconds=self.cfg.peer_signal_cache_seconds
+        )
+        now = time.time()
+        max_age = self.cfg.seen_max_age_seconds
+        best: dict[str, int] = {}
+        for peer in peers:
+            if not peer.get("ok"):
+                continue
+            peer_id = str(peer.get("node_id") or "").strip()
+            if not peer_id or peer_id == self.node_id:
+                continue
+            for device in peer.get("devices") or []:
+                addr = str(device.get("address") or "").upper()
+                if not addr:
+                    continue
+                last_seen = float(device.get("last_seen") or 0.0)
+                if not last_seen or now - last_seen > max_age:
+                    continue
+                rssi = device.get("rssi")
+                if rssi is None:
+                    continue
+                try:
+                    peer_r = int(rssi)
+                except (TypeError, ValueError):
+                    continue
+                prev = best.get(addr)
+                if prev is None or peer_r > prev:
+                    best[addr] = peer_r
+        return best
+
+    def _address_pick_score(
+        self,
+        address: str,
+        *,
+        local_rssi: dict[str, int | None],
+        peer_rssi: dict[str, int],
+    ) -> tuple[int, int, int]:
+        """
+        Higher tuple sorts first: local-best, above min_rssi, stronger RSSI.
+        """
+        local = local_rssi.get(address)
+        peer = peer_rssi.get(address)
+        margin = max(0.0, float(self.cfg.rssi_prefer_margin_db))
+        if local is None:
+            local_best = 0
+            above_min = 0
+            rssi_score = -999
+        else:
+            peer_stronger = peer is not None and peer > local + margin
+            local_best = 0 if peer_stronger else 1
+            above_min = 1 if local >= self.cfg.min_rssi else 0
+            rssi_score = int(local)
+        return (local_best, above_min, rssi_score)
 
     async def _pick_job(self) -> dict[str, Any] | None:
         pending = await self.db.list_backfill_jobs(
@@ -345,16 +448,41 @@ class BackfillService:
             if not pending:
                 return None
 
-        # Best priority first.
+        # Best phase priority first (hour → day → week → deep).
         best_pri = min(int(j["priority"]) for j in pending)
         candidates = [j for j in pending if int(j["priority"]) == best_pri]
-        # Round-robin across devices within the same priority.
-        addresses = sorted({str(j["address"]).upper() for j in candidates})
+
+        now = time.time()
+        addresses = sorted(
+            {
+                str(j["address"]).upper()
+                for j in candidates
+                if now >= self._weak_backoff.get(str(j["address"]).upper(), 0.0)
+            }
+        )
+        if not addresses:
+            # Everything in backoff — fall back to full candidate set.
+            addresses = sorted(
+                {str(j["address"]).upper() for j in candidates}
+            )
         if not addresses:
             return None
-        self._rr_cursor = self._rr_cursor % len(addresses)
-        preferred = addresses[self._rr_cursor]
-        self._rr_cursor = (self._rr_cursor + 1) % len(addresses)
+
+        local_rssi = await self._local_rssi_map()
+        peer_rssi = await self._peer_best_rssi_map()
+
+        def score(addr: str) -> tuple[int, int, int]:
+            return self._address_pick_score(
+                addr, local_rssi=local_rssi, peer_rssi=peer_rssi
+            )
+
+        addresses.sort(key=score, reverse=True)
+        top_score = score(addresses[0])
+        top = [a for a in addresses if score(a) == top_score]
+        self._rr_cursor = self._rr_cursor % len(top)
+        preferred = top[self._rr_cursor]
+        self._rr_cursor = (self._rr_cursor + 1) % len(top)
+
         device_jobs = [
             j for j in candidates if str(j["address"]).upper() == preferred
         ]
@@ -373,11 +501,13 @@ class BackfillService:
         local_rssi: int | None,
     ) -> str | None:
         """
-        If a reachable peer has a better (or equal + lexicographically smaller
-        node_id) signal for this device, return a defer reason string.
+        Defer only when a reachable peer is strictly stronger by margin.
+        Equal RSSI keeps the job on this node (avoids permanent yield to peers).
         """
         pub = self.publisher
         if pub is None or not pub.enabled:
+            return None
+        if local_rssi is None:
             return None
 
         peers = await pub.peer_device_signals(
@@ -385,11 +515,10 @@ class BackfillService:
         )
         now = time.time()
         max_age = self.cfg.seen_max_age_seconds
+        margin = max(0.0, float(self.cfg.rssi_prefer_margin_db))
+        local_r = int(local_rssi)
 
-        candidates: list[tuple[int, str]] = []
-        if local_rssi is not None:
-            candidates.append((int(local_rssi), self.node_id))
-
+        best_peer: tuple[int, str] | None = None
         for peer in peers:
             if not peer.get("ok"):
                 continue
@@ -406,30 +535,22 @@ class BackfillService:
                 if rssi is None:
                     continue
                 try:
-                    candidates.append((int(rssi), peer_id))
+                    peer_r = int(rssi)
                 except (TypeError, ValueError):
                     continue
+                if best_peer is None or peer_r > best_peer[0]:
+                    best_peer = (peer_r, peer_id)
                 break
 
-        if len(candidates) < 2:
+        if best_peer is None:
             return None
-
-        max_rssi = max(r for r, _ in candidates)
-        margin = max(0.0, float(self.cfg.rssi_prefer_margin_db))
-        near_best = [(r, nid) for r, nid in candidates if r >= max_rssi - margin]
-        # Within the near-best band: highest RSSI, then smaller node_id.
-        near_best.sort(key=lambda item: (-item[0], item[1]))
-        best_rssi, best_id = near_best[0]
-        if best_id == self.node_id:
-            return None
-
-        local = next((c for c in candidates if c[1] == self.node_id), None)
-        if local is None:
+        peer_r, peer_id = best_peer
+        if peer_r > local_r + margin:
             return (
-                f"peer {best_id} has better rssi ({best_rssi}; local unknown)"
+                f"peer {peer_id} has better rssi "
+                f"({peer_r} > {local_r}+{margin:g})"
             )
-        local_r = local[0]
-        return f"peer {best_id} has better rssi ({best_rssi} > {local_r})"
+        return None
 
     def _publish_gatt_samples(
         self,
@@ -580,15 +701,21 @@ class BackfillService:
             self._live.last_sample_ts = sample.ts
             self._live.last_sample_temp = sample.temperature_c
 
-        result = await download_history(
-            address,
-            start_min=start_min,
-            end_min=end_min,
-            timeout=self.cfg.connect_timeout,
-            fallback_battery=fallback_battery,
-            on_sample=on_sample,
-            now=now,
-        )
+        if self.scanner is not None:
+            await self.scanner.pause_for_gatt()
+        try:
+            result = await download_history(
+                address,
+                start_min=start_min,
+                end_min=end_min,
+                timeout=self.cfg.connect_timeout,
+                fallback_battery=fallback_battery,
+                on_sample=on_sample,
+                now=now,
+            )
+        finally:
+            if self.scanner is not None:
+                await self.scanner.resume_after_gatt()
 
         if result.rssi is not None:
             self._live.rssi = result.rssi
@@ -609,13 +736,16 @@ class BackfillService:
         )
 
         if result.error and not result.samples:
-            status = "deferred" if "not found" in (result.error or "") else "failed"
+            err_l = (result.error or "").lower()
+            status = "failed"
+            if "not found" in err_l or "inprogress" in err_l.replace(" ", ""):
+                status = "deferred"
             if result.rssi is not None and result.rssi < self.cfg.min_rssi:
                 status = "deferred"
                 self._weak_backoff[address] = (
                     time.time() + self.cfg.weak_rssi_backoff_seconds
                 )
-            elif "not found" in (result.error or ""):
+            elif "not found" in err_l or "inprogress" in err_l.replace(" ", ""):
                 self._weak_backoff[address] = (
                     time.time() + self.cfg.weak_rssi_backoff_seconds
                 )

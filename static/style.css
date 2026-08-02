@@ -344,6 +344,11 @@ main {
   color: var(--fg);
 }
 
+.backfill-local-best {
+  color: var(--accent, #7cb8e8);
+  font-weight: 600;
+}
+
 .backfill-status {
   margin: 0.5rem 0 0;
   font-size: 0.8rem;
