@@ -126,11 +126,29 @@ class GoveeScanner:
         self.node_id = node_id
         self._last_sample: dict[str, float] = {}
         self._latest: dict[str, Reading] = {}
+        # Canonical MAC → (BLEDevice, seen_at). Needed on macOS where
+        # CoreBluetooth addresses are UUIDs, not the BLE MAC we store in SQLite.
+        self._ble_devices: dict[str, tuple[BLEDevice, float]] = {}
         self._lock = asyncio.Lock()
         # When set, adapter loops stop scanning so GATT connects can proceed.
         self._gatt_pause = asyncio.Event()
         self._gatt_pause_depth = 0
         self._gatt_pause_lock = asyncio.Lock()
+
+    def remember_ble_device(self, address: str, device: BLEDevice) -> None:
+        self._ble_devices[address.strip().upper()] = (device, time.time())
+
+    def get_ble_device(
+        self, address: str, *, max_age: float = 900.0
+    ) -> BLEDevice | None:
+        """Return a recently seen BLEDevice for a canonical MAC, if any."""
+        entry = self._ble_devices.get(address.strip().upper())
+        if entry is None:
+            return None
+        device, seen_at = entry
+        if max_age > 0 and time.time() - seen_at > max_age:
+            return None
+        return device
 
     async def pause_for_gatt(self) -> None:
         """Temporarily stop BLE scanning (nested-safe) for a GATT session."""
@@ -174,6 +192,7 @@ class GoveeScanner:
             return
 
         register_mac(self.suffix_map, reading.address)
+        self.remember_ble_device(reading.address, device)
         self._latest[reading.address] = reading
         now = time.time()
         last = self._last_sample.get(reading.address, 0.0)

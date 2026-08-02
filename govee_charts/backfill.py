@@ -806,8 +806,21 @@ class BackfillService:
             fallback_battery = int(state["last_battery"])
 
         now = time.time()
-        start_min = max(1, int(round((now - window_start) / 60.0)))
-        end_min = max(1, int(round((now - window_end) / 60.0)))
+        # Grid-aligned jobs may extend past "now"; clip to the last complete minute.
+        tip = now - 60.0
+        eff_end = min(window_end, tip)
+        eff_start = min(window_start, eff_end)
+        if eff_end - eff_start < 60.0:
+            await self.db.update_backfill_job(
+                job_id,
+                status="done",
+                samples_done=0,
+                samples_expected=expected,
+                error="window still open",
+            )
+            return
+        start_min = max(1, int(round((now - eff_start) / 60.0)))
+        end_min = max(1, int(round((now - eff_end) / 60.0)))
         if start_min < end_min:
             start_min, end_min = end_min, start_min
         start_min = min(start_min, MAX_HISTORY_MINUTES)
@@ -822,7 +835,13 @@ class BackfillService:
             self._live.last_sample_ts = sample.ts
             self._live.last_sample_temp = sample.temperature_c
 
+        # Capture the platform BLEDevice before pausing the continuous scanner.
+        # On macOS, CoreBluetooth uses UUIDs — find_device_by_address(MAC) fails.
+        cached_device = None
+        suffix_map = None
         if self.scanner is not None:
+            cached_device = self.scanner.get_ble_device(address)
+            suffix_map = self.scanner.suffix_map
             await self.scanner.pause_for_gatt()
         try:
             result = await download_history(
@@ -833,6 +852,8 @@ class BackfillService:
                 fallback_battery=fallback_battery,
                 on_sample=on_sample,
                 now=now,
+                device=cached_device,
+                suffix_map=suffix_map,
             )
         finally:
             if self.scanner is not None:
@@ -899,7 +920,7 @@ class BackfillService:
         samples_payload = [
             (_minute_floor(s.ts) * 60.0, s.temperature_c, s.humidity)
             for s in result.samples
-            if window_start - 30.0 <= s.ts < window_end + 30.0
+            if eff_start - 30.0 <= s.ts < eff_end + 30.0
         ]
         # If decode window slightly drifts, still store all samples from the pull.
         if not samples_payload and result.samples:

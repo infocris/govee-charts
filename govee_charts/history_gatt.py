@@ -5,12 +5,30 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
+from bleak.backends.scanner import AdvertisementData
+
+from govee_charts.address import (
+    is_ble_mac,
+    mac_address_suffix,
+    name_mac_suffix,
+    register_mac,
+)
+from govee_charts.decode import decode_advertisement
+from govee_charts.gatt_crypto import (
+    PRESHARED_KEY,
+    UUID_AUTH_NOTIFY,
+    UUID_AUTH_SERVICE,
+    UUID_AUTH_WRITE,
+    open_packet,
+    seal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +83,9 @@ def build_battery_request() -> bytearray:
 def decode_measurement(raw3: bytes) -> tuple[float, float] | None:
     if len(raw3) != 3 or raw3 == b"\xff\xff\xff":
         return None
+    # Trailing padding / unused slots often look like 0x000000.
+    if raw3 == b"\x00\x00\x00":
+        return None
     raw = int.from_bytes(b"\x00" + raw3, "big")
     negative = bool(raw & 0x800000)
     if negative:
@@ -73,7 +94,9 @@ def decode_measurement(raw3: bytes) -> tuple[float, float] | None:
     if negative:
         temp_c = -temp_c
     humidity = (raw % 1000) / 10.0
-    if not (-40.0 <= temp_c <= 60.0 and 0.0 <= humidity <= 100.0):
+    # Indoor/outdoor Govee history; keep tighter than the absolute sensor limits
+    # so ciphertext mis-decoded as measurements is dropped.
+    if not (-30.0 <= temp_c <= 55.0 and 1.0 <= humidity <= 99.0):
         return None
     return temp_c, humidity
 
@@ -109,41 +132,35 @@ async def download_history(
     fallback_battery: int | None = None,
     on_sample: ProgressCallback | None = None,
     now: float | None = None,
+    device: BLEDevice | None = None,
+    suffix_map: dict[str, str] | None = None,
 ) -> HistoryDownloadResult:
     """
     Connect and download minute history for [end_min, start_min] minutes ago.
 
     Timestamps are absolute unix seconds derived from `now` (default: time.time()).
+
+    ``device`` may be a recently seen Bleak BLEDevice (preferred on macOS, where
+    CoreBluetooth addresses are UUIDs rather than the canonical BLE MAC).
     """
     address = address.strip().upper()
     result = HistoryDownloadResult(address=address)
     t_wall = float(now if now is not None else time.time())
     t0 = time.perf_counter()
 
-    try:
-        device = None
-        last_exc: Exception | None = None
-        for attempt in range(3):
-            try:
-                device = await BleakScanner.find_device_by_address(
-                    address, timeout=timeout
-                )
-                last_exc = None
-                break
-            except Exception as exc:
-                last_exc = exc
-                if "inprogress" in str(exc).lower().replace(" ", "") and attempt < 2:
-                    await asyncio.sleep(2.0 * (attempt + 1))
-                    continue
-                break
-        if last_exc is not None and device is None:
-            result.error = f"scan failed: {last_exc}"
+    if device is None:
+        try:
+            device, last_exc = await _find_device_resolved(
+                address, timeout=timeout, suffix_map=suffix_map
+            )
+            if last_exc is not None and device is None:
+                result.error = f"scan failed: {last_exc}"
+                result.duration_s = time.perf_counter() - t0
+                return result
+        except Exception as exc:
+            result.error = f"scan failed: {exc}"
             result.duration_s = time.perf_counter() - t0
             return result
-    except Exception as exc:
-        result.error = f"scan failed: {exc}"
-        result.duration_s = time.perf_counter() - t0
-        return result
 
     if device is None:
         result.error = "not found in scan"
@@ -161,14 +178,45 @@ async def download_history(
     done = asyncio.Event()
     ack = asyncio.Event()
     battery_event = asyncio.Event()
+    auth_rx1 = asyncio.Event()
+    auth_rx2 = asyncio.Event()
     notif_count = 0
     keepalives = 0
     battery_val: int | None = None
+    session_key: bytes | None = None
+
+    def _decrypt_data(raw: bytes) -> bytes:
+        """History data packets: always decrypt when a session key is active.
+
+        Do not heuristic-match on the first byte — for offsets ≥ 256 it is
+        0x01/0x02/… and an older check wrongly fell back to ciphertext, which
+        decoded as absurd temperatures.
+        """
+        if session_key is None or len(raw) != 20:
+            return raw
+        try:
+            return open_packet(raw, session_key)
+        except Exception:
+            return raw
+
+    def _decrypt_command(raw: bytes) -> bytes:
+        """Command notifications (ack / ee 01 / aa …): decrypt + checksum check."""
+        if session_key is None or len(raw) != 20:
+            return raw
+        try:
+            plain = open_packet(raw, session_key)
+            if xor_checksum(plain[:19]) == plain[19]:
+                return plain
+        except Exception:
+            pass
+        if xor_checksum(raw[:19]) == raw[19]:
+            return raw
+        return raw
 
     def on_data(_handle: int, data: bytearray) -> None:
         nonlocal notif_count
         notif_count += 1
-        raw = bytes(data)
+        raw = _decrypt_data(bytes(data))
         if len(raw) < 5:
             return
         offset = int.from_bytes(raw[0:2], "big")
@@ -198,12 +246,11 @@ async def download_history(
 
     def on_req(_handle: int, data: bytearray) -> None:
         nonlocal battery_val
-        raw = bytes(data)
+        raw = _decrypt_command(bytes(data))
         if len(raw) >= 2 and raw[0] == 0x33 and raw[1] == 0x01:
             ack.set()
         if len(raw) >= 2 and raw[0] == 0xEE and raw[1] == 0x01:
             done.set()
-        # Battery response may also arrive on ctrl UUID; listen on both.
         if len(raw) >= 3 and raw[0] == 0xAA and raw[1] == 0x08:
             batt = int(raw[2])
             if 0 <= batt <= 100:
@@ -212,12 +259,27 @@ async def download_history(
 
     def on_ctrl(_handle: int, data: bytearray) -> None:
         nonlocal battery_val
-        raw = bytes(data)
+        raw = _decrypt_command(bytes(data))
         if len(raw) >= 3 and raw[0] == 0xAA and raw[1] == 0x08:
             batt = int(raw[2])
             if 0 <= batt <= 100:
                 battery_val = batt
                 battery_event.set()
+
+    def on_auth(_handle: int, data: bytearray) -> None:
+        nonlocal session_key
+        raw = bytes(data)
+        if len(raw) != 20:
+            return
+        try:
+            plain = open_packet(raw, PRESHARED_KEY)
+        except Exception:
+            return
+        if plain[0] == 0xE7 and plain[1] == 0x01:
+            session_key = bytes(plain[2:18])
+            auth_rx1.set()
+        elif plain[0] == 0xE7 and plain[1] == 0x02:
+            auth_rx2.set()
 
     async def keepalive_loop(client: BleakClient) -> None:
         nonlocal keepalives
@@ -228,12 +290,49 @@ async def download_history(
             if notif_count > 0 and notif_count // 75 >= keepalives:
                 try:
                     await client.write_gatt_char(
-                        UUID_REQ, build_keepalive(), response=False
+                        UUID_REQ,
+                        seal(build_keepalive(), session_key),
+                        response=False,
                     )
                     keepalives += 1
                 except Exception as exc:
                     logger.debug("keepalive failed: %s", exc)
                     break
+
+    async def auth_handshake(client: BleakClient) -> None:
+        nonlocal session_key
+        services = client.services
+        if services.get_service(UUID_AUTH_SERVICE) is None:
+            return
+        if services.get_characteristic(UUID_AUTH_WRITE) is None:
+            return
+        if services.get_characteristic(UUID_AUTH_NOTIFY) is None:
+            return
+        await client.start_notify(UUID_AUTH_NOTIFY, on_auth)
+        try:
+            await client.write_gatt_char(
+                UUID_AUTH_WRITE,
+                seal(bytearray([0xE7, 0x01]), PRESHARED_KEY),
+                response=False,
+            )
+            await asyncio.wait_for(auth_rx1.wait(), timeout=8.0)
+            await client.write_gatt_char(
+                UUID_AUTH_WRITE,
+                seal(bytearray([0xE7, 0x02]), PRESHARED_KEY),
+                response=False,
+            )
+            try:
+                await asyncio.wait_for(auth_rx2.wait(), timeout=8.0)
+            except asyncio.TimeoutError:
+                # TX2 ack is nice-to-have; session key from RX1 is enough.
+                pass
+            if session_key is not None:
+                logger.info(
+                    "GATT auth OK for %s (encrypted session)",
+                    address,
+                )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("GATT auth handshake timeout") from exc
 
     try:
         async with BleakClient(device, timeout=timeout) as client:
@@ -244,10 +343,19 @@ async def download_history(
             except Exception:
                 logger.debug("CTRL notify unavailable on %s", address)
 
+            try:
+                await auth_handshake(client)
+            except Exception as exc:
+                result.error = f"gatt auth failed: {exc}"
+                result.duration_s = time.perf_counter() - t0
+                return result
+
             # Battery once per session.
             try:
                 await client.write_gatt_char(
-                    UUID_CTRL, build_battery_request(), response=False
+                    UUID_CTRL,
+                    seal(build_battery_request(), session_key),
+                    response=False,
                 )
                 try:
                     await asyncio.wait_for(battery_event.wait(), timeout=3.0)
@@ -256,8 +364,11 @@ async def download_history(
             except Exception as exc:
                 logger.debug("battery query failed on %s: %s", address, exc)
 
-            req = build_history_request(start_min, end_min)
-            await client.write_gatt_char(UUID_REQ, req, response=True)
+            req = seal(build_history_request(start_min, end_min), session_key)
+            try:
+                await client.write_gatt_char(UUID_REQ, req, response=False)
+            except Exception:
+                await client.write_gatt_char(UUID_REQ, req, response=True)
 
             try:
                 await asyncio.wait_for(ack.wait(), timeout=10.0)
@@ -287,6 +398,10 @@ async def download_history(
                 await client.stop_notify(UUID_CTRL)
             except Exception:
                 pass
+            try:
+                await client.stop_notify(UUID_AUTH_NOTIFY)
+            except Exception:
+                pass
     except Exception as exc:
         result.error = f"gatt failed: {exc}"
         result.duration_s = time.perf_counter() - t0
@@ -314,12 +429,101 @@ async def download_history(
     return result
 
 
-async def find_device(
-    address: str, *, timeout: float = 15.0
-) -> tuple[BLEDevice | None, int | None]:
-    """Scan for a device; return (device, rssi)."""
+async def _find_device_resolved(
+    address: str,
+    *,
+    timeout: float,
+    suffix_map: dict[str, str] | None = None,
+) -> tuple[BLEDevice | None, Exception | None]:
+    """
+    Locate a sensor by canonical BLE MAC.
+
+    Tries a direct address match first (Linux BlueZ), then a detection-callback
+    scan that resolves Govee ads to MAC (required on macOS CoreBluetooth).
+    """
     address = address.strip().upper()
-    device = await BleakScanner.find_device_by_address(address, timeout=timeout)
+    last_exc: Exception | None = None
+
+    # Direct match works when the platform address *is* the MAC (BlueZ).
+    # On macOS CoreBluetooth, addresses are UUIDs — skip the useless MAC lookup.
+    if not (sys.platform == "darwin" and is_ble_mac(address)):
+        for attempt in range(2):
+            try:
+                device = await BleakScanner.find_device_by_address(
+                    address, timeout=min(8.0, timeout)
+                )
+                if device is not None:
+                    return device, None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if "inprogress" in str(exc).lower().replace(" ", "") and attempt < 1:
+                    await asyncio.sleep(2.0 * (attempt + 1))
+                    continue
+                break
+
+    # MAC-aware scan: match decoded Govee advertisement identity / name suffix.
+    loop = asyncio.get_running_loop()
+    found: asyncio.Future[BLEDevice] = loop.create_future()
+    local_map = dict(suffix_map or {})
+    try:
+        target_suffix = mac_address_suffix(address) if is_ble_mac(address) else None
+    except ValueError:
+        target_suffix = None
+
+    def cb(device: BLEDevice, adv: AdvertisementData) -> None:
+        if found.done():
+            return
+        name = adv.local_name or device.name or ""
+        reading = decode_advertisement(
+            device.address,
+            name,
+            adv,
+            device=device,
+            suffix_map=local_map,
+        )
+        if reading is None:
+            return
+        register_mac(local_map, reading.address)
+        name_suf = name_mac_suffix(name)
+        matched = reading.address.upper() == address or (
+            target_suffix is not None and name_suf == target_suffix
+        )
+        if matched and not found.done():
+            found.set_result(device)
+
+    scan_kwargs: dict[str, Any] = {"detection_callback": cb}
+    if sys.platform == "darwin":
+        scan_kwargs["scanning_mode"] = "active"
+    scanner = BleakScanner(**scan_kwargs)
+    try:
+        await scanner.start()
+    except Exception as exc:
+        return None, last_exc or exc
+    try:
+        device = await asyncio.wait_for(asyncio.shield(found), timeout=timeout)
+        return device, None
+    except asyncio.TimeoutError:
+        return None, last_exc
+    except Exception as exc:
+        return None, last_exc or exc
+    finally:
+        try:
+            await scanner.stop()
+        except Exception:
+            pass
+
+
+async def find_device(
+    address: str,
+    *,
+    timeout: float = 15.0,
+    suffix_map: dict[str, str] | None = None,
+) -> tuple[BLEDevice | None, int | None]:
+    """Scan for a device by canonical MAC; return (device, rssi)."""
+    device, _exc = await _find_device_resolved(
+        address, timeout=timeout, suffix_map=suffix_map
+    )
     if device is None:
         return None, None
     rssi = getattr(device, "rssi", None)
