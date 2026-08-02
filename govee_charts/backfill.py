@@ -282,25 +282,36 @@ class BackfillService:
                 and now - self._last_refresh_ts < self.cfg.poll_seconds
             ):
                 return 0
-            self._last_refresh_ts = now
+            # Quantize to the minute so band edges do not drift every poll
+            # (which would otherwise accumulate duplicate pending windows).
+            now = float(int(now // 60) * 60)
+            self._last_refresh_ts = time.time()
+
+            cleared = await self.db.clear_open_backfill_jobs()
+            if cleared:
+                logger.info("Cleared %d open backfill job(s) before rebuild", cleared)
+
             devices = await self.db.list_devices()
             enqueued = 0
             bands = _phase_bands(now, self.cfg.lookback_days)
             for device in devices:
                 addr = str(device["address"]).upper()
-                # Only local BLE MACs with a model (skip pure peer-only if desired —
-                # peers may still benefit from local GATT if in range).
                 model = str(device.get("model") or "").lower()
                 if model and model not in ("h5075", "h5072", "h5179"):
                     continue
                 for phase, band_start, band_end in bands:
-                    existing = await self.db.reading_minutes(addr, band_start, band_end)
+                    existing = await self.db.reading_minutes(
+                        addr, band_start, band_end, cover_seconds=75.0
+                    )
                     for win_start, win_end, expected in _missing_ranges(
                         existing,
                         band_start,
                         band_end,
                         max_job_minutes=self.cfg.max_job_minutes,
                     ):
+                        # Skip tiny holes in recent bands (live ads are sparse).
+                        if phase in ("hour", "day") and expected < 3:
+                            continue
                         job_id = await self.db.enqueue_backfill_job(
                             address=addr,
                             phase=phase,

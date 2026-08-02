@@ -13,6 +13,7 @@
   const viewOverview = document.getElementById("view-overview");
   const viewCompare = document.getElementById("view-compare");
   const viewFacades = document.getElementById("view-facades");
+  const viewBackfill = document.getElementById("view-backfill");
   const selectAllBtn = document.getElementById("select-all");
   const selectNoneBtn = document.getElementById("select-none");
   const rangeButtons = [...document.querySelectorAll(".ranges button")];
@@ -34,6 +35,8 @@
   const backfillStatusEl = document.getElementById("backfill-status");
   const backfillPauseBtn = document.getElementById("backfill-pause");
   const backfillRefreshBtn = document.getElementById("backfill-refresh");
+  const backfillJobsBody = document.getElementById("backfill-jobs-body");
+  const backfillRecentBody = document.getElementById("backfill-recent-body");
   let backfillTimer = null;
   let backfillSnapshot = null;
 
@@ -75,7 +78,9 @@
   let modelFilter = localStorage.getItem(MODEL_KEY) || "all";
   let catFilters = loadCatFilters();
   let sortState = loadSortState();
-  let currentView = ["compare", "facades"].includes(localStorage.getItem(VIEW_KEY))
+  let currentView = ["compare", "facades", "backfill"].includes(
+    localStorage.getItem(VIEW_KEY)
+  )
     ? localStorage.getItem(VIEW_KEY)
     : "overview";
   let showForecast = localStorage.getItem(FORECAST_KEY) !== "0";
@@ -591,25 +596,111 @@
     return map[phase] || phase || "—";
   }
 
-  function renderBackfill(data) {
-    backfillSnapshot = data;
-    if (!backfillPanelEl) return;
-    if (!data || data.worker === "disabled" || data.enabled === false) {
-      backfillPanelEl.hidden = true;
+  function formatBackfillTs(ts) {
+    if (ts == null || !Number.isFinite(Number(ts))) return "—";
+    return new Date(Number(ts) * 1000).toLocaleString("en-GB", {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+
+  function deviceNameForAddress(address) {
+    const addr = String(address || "").toUpperCase();
+    const d = devices.find((x) => String(x.address || "").toUpperCase() === addr);
+    if (d) return deviceLabel(d);
+    return addr || "—";
+  }
+
+  function renderBackfillJobs(jobs) {
+    if (!backfillJobsBody) return;
+    const rows = jobs || [];
+    if (!rows.length) {
+      backfillJobsBody.innerHTML =
+        '<tr><td colspan="6" class="overview-empty">No jobs yet</td></tr>';
       return;
     }
-    backfillPanelEl.hidden = false;
+    backfillJobsBody.innerHTML = rows
+      .map((job) => {
+        const st = String(job.status || "").replace(/[^a-z0-9_-]/gi, "");
+        const samples =
+          `${Number(job.samples_done) || 0}` +
+          (job.samples_expected != null ? ` / ${Number(job.samples_expected) || 0}` : "");
+        const detail = job.error
+          ? escapeHtml(String(job.error))
+          : `${formatBackfillTs(job.window_start)} → ${formatBackfillTs(job.window_end)}`;
+        return `<tr>
+          <td>${escapeHtml(formatBackfillTs(job.updated_at))}</td>
+          <td>${escapeHtml(deviceNameForAddress(job.address))}</td>
+          <td>${escapeHtml(phaseLabel(job.phase))}</td>
+          <td><span class="backfill-job-status backfill-job-status-${st}">${escapeHtml(job.status || "—")}</span></td>
+          <td class="num">${escapeHtml(samples)}</td>
+          <td class="backfill-job-detail">${detail}</td>
+        </tr>`;
+      })
+      .join("");
+  }
 
-    const current = data.current;
-    const queue = data.queue || [];
-    const totals = data.totals || {};
+  function renderBackfillRecent(recent) {
+    if (!backfillRecentBody) return;
+    const rows = recent || [];
+    if (!rows.length) {
+      backfillRecentBody.innerHTML =
+        '<tr><td colspan="7" class="overview-empty">No GATT readings recovered yet</td></tr>';
+      return;
+    }
+    backfillRecentBody.innerHTML = rows
+      .map((row) => {
+        const name = row.name || deviceNameForAddress(row.address);
+        const temp =
+          row.temperature_c != null && Number.isFinite(Number(row.temperature_c))
+            ? `${Number(row.temperature_c).toFixed(1)} °C`
+            : "—";
+        const hum =
+          row.humidity != null && Number.isFinite(Number(row.humidity))
+            ? `${Number(row.humidity).toFixed(1)} %`
+            : "—";
+        const batt =
+          row.battery != null && Number.isFinite(Number(row.battery))
+            ? `${Number(row.battery)} %`
+            : "—";
+        return `<tr>
+          <td>${escapeHtml(formatBackfillTs(row.ts))}</td>
+          <td title="${escapeHtml(row.address || "")}">${escapeHtml(name)}</td>
+          <td class="num temp">${escapeHtml(temp)}</td>
+          <td class="num">${escapeHtml(hum)}</td>
+          <td class="num">${escapeHtml(batt)}</td>
+          <td class="num">${rssiHtml(row.rssi)}</td>
+          <td class="overview-source">${sourceHtml(row.source || "—")}</td>
+        </tr>`;
+      })
+      .join("");
+  }
 
+  function renderBackfill(data) {
+    backfillSnapshot = data;
+    if (!backfillPanelEl || !backfillCurrentEl) return;
+
+    const disabled = !data || data.worker === "disabled" || data.enabled === false;
     if (backfillPauseBtn) {
-      backfillPauseBtn.textContent = data.paused ? "Resume" : "Pause";
-      backfillPauseBtn.disabled = false;
+      backfillPauseBtn.disabled = disabled;
+      backfillPauseBtn.textContent =
+        data && data.paused ? "Resume" : "Pause";
+    }
+    if (backfillRefreshBtn) {
+      backfillRefreshBtn.disabled = disabled;
     }
 
-    if (!current) {
+    const current = data && data.current;
+    const queue = (data && data.queue) || [];
+    const totals = (data && data.totals) || {};
+
+    if (disabled) {
+      backfillCurrentEl.innerHTML =
+        `<p class="backfill-idle">Backfill disabled or needs local BLE scanner</p>`;
+    } else if (!current) {
       backfillCurrentEl.innerHTML =
         `<p class="backfill-idle">` +
         (data.paused
@@ -623,12 +714,7 @@
       const expected = Math.max(Number(current.samples_expected) || 0, done);
       const pct = expected > 0 ? Math.min(100, Math.round((100 * done) / expected)) : 0;
       const lastTs = current.last_sample_ts
-        ? new Date(Number(current.last_sample_ts) * 1000).toLocaleString("en-GB", {
-            month: "short",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-          })
+        ? formatBackfillTs(current.last_sample_ts)
         : "—";
       const lastTemp =
         current.last_sample_temp != null && Number.isFinite(Number(current.last_sample_temp))
@@ -662,7 +748,7 @@
       } else {
         backfillQueueEl.hidden = false;
         backfillQueueEl.innerHTML = queue
-          .slice(0, 12)
+          .slice(0, 20)
           .map(
             (q) =>
               `<li><span class="q-name">${escapeHtml(q.name || q.address)}</span>` +
@@ -676,30 +762,33 @@
       backfillStatusEl.textContent =
         `pending ${totals.pending || 0} · done ${totals.done || 0}` +
         (totals.failed ? ` · failed ${totals.failed}` : "") +
-        (data.config && data.config.min_rssi != null
+        (data && data.config && data.config.min_rssi != null
           ? ` · min RSSI ${data.config.min_rssi} dBm`
           : "");
     }
+
+    renderBackfillJobs(data && data.recent_jobs);
+    renderBackfillRecent(data && data.recent);
   }
 
   async function loadBackfill() {
     try {
-      const res = await fetch("/api/backfill");
+      const res = await fetch("/api/backfill?recent_limit=100&job_limit=50");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       renderBackfill(data);
       syncBackfillPolling();
     } catch (err) {
-      if (backfillPanelEl) backfillPanelEl.hidden = true;
       console.warn("backfill status:", err);
+      if (backfillCurrentEl) {
+        backfillCurrentEl.innerHTML =
+          `<p class="backfill-idle">Backfill status unavailable: ${escapeHtml(err.message)}</p>`;
+      }
     }
   }
 
   function syncBackfillPolling() {
-    const shouldPoll =
-      currentView === "overview" &&
-      backfillPanelEl &&
-      !backfillPanelEl.hidden;
+    const shouldPoll = currentView === "backfill";
     if (shouldPoll && !backfillTimer) {
       backfillTimer = setInterval(loadBackfill, 2500);
     } else if (!shouldPoll && backfillTimer) {
@@ -1031,7 +1120,7 @@
   }
 
   function setView(view) {
-    if (!["overview", "compare", "facades"].includes(view)) {
+    if (!["overview", "compare", "facades", "backfill"].includes(view)) {
       view = "overview";
     }
     currentView = view;
@@ -1039,6 +1128,7 @@
     if (viewOverview) viewOverview.hidden = view !== "overview";
     if (viewCompare) viewCompare.hidden = view !== "compare";
     if (viewFacades) viewFacades.hidden = view !== "facades";
+    if (viewBackfill) viewBackfill.hidden = view !== "backfill";
     viewButtons.forEach((btn) => {
       const active = btn.dataset.view === view;
       btn.classList.toggle("active", active);
@@ -1061,6 +1151,8 @@
       if (facadeChartInstances.length) {
         facadeChartInstances.forEach((c) => c.resize());
       }
+    } else if (view === "backfill") {
+      loadBackfill().catch((err) => console.warn(err));
     }
     syncBackfillPolling();
   }
@@ -2437,7 +2529,10 @@
       return { enabled: false, outdoor: [], projections: {} };
     }
     await requestBrowserGeo(false);
-    const params = new URLSearchParams({ hours: String(hours) });
+    const params = new URLSearchParams({
+      // Forecast API caps at 168 h; chart history may be longer.
+      hours: String(Math.min(Number(hours) || 24, 168)),
+    });
     for (const address of addresses) {
       params.append("address", address);
     }
@@ -2954,6 +3049,22 @@
     tempChart.options.plugins.legend.display = showLegend;
     humChart.options.plugins.legend.display = showLegend;
     dewChart.options.plugins.legend.display = showLegend;
+
+    // Lock the X axis to the selected window so empty history is visible
+    // (otherwise Chart.js zooms to the first available sample).
+    let xMax = Date.now();
+    const xMin = xMax - Number(hours) * 3600 * 1000;
+    for (const ds of tempDatasets) {
+      for (const p of ds.data || []) {
+        if (p && Number(p.x) > xMax) xMax = Number(p.x);
+      }
+    }
+    for (const chart of [tempChart, humChart, dewChart]) {
+      if (!chart || !chart.options.scales || !chart.options.scales.x) continue;
+      chart.options.scales.x.min = xMin;
+      chart.options.scales.x.max = xMax;
+    }
+
     bindChartLegend(tempChart);
     bindChartLegend(humChart);
     bindChartLegend(dewChart);
@@ -3044,13 +3155,14 @@
       } else if (currentView === "facades") {
         await loadFacades();
         await updateWindowBanner(null);
+      } else if (currentView === "backfill") {
+        await loadBackfill();
       } else {
         const bannerPromise = updateWindowBanner(null);
         if (windowNotify) {
           await evaluateWindowNotifications(null);
         }
         await bannerPromise;
-        await loadBackfill();
       }
     } catch (err) {
       console.error(err);

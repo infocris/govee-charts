@@ -111,8 +111,13 @@ def create_app(
         }
 
     @app.get("/api/backfill")
-    async def api_backfill() -> dict[str, Any]:
-        """Live GATT history backfill queue snapshot."""
+    async def api_backfill(
+        recent_limit: int = Query(100, ge=1, le=500),
+        job_limit: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        """Live GATT history backfill queue snapshot + recent recovered readings."""
+        recent = await db.recent_gatt_readings(limit=recent_limit)
+        recent_jobs = await db.recent_backfill_jobs(limit=job_limit)
         service: BackfillService | None = app.state.backfill
         if service is None:
             return {
@@ -128,33 +133,55 @@ def create_app(
                     "failed": 0,
                 },
                 "config": None,
+                "recent": recent,
+                "recent_jobs": recent_jobs,
             }
-        return await service.snapshot()
+        snap = await service.snapshot()
+        snap["recent"] = recent
+        snap["recent_jobs"] = recent_jobs
+        return snap
 
     @app.post("/api/backfill/pause")
-    async def api_backfill_pause() -> dict[str, Any]:
+    async def api_backfill_pause(
+        recent_limit: int = Query(100, ge=1, le=500),
+        job_limit: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
         service: BackfillService | None = app.state.backfill
         if service is None:
             raise HTTPException(status_code=503, detail="Backfill not available")
         service.pause()
-        return await service.snapshot()
+        snap = await service.snapshot()
+        snap["recent"] = await db.recent_gatt_readings(limit=recent_limit)
+        snap["recent_jobs"] = await db.recent_backfill_jobs(limit=job_limit)
+        return snap
 
     @app.post("/api/backfill/resume")
-    async def api_backfill_resume() -> dict[str, Any]:
+    async def api_backfill_resume(
+        recent_limit: int = Query(100, ge=1, le=500),
+        job_limit: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
         service: BackfillService | None = app.state.backfill
         if service is None:
             raise HTTPException(status_code=503, detail="Backfill not available")
         service.resume()
-        return await service.snapshot()
+        snap = await service.snapshot()
+        snap["recent"] = await db.recent_gatt_readings(limit=recent_limit)
+        snap["recent_jobs"] = await db.recent_backfill_jobs(limit=job_limit)
+        return snap
 
     @app.post("/api/backfill/refresh")
-    async def api_backfill_refresh() -> dict[str, Any]:
+    async def api_backfill_refresh(
+        recent_limit: int = Query(100, ge=1, le=500),
+        job_limit: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
         service: BackfillService | None = app.state.backfill
         if service is None:
             raise HTTPException(status_code=503, detail="Backfill not available")
         enqueued = await service.refresh_gaps(force=True)
         snap = await service.snapshot()
         snap["enqueued"] = enqueued
+        snap["recent"] = await db.recent_gatt_readings(limit=recent_limit)
+        snap["recent_jobs"] = await db.recent_backfill_jobs(limit=job_limit)
         return snap
 
     @app.post("/api/restart")
@@ -532,7 +559,7 @@ def create_app(
     @app.get("/api/history")
     async def api_history(
         address: str = Query(..., min_length=1),
-        hours: float = Query(24.0, gt=0, le=720),
+        hours: float = Query(24.0, gt=0, le=2160),
     ) -> dict[str, Any]:
         points = await db.history(address, hours)
         if not points:

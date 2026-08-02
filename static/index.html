@@ -27,6 +27,7 @@
       <button type="button" role="tab" data-view="overview" class="active" aria-selected="true">Overview</button>
       <button type="button" role="tab" data-view="compare" aria-selected="false">Compare</button>
       <button type="button" role="tab" data-view="facades" aria-selected="false">Facades</button>
+      <button type="button" role="tab" data-view="backfill" aria-selected="false">Backfill</button>
       <button type="button" id="restart-btn" class="restart-btn" title="Restart service">Restart</button>
     </nav>
     <p class="restart-status" id="restart-status" hidden aria-live="polite"></p>
@@ -37,21 +38,6 @@
       <div class="overview-head">
         <h2>All sensors</h2>
         <p class="overview-hint">Edit zone / height / room inline — click a row to compare charts</p>
-      </div>
-
-      <div class="backfill-panel" id="backfill-panel" hidden>
-        <div class="backfill-head">
-          <h3>History backfill</h3>
-          <div class="backfill-actions">
-            <button type="button" class="backfill-btn" id="backfill-refresh" title="Re-scan gaps">Refresh</button>
-            <button type="button" class="backfill-btn" id="backfill-pause" title="Pause or resume">Pause</button>
-          </div>
-        </div>
-        <div class="backfill-current" id="backfill-current">
-          <p class="backfill-idle" id="backfill-idle">Queue empty — waiting for gaps</p>
-        </div>
-        <ul class="backfill-queue" id="backfill-queue" hidden></ul>
-        <p class="backfill-status" id="backfill-status"></p>
       </div>
 
       <div class="model-filters" id="model-filters" role="group" aria-label="Filter by model"></div>
@@ -151,6 +137,8 @@
           <button type="button" data-hours="6">6 h</button>
           <button type="button" data-hours="24" class="active">24 h</button>
           <button type="button" data-hours="168">7 d</button>
+          <button type="button" data-hours="720">30 d</button>
+          <button type="button" data-hours="2160">90 d</button>
         </div>
         <label class="forecast-toggle">
           <input type="checkbox" id="show-forecast" checked>
@@ -259,6 +247,75 @@
         </div>
       </details>
       <p class="status" id="facade-status">Loading…</p>
+    </section>
+
+    <section id="view-backfill" class="view" role="tabpanel" aria-label="Backfill" hidden>
+      <div class="overview-head">
+        <h2>History backfill</h2>
+        <p class="overview-hint">
+          GATT recovery queue — newest gaps first; shared over federation as node_id/gatt
+        </p>
+      </div>
+
+      <div class="backfill-panel" id="backfill-panel">
+        <div class="backfill-head">
+          <h3>Worker</h3>
+          <div class="backfill-actions">
+            <button type="button" class="backfill-btn" id="backfill-refresh" title="Re-scan gaps">Refresh</button>
+            <button type="button" class="backfill-btn" id="backfill-pause" title="Pause or resume">Pause</button>
+          </div>
+        </div>
+        <div class="backfill-current" id="backfill-current">
+          <p class="backfill-idle" id="backfill-idle">Loading…</p>
+        </div>
+        <ul class="backfill-queue" id="backfill-queue" hidden></ul>
+        <p class="backfill-status" id="backfill-status"></p>
+      </div>
+
+      <div class="overview-head overview-head-secondary">
+        <h2>Recent jobs</h2>
+        <p class="overview-hint">Last job updates (done, deferred, failed, …)</p>
+      </div>
+      <div class="overview-table-wrap">
+        <table class="overview-table backfill-log-table" id="backfill-jobs-table">
+          <thead>
+            <tr>
+              <th scope="col">Updated</th>
+              <th scope="col">Sensor</th>
+              <th scope="col">Phase</th>
+              <th scope="col">Status</th>
+              <th scope="col" class="num">Samples</th>
+              <th scope="col">Detail</th>
+            </tr>
+          </thead>
+          <tbody id="backfill-jobs-body">
+            <tr><td colspan="6" class="overview-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="overview-head overview-head-secondary">
+        <h2>Recovered readings</h2>
+        <p class="overview-hint">Last 100 GATT samples stored (newest insert first)</p>
+      </div>
+      <div class="overview-table-wrap">
+        <table class="overview-table backfill-log-table" id="backfill-recent-table">
+          <thead>
+            <tr>
+              <th scope="col">Sample time</th>
+              <th scope="col">Sensor</th>
+              <th scope="col" class="num">Temp</th>
+              <th scope="col" class="num">Humidity</th>
+              <th scope="col" class="num">Battery</th>
+              <th scope="col" class="num">Signal</th>
+              <th scope="col">Source</th>
+            </tr>
+          </thead>
+          <tbody id="backfill-recent-body">
+            <tr><td colspan="7" class="overview-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
   </main>
 

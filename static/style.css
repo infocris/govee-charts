@@ -350,6 +350,35 @@ main {
   color: var(--muted);
 }
 
+.backfill-log-table td.backfill-job-detail {
+  font-size: 0.82rem;
+  color: var(--muted);
+  max-width: 28rem;
+  word-break: break-word;
+}
+
+.backfill-job-status {
+  font-variant: small-caps;
+  letter-spacing: 0.03em;
+}
+
+.backfill-job-status-done {
+  color: #2e7d4f;
+}
+
+.backfill-job-status-failed {
+  color: #b33a3a;
+}
+
+.backfill-job-status-deferred,
+.backfill-job-status-pending {
+  color: var(--muted);
+}
+
+.backfill-job-status-running {
+  color: var(--accent, #7cb8e8);
+}
+
 .overview-head-secondary {
   margin-top: 2.25rem;
   padding-top: 1.25rem;

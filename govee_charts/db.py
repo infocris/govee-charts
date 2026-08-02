@@ -1084,18 +1084,92 @@ class Database:
         address: str,
         start_ts: float,
         end_ts: float,
+        *,
+        cover_seconds: float = 75.0,
     ) -> set[int]:
-        """Return set of unix-minute indexes that already have a reading."""
+        """
+        Return unix-minute indexes covered by readings near [start_ts, end_ts).
+
+        Each reading covers neighbouring minutes within cover_seconds so sparse
+        live ads (e.g. every 90s) are not treated as endless one-minute GATT gaps.
+        """
+        pad = max(0.0, float(cover_seconds))
         cursor = await self.db.execute(
             """
-            SELECT CAST(ts / 60 AS INTEGER) AS minute
+            SELECT ts
             FROM readings
             WHERE address = ? AND ts >= ? AND ts < ?
             """,
-            (address.upper(), float(start_ts), float(end_ts)),
+            (address.upper(), float(start_ts) - pad, float(end_ts) + pad),
         )
         rows = await cursor.fetchall()
-        return {int(row[0]) for row in rows}
+        covered: set[int] = set()
+        start_m = int(start_ts // 60)
+        end_m = int(end_ts // 60)
+        if end_m <= start_m:
+            return covered
+        for row in rows:
+            ts = float(row[0])
+            lo = int((ts - pad) // 60)
+            hi = int((ts + pad) // 60)
+            for m in range(max(start_m, lo), min(end_m, hi + 1)):
+                covered.add(m)
+        return covered
+
+    async def clear_open_backfill_jobs(self) -> int:
+        """Drop pending/deferred jobs so gap refresh can rebuild a clean queue."""
+        cursor = await self.db.execute(
+            """
+            DELETE FROM backfill_jobs
+            WHERE status IN ('pending', 'deferred')
+            """
+        )
+        await self.db.commit()
+        return cursor.rowcount
+
+    async def recent_gatt_readings(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Newest GATT-recovered rows by insert id (recovery order proxy)."""
+        limit = max(1, min(int(limit), 500))
+        cursor = await self.db.execute(
+            """
+            SELECT
+                r.id,
+                r.address,
+                COALESCE(d.name, r.address) AS name,
+                r.ts,
+                r.temperature_c,
+                r.humidity,
+                r.battery,
+                r.rssi,
+                r.source
+            FROM readings r
+            LEFT JOIN devices d ON d.address = r.address
+            WHERE r.source LIKE '%/gatt'
+               OR r.source = 'gatt-history'
+               OR lower(COALESCE(r.source, '')) LIKE '%gatt%'
+            ORDER BY r.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def recent_backfill_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Most recently updated backfill jobs (any status)."""
+        limit = max(1, min(int(limit), 200))
+        cursor = await self.db.execute(
+            """
+            SELECT id, address, phase, window_start, window_end, status,
+                   priority, samples_done, samples_expected, error, updated_at
+            FROM backfill_jobs
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
     async def reset_running_backfill_jobs(self) -> int:
         """Mark interrupted running jobs as pending again (startup recovery)."""

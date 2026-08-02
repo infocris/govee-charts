@@ -262,7 +262,7 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `GET /api/hvac` — latest climate + power snapshot
 - `GET /api/hvac/history?hours=168` — climate events + active bands
 - `GET /api/power/history?hours=168` — power samples (W)
-- `GET /api/backfill` — GATT history backfill queue snapshot
+- `GET /api/backfill` — GATT history backfill queue + last recovered readings / jobs
 - `POST /api/backfill/pause` / `resume` / `refresh` — control the backfill worker
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
 - `GET /api/health` — health + `node_id`
