@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from govee_charts.db import Database
+from govee_charts.federation import PeerPublisher, gatt_source
 from govee_charts.history_gatt import MAX_HISTORY_MINUTES, download_history
 
 logger = logging.getLogger(__name__)
@@ -19,8 +20,6 @@ PHASE_PRIORITY = {
     "week": 2,
     "deep": 3,
 }
-
-SOURCE = "gatt-history"
 
 
 @dataclass
@@ -33,6 +32,9 @@ class BackfillConfig:
     seen_max_age_seconds: float = 600.0
     connect_timeout: float = 25.0
     weak_rssi_backoff_seconds: float = 300.0
+    federation_share: bool = True
+    rssi_prefer_margin_db: float = 0.0
+    peer_signal_cache_seconds: float = 45.0
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> BackfillConfig:
@@ -49,6 +51,11 @@ class BackfillConfig:
             connect_timeout=max(5.0, float(raw.get("connect_timeout") or 25.0)),
             weak_rssi_backoff_seconds=max(
                 30.0, float(raw.get("weak_rssi_backoff_seconds") or 300.0)
+            ),
+            federation_share=bool(raw.get("federation_share", True)),
+            rssi_prefer_margin_db=float(raw.get("rssi_prefer_margin_db") or 0.0),
+            peer_signal_cache_seconds=max(
+                5.0, float(raw.get("peer_signal_cache_seconds") or 45.0)
             ),
         )
 
@@ -147,6 +154,8 @@ class BackfillService:
     db: Database
     cfg: BackfillConfig
     labels: dict[str, str] = field(default_factory=dict)
+    node_id: str = "local"
+    publisher: PeerPublisher | None = None
 
     def __post_init__(self) -> None:
         self._paused = False
@@ -160,6 +169,10 @@ class BackfillService:
     @property
     def enabled(self) -> bool:
         return self.cfg.enabled
+
+    @property
+    def source_tag(self) -> str:
+        return gatt_source(self.node_id)
 
     def pause(self) -> None:
         self._paused = True
@@ -251,6 +264,8 @@ class BackfillService:
                 "poll_seconds": self.cfg.poll_seconds,
                 "max_job_minutes": self.cfg.max_job_minutes,
                 "min_rssi": self.cfg.min_rssi,
+                "federation_share": self.cfg.federation_share,
+                "rssi_prefer_margin_db": self.cfg.rssi_prefer_margin_db,
             },
         }
 
@@ -341,6 +356,109 @@ class BackfillService:
             device_jobs.sort(key=lambda j: (-float(j["window_end"]), int(j["id"])))
         return device_jobs[0]
 
+    async def _yield_to_better_peer(
+        self,
+        address: str,
+        local_rssi: int | None,
+    ) -> str | None:
+        """
+        If a reachable peer has a better (or equal + lexicographically smaller
+        node_id) signal for this device, return a defer reason string.
+        """
+        pub = self.publisher
+        if pub is None or not pub.enabled:
+            return None
+
+        peers = await pub.peer_device_signals(
+            cache_seconds=self.cfg.peer_signal_cache_seconds
+        )
+        now = time.time()
+        max_age = self.cfg.seen_max_age_seconds
+
+        candidates: list[tuple[int, str]] = []
+        if local_rssi is not None:
+            candidates.append((int(local_rssi), self.node_id))
+
+        for peer in peers:
+            if not peer.get("ok"):
+                continue
+            peer_id = str(peer.get("node_id") or "").strip()
+            if not peer_id or peer_id == self.node_id:
+                continue
+            for device in peer.get("devices") or []:
+                if str(device.get("address") or "").upper() != address:
+                    continue
+                last_seen = float(device.get("last_seen") or 0.0)
+                if not last_seen or now - last_seen > max_age:
+                    continue
+                rssi = device.get("rssi")
+                if rssi is None:
+                    continue
+                try:
+                    candidates.append((int(rssi), peer_id))
+                except (TypeError, ValueError):
+                    continue
+                break
+
+        if len(candidates) < 2:
+            return None
+
+        max_rssi = max(r for r, _ in candidates)
+        margin = max(0.0, float(self.cfg.rssi_prefer_margin_db))
+        near_best = [(r, nid) for r, nid in candidates if r >= max_rssi - margin]
+        # Within the near-best band: highest RSSI, then smaller node_id.
+        near_best.sort(key=lambda item: (-item[0], item[1]))
+        best_rssi, best_id = near_best[0]
+        if best_id == self.node_id:
+            return None
+
+        local = next((c for c in candidates if c[1] == self.node_id), None)
+        if local is None:
+            return (
+                f"peer {best_id} has better rssi ({best_rssi}; local unknown)"
+            )
+        local_r = local[0]
+        return f"peer {best_id} has better rssi ({best_rssi} > {local_r})"
+
+    def _publish_gatt_samples(
+        self,
+        *,
+        address: str,
+        name: str,
+        model: str,
+        samples: list[tuple[float, float, float]],
+        battery: int,
+        rssi: int | None,
+    ) -> None:
+        if not self.cfg.federation_share or self.publisher is None:
+            return
+        if not self.publisher.enabled or not samples:
+            return
+        source = self.source_tag
+        payloads = [
+            {
+                "address": address,
+                "name": name,
+                "model": model,
+                "ts": float(ts),
+                "temperature_c": float(temp),
+                "humidity": float(hum),
+                "battery": int(battery),
+                "rssi": rssi,
+                "source": source,
+            }
+            for ts, temp, hum in samples
+        ]
+        n = self.publisher.publish_many(payloads)
+        if n:
+            logger.info(
+                "Federation queued %d/%d GATT sample(s) for %s (%s)",
+                n,
+                len(payloads),
+                name,
+                source,
+            )
+
     async def _run_job(self, job: dict[str, Any]) -> None:
         job_id = int(job["id"])
         address = str(job["address"]).upper()
@@ -387,15 +505,46 @@ class BackfillService:
         state = await self.db.get_backfill_state(address)
         if known_rssi is None and state:
             known_rssi = state.get("last_rssi")
+        local_rssi_i: int | None = None
+        if known_rssi is not None:
+            try:
+                local_rssi_i = int(known_rssi)
+            except (TypeError, ValueError):
+                local_rssi_i = None
+
         if (
-            known_rssi is not None
-            and int(known_rssi) < self.cfg.min_rssi
+            local_rssi_i is not None
+            and local_rssi_i < self.cfg.min_rssi
             and time.time() < self._weak_backoff.get(address, 0.0)
         ):
             await self.db.update_backfill_job(
                 job_id,
                 status="deferred",
-                error=f"rssi {known_rssi} below {self.cfg.min_rssi}",
+                error=f"rssi {local_rssi_i} below {self.cfg.min_rssi}",
+            )
+            return
+
+        # Yield to a peer with a better signal when possible.
+        try:
+            yield_reason = await self._yield_to_better_peer(address, local_rssi_i)
+        except Exception:
+            logger.exception("Peer RSSI election failed for %s", address)
+            yield_reason = None
+        if yield_reason:
+            await self.db.update_backfill_job(
+                job_id,
+                status="deferred",
+                error=yield_reason,
+            )
+            self._weak_backoff[address] = (
+                time.time() + self.cfg.weak_rssi_backoff_seconds
+            )
+            logger.info(
+                "Backfill job %s %s [%s] deferred: %s",
+                job_id,
+                name,
+                phase,
+                yield_reason,
             )
             return
 
@@ -432,8 +581,8 @@ class BackfillService:
 
         if result.rssi is not None:
             self._live.rssi = result.rssi
-        elif known_rssi is not None:
-            self._live.rssi = int(known_rssi)
+        elif local_rssi_i is not None:
+            self._live.rssi = local_rssi_i
 
         battery = result.battery if result.battery is not None else fallback_battery
         if battery is None:
@@ -443,9 +592,7 @@ class BackfillService:
         await self.db.upsert_backfill_state(
             address,
             last_attempt_ts=time.time(),
-            last_rssi=result.rssi if result.rssi is not None else (
-                int(known_rssi) if known_rssi is not None else None
-            ),
+            last_rssi=result.rssi if result.rssi is not None else local_rssi_i,
             last_battery=battery,
             success=bool(result.samples) and result.error is None,
         )
@@ -477,9 +624,7 @@ class BackfillService:
             return
 
         # Prefer known RSSI from discovery for stored rows.
-        store_rssi = result.rssi if result.rssi is not None else (
-            int(known_rssi) if known_rssi is not None else None
-        )
+        store_rssi = result.rssi if result.rssi is not None else local_rssi_i
         samples_payload = [
             (_minute_floor(s.ts) * 60.0, s.temperature_c, s.humidity)
             for s in result.samples
@@ -492,6 +637,7 @@ class BackfillService:
                 for s in result.samples
             ]
 
+        source = self.source_tag
         inserted_count = await self.db.insert_gatt_readings(
             address=address,
             display_name=name,
@@ -499,7 +645,15 @@ class BackfillService:
             samples=samples_payload,
             battery=int(battery),
             rssi=store_rssi,
-            source=SOURCE,
+            source=source,
+        )
+        self._publish_gatt_samples(
+            address=address,
+            name=name,
+            model=model,
+            samples=samples_payload,
+            battery=int(battery),
+            rssi=store_rssi,
         )
         self._live.samples_done = len(samples_payload)
         await self.db.update_backfill_job(

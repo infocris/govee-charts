@@ -132,8 +132,10 @@ token = "shared-secret"
 peers = ["http://192.168.1.10:8080"]   # the other instance
 ```
 
-On the other node, `peers` points back here. Only **locally scanned** samples
-are pushed to peers; ingested data is not re-forwarded (no loops).
+On the other node, `peers` points back here. Locally produced samples are
+pushed to peers (live ads as `node_id`, GATT history as `node_id/gatt`);
+ingested data is not re-forwarded (no loops). For GATT backfill, the node with
+the best recent RSSI for a sensor performs the pull; others defer.
 
 Hub without Bluetooth (central UI only):
 
@@ -269,4 +271,4 @@ Data © [Open-Meteo](https://open-meteo.com/).
 
 - Soft-blocked Bluetooth: `rfkill unblock bluetooth`
 - No Govee cloud API — BLE only
-- Optional GATT history backfill (`[backfill]`) recovers onboard minute samples for gaps missed by live ads. One device at a time; lookback up to ~20 days. Prefer sensors with RSSI ≥ `min_rssi` (default −75 dBm).
+- Optional GATT history backfill (`[backfill]`) recovers onboard minute samples for gaps missed by live ads. One device at a time; lookback up to ~20 days. Prefer sensors with RSSI ≥ `min_rssi` (default −75 dBm). With federation, recovered history is shared as `{node_id}/gatt` and the best-RSSI node does the pull.

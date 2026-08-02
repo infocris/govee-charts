@@ -1330,7 +1330,7 @@ class Database:
         samples: list[tuple[float, float, float]],
         battery: int,
         rssi: int | None,
-        source: str = "gatt-history",
+        source: str = "local/gatt",
     ) -> int:
         """Bulk INSERT OR IGNORE GATT history samples. samples: (ts, temp, humidity)."""
         address = address.upper()

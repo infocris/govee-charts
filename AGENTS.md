@@ -25,10 +25,13 @@ Chat replies to the repository owner may follow their preferred language; projec
 
 ### Federation
 
-- Each node scans locally (if `scanner.enabled`) and **pushes only locally scanned** readings to `federation.peers` via `POST /api/ingest`.
-- Ingested readings are stored with `source = peer node_id` and are **not** re-forwarded (no loops).
+- Each node scans locally (if `scanner.enabled`) and **pushes locally produced** readings to `federation.peers` via `POST /api/ingest`:
+  - Live BLE ads: `source = node_id`
+  - GATT history backfill: `source = "{node_id}/gatt"` (when `backfill.federation_share` is true)
+- Ingested readings are **not** re-forwarded (no loops). Per-reading optional `source` is accepted on ingest (defaults to the peer `node_id`).
 - Shared optional `federation.token` sent as `X-Govee-Token`.
 - Dedup key: unique `(address, ts)` in SQLite.
+- GATT backfill prefers the federation node with the **best recent RSSI** for a device; weaker nodes defer and wait for ingested history.
 
 ### Multi-adapter BLE
 

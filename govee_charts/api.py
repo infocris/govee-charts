@@ -44,6 +44,7 @@ class IngestReading(BaseModel):
     humidity: float
     battery: int
     rssi: int | None = None
+    source: str | None = None
 
 
 class IngestPayload(BaseModel):
@@ -699,11 +700,13 @@ def create_app(
                 model=item.model.lower(),
                 rssi=item.rssi,
             )
+            item_source = (item.source or "").strip() or payload.node_id
+            # Allow "{peer}/gatt" provenance; never trust empty.
             ok = await db.upsert_reading(
                 reading,
                 display,
                 ts=item.ts,
-                source=payload.node_id,
+                source=item_source,
             )
             if ok:
                 inserted += 1

@@ -484,9 +484,18 @@
 
   function sourceHtml(source) {
     if (!source || source === "—") return "—";
-    const url = peerByNodeId.get(source);
-    if (!url) return escapeHtml(source);
-    return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${escapeHtml(source)}</a>`;
+    const raw = String(source);
+    const isGatt = raw.endsWith("/gatt");
+    const nodeId = isGatt ? raw.slice(0, -"/gatt".length) : raw;
+    const url = peerByNodeId.get(nodeId);
+    const label = isGatt ? `${nodeId}/gatt` : nodeId;
+    if (!url) return escapeHtml(label);
+    const linkText = isGatt ? nodeId : label;
+    const suffix = isGatt ? "/gatt" : "";
+    return (
+      `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">` +
+      `${escapeHtml(linkText)}</a>${escapeHtml(suffix)}`
+    );
   }
 
   function availableModels() {

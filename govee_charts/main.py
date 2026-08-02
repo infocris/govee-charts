@@ -108,6 +108,9 @@ DEFAULTS: dict[str, Any] = {
         "max_job_minutes": 60,
         "min_rssi": -75,
         "seen_max_age_seconds": 600,
+        "federation_share": True,
+        "rssi_prefer_margin_db": 0,
+        "peer_signal_cache_seconds": 45,
     },
     "labels": {},
 }
@@ -237,7 +240,13 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     backfill_cfg = BackfillConfig.from_dict(cfg.get("backfill"))
     backfill: BackfillService | None = None
     if backfill_cfg.enabled and scanner_enabled:
-        backfill = BackfillService(db, backfill_cfg, labels=cfg["labels"])
+        backfill = BackfillService(
+            db,
+            backfill_cfg,
+            labels=cfg["labels"],
+            node_id=fed["node_id"],
+            publisher=publisher,
+        )
         backfill_task = asyncio.create_task(
             backfill.run(stop_event), name="gatt-backfill"
         )
