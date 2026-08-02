@@ -314,6 +314,8 @@ class Database:
         return cursor.rowcount
 
     async def list_devices(self) -> list[dict[str, Any]]:
+        # ~120 B/row incl. indexes — rough SQLite footprint for one readings row.
+        bytes_per_reading = 120
         cursor = await self.db.execute(
             """
             SELECT
@@ -330,7 +332,10 @@ class Database:
                 r.battery,
                 r.rssi,
                 r.ts AS last_reading_ts,
-                r.source AS last_source
+                r.source AS last_source,
+                COALESCE(s.sample_count, 0) AS sample_count,
+                s.oldest_ts,
+                s.newest_ts
             FROM devices d
             LEFT JOIN readings r ON r.id = (
                 SELECT id FROM readings
@@ -338,11 +343,27 @@ class Database:
                 ORDER BY ts DESC
                 LIMIT 1
             )
+            LEFT JOIN (
+                SELECT
+                    address,
+                    COUNT(*) AS sample_count,
+                    MIN(ts) AS oldest_ts,
+                    MAX(ts) AS newest_ts
+                FROM readings
+                GROUP BY address
+            ) s ON s.address = d.address
             ORDER BY d.name COLLATE NOCASE, d.address
             """
         )
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            n = int(item.get("sample_count") or 0)
+            item["sample_count"] = n
+            item["storage_bytes_est"] = n * bytes_per_reading
+            out.append(item)
+        return out
 
     async def get_device(self, address: str) -> dict[str, Any] | None:
         cursor = await self.db.execute(
@@ -435,20 +456,40 @@ class Database:
     async def history(
         self,
         address: str,
-        hours: float,
+        hours: float | None = 24.0,
+        *,
+        since: float | None = None,
+        until: float | None = None,
+        max_points: int = 5000,
     ) -> list[dict[str, Any]]:
-        since = time.time() - hours * 3600.0
+        """
+        Return readings in [since, until] (or last `hours` ending now).
+
+        Downsamples to at most max_points buckets (mean temp/humidity) when denser.
+        """
+        now = time.time()
+        if since is not None and until is not None:
+            start = float(since)
+            end = float(until)
+        else:
+            h = float(hours if hours is not None else 24.0)
+            end = now
+            start = end - h * 3600.0
+        if end < start:
+            start, end = end, start
+
         cursor = await self.db.execute(
             """
             SELECT ts, temperature_c, humidity, battery, rssi, source
             FROM readings
-            WHERE address = ? AND ts >= ?
+            WHERE address = ? AND ts >= ? AND ts <= ?
             ORDER BY ts ASC
             """,
-            (address.upper(), since),
+            (address.upper(), start, end),
         )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        rows = [dict(row) for row in await cursor.fetchall()]
+        return _downsample_readings(rows, max_points=max(100, int(max_points)))
+
 
     async def insert_door_event(
         self,
@@ -1129,6 +1170,183 @@ class Database:
                 covered.add(m)
         return covered
 
+    async def reading_exact_minutes(
+        self,
+        address: str,
+        start_ts: float,
+        end_ts: float,
+    ) -> set[int]:
+        """Unix-minute indexes that have an exact reading in [start_ts, end_ts)."""
+        cursor = await self.db.execute(
+            """
+            SELECT ts FROM readings
+            WHERE address = ? AND ts >= ? AND ts < ?
+            """,
+            (address.upper(), float(start_ts), float(end_ts)),
+        )
+        return {int(float(row[0]) // 60) for row in await cursor.fetchall()}
+
+    async def coverage_report(
+        self,
+        address: str,
+        start_ts: float,
+        end_ts: float,
+        *,
+        cover_seconds: float = 75.0,
+        exact: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Classify [start_ts, end_ts) into full / partial / missing segments.
+
+        Soft cover (default) uses reading_minutes; exact uses exact sample minutes.
+        """
+        address = address.upper()
+        start_ts = float(start_ts)
+        end_ts = float(end_ts)
+        if end_ts <= start_ts:
+            return empty_coverage_report(start_ts, end_ts)
+
+        if exact:
+            covered = await self.reading_exact_minutes(address, start_ts, end_ts)
+        else:
+            covered = await self.reading_minutes(
+                address, start_ts, end_ts, cover_seconds=cover_seconds
+            )
+
+        report = coverage_from_minute_set(covered, start_ts, end_ts)
+        stats = await self.reading_range_stats(address, start_ts, end_ts)
+        report["samples"] = stats.get("samples_in_range") or 0
+        report["sources"] = stats.get("sources") or {}
+        return report
+
+    async def coverage_overview(
+        self,
+        start_ts: float,
+        end_ts: float,
+        *,
+        cover_seconds: float = 75.0,
+        labels: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Coverage segments for every device in [start_ts, end_ts).
+
+        Loads timestamps once, then soft-covers per address (same 75s rule).
+        """
+        start_ts = float(start_ts)
+        end_ts = float(end_ts)
+        labels = labels or {}
+        devices = await self.list_devices()
+        if end_ts <= start_ts or not devices:
+            return []
+
+        pad = max(0.0, float(cover_seconds))
+        cursor = await self.db.execute(
+            """
+            SELECT address, ts
+            FROM readings
+            WHERE ts >= ? AND ts < ?
+            """,
+            (start_ts - pad, end_ts + pad),
+        )
+        by_addr: dict[str, list[float]] = {}
+        for row in await cursor.fetchall():
+            addr = str(row[0] or "").upper()
+            if not addr:
+                continue
+            by_addr.setdefault(addr, []).append(float(row[1]))
+
+        start_m = int(start_ts // 60)
+        end_m = int(end_ts // 60)
+        out: list[dict[str, Any]] = []
+        for device in devices:
+            addr = str(device.get("address") or "").upper()
+            if not addr:
+                continue
+            name = labels.get(addr) or str(device.get("name") or addr)
+            stamps = by_addr.get(addr) or []
+            covered: set[int] = set()
+            samples_in_range = 0
+            for ts in stamps:
+                if start_ts <= ts < end_ts:
+                    samples_in_range += 1
+                lo = int((ts - pad) // 60)
+                hi = int((ts + pad) // 60)
+                for m in range(max(start_m, lo), min(end_m, hi + 1)):
+                    covered.add(m)
+            report = coverage_from_minute_set(covered, start_ts, end_ts)
+            out.append(
+                {
+                    "address": addr,
+                    "name": name,
+                    "coverage_pct": report["coverage_pct"],
+                    "bucket": report["bucket"],
+                    "segments": report["segments"],
+                    "counts": report.get("counts") or {},
+                    "samples": samples_in_range,
+                    "range": report["range"],
+                }
+            )
+        out.sort(key=lambda r: str(r.get("name") or r.get("address") or "").lower())
+        return out
+
+    async def reading_range_stats(
+        self,
+        address: str,
+        start_ts: float,
+        end_ts: float,
+    ) -> dict[str, Any]:
+        """Aggregate existing readings in a time window for CSV import compare."""
+        address = address.upper()
+        cursor = await self.db.execute(
+            """
+            SELECT
+                COUNT(*) AS n,
+                MIN(ts), MAX(ts),
+                MIN(temperature_c), MAX(temperature_c),
+                MIN(humidity), MAX(humidity)
+            FROM readings
+            WHERE address = ? AND ts >= ? AND ts < ?
+            """,
+            (address, float(start_ts), float(end_ts)),
+        )
+        row = await cursor.fetchone()
+        n = int(row[0] or 0) if row else 0
+        if not n:
+            return {
+                "samples_in_range": 0,
+                "range": {"start": None, "end": None},
+                "temp": {"min": None, "max": None},
+                "humidity": {"min": None, "max": None},
+                "sources": {},
+            }
+        src_cur = await self.db.execute(
+            """
+            SELECT COALESCE(source, 'unknown') AS src, COUNT(*) AS n
+            FROM readings
+            WHERE address = ? AND ts >= ? AND ts < ?
+            GROUP BY src
+            ORDER BY n DESC
+            """,
+            (address, float(start_ts), float(end_ts)),
+        )
+        sources = {str(r[0]): int(r[1]) for r in await src_cur.fetchall()}
+        return {
+            "samples_in_range": n,
+            "range": {
+                "start": float(row[1]) if row[1] is not None else None,
+                "end": float(row[2]) + 60.0 if row[2] is not None else None,
+            },
+            "temp": {
+                "min": float(row[3]) if row[3] is not None else None,
+                "max": float(row[4]) if row[4] is not None else None,
+            },
+            "humidity": {
+                "min": float(row[5]) if row[5] is not None else None,
+                "max": float(row[6]) if row[6] is not None else None,
+            },
+            "sources": sources,
+        }
+
     async def clear_open_backfill_jobs(self) -> int:
         """Drop pending/deferred jobs so gap refresh can rebuild a clean queue."""
         cursor = await self.db.execute(
@@ -1634,3 +1852,162 @@ class Database:
             max(ts for ts, _, _ in samples) + 61.0,
         )
         return max(0, len(after) - len(before))
+
+
+COVERAGE_FULL_THRESHOLD = 0.90
+
+
+def empty_coverage_report(start_ts: float, end_ts: float) -> dict[str, Any]:
+    return {
+        "range": {"start": float(start_ts), "end": float(end_ts)},
+        "bucket": "day",
+        "coverage_pct": 0.0,
+        "segments": [],
+        "samples": 0,
+        "sources": {},
+        "counts": {"full": 0, "partial": 0, "missing": 0},
+    }
+
+
+def coverage_from_minute_set(
+    covered: set[int],
+    start_ts: float,
+    end_ts: float,
+) -> dict[str, Any]:
+    """
+    Bucket [start_ts, end_ts) and merge contiguous same-status runs.
+
+    Hour buckets when the window is ≤ 14 days; otherwise day buckets.
+    """
+    start_ts = float(start_ts)
+    end_ts = float(end_ts)
+    if end_ts <= start_ts:
+        return empty_coverage_report(start_ts, end_ts)
+
+    span = end_ts - start_ts
+    bucket = "hour" if span <= 14 * 86400.0 else "day"
+    bucket_secs = 3600 if bucket == "hour" else 86400
+    start_m = int(start_ts // 60)
+    end_m = int(end_ts // 60)
+    if end_m <= start_m:
+        return empty_coverage_report(start_ts, end_ts)
+
+    # Align bucket edges to UTC hour/day for stable bars.
+    start_bucket = int(start_ts // bucket_secs) * bucket_secs
+    buckets: list[dict[str, Any]] = []
+    cursor = float(start_bucket)
+    while cursor < end_ts:
+        b_start = max(cursor, start_ts)
+        b_end = min(cursor + bucket_secs, end_ts)
+        lo = int(b_start // 60)
+        hi = int(b_end // 60)
+        expected = max(0, hi - lo)
+        if expected <= 0:
+            cursor += bucket_secs
+            continue
+        hit = sum(1 for m in range(lo, hi) if m in covered)
+        density = hit / float(expected)
+        if density <= 0.0:
+            status = "missing"
+        elif density >= COVERAGE_FULL_THRESHOLD:
+            status = "full"
+        else:
+            status = "partial"
+        buckets.append(
+            {
+                "start": b_start,
+                "end": b_end,
+                "status": status,
+                "density": round(density, 4),
+                "samples": hit,
+                "expected": expected,
+            }
+        )
+        cursor += bucket_secs
+
+    segments: list[dict[str, Any]] = []
+    for b in buckets:
+        if (
+            segments
+            and segments[-1]["status"] == b["status"]
+            and abs(float(segments[-1]["end"]) - float(b["start"])) < 1.0
+        ):
+            prev = segments[-1]
+            prev["end"] = b["end"]
+            prev_expected = int(prev.get("expected") or 0) + int(b["expected"])
+            prev_samples = int(prev.get("samples") or 0) + int(b["samples"])
+            prev["expected"] = prev_expected
+            prev["samples"] = prev_samples
+            prev["density"] = (
+                round(prev_samples / float(prev_expected), 4) if prev_expected else 0.0
+            )
+        else:
+            segments.append(dict(b))
+
+    total_expected = end_m - start_m
+    total_hit = sum(1 for m in range(start_m, end_m) if m in covered)
+    coverage_pct = (
+        round(100.0 * total_hit / float(total_expected), 1) if total_expected else 0.0
+    )
+    counts = {"full": 0, "partial": 0, "missing": 0}
+    for seg in segments:
+        counts[str(seg["status"])] = counts.get(str(seg["status"]), 0) + 1
+
+    return {
+        "range": {"start": start_ts, "end": end_ts},
+        "bucket": bucket,
+        "coverage_pct": coverage_pct,
+        "segments": segments,
+        "samples": total_hit,
+        "sources": {},
+        "counts": counts,
+    }
+
+
+def _downsample_readings(
+    rows: list[dict[str, Any]],
+    *,
+    max_points: int,
+) -> list[dict[str, Any]]:
+    """Average temp/humidity into equal-time buckets when too many points."""
+    n = len(rows)
+    if n <= max_points or max_points < 2:
+        return rows
+    t0 = float(rows[0]["ts"])
+    t1 = float(rows[-1]["ts"])
+    span = max(t1 - t0, 1e-6)
+    bucket_w = span / float(max_points)
+    out: list[dict[str, Any]] = []
+    bi = 0
+    bucket: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        nonlocal bucket
+        if not bucket:
+            return
+        temps = [float(r["temperature_c"]) for r in bucket if r.get("temperature_c") is not None]
+        hums = [float(r["humidity"]) for r in bucket if r.get("humidity") is not None]
+        mid = bucket[len(bucket) // 2]
+        last = bucket[-1]
+        out.append(
+            {
+                "ts": float(mid["ts"]),
+                "temperature_c": (sum(temps) / len(temps)) if temps else None,
+                "humidity": (sum(hums) / len(hums)) if hums else None,
+                "battery": last.get("battery"),
+                "rssi": last.get("rssi"),
+                "source": last.get("source"),
+            }
+        )
+        bucket = []
+
+    for row in rows:
+        ts = float(row["ts"])
+        idx = min(max_points - 1, int((ts - t0) / bucket_w))
+        if idx != bi and bucket:
+            flush()
+            bi = idx
+        bucket.append(row)
+    flush()
+    return out
+

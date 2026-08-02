@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -25,8 +25,10 @@ from govee_charts.apartment import (
 )
 from govee_charts.backfill import BackfillService
 from govee_charts.categories import normalize_door_patch, normalize_patch, taxonomy
-from govee_charts.db import Database
+from govee_charts.csv_import import MAX_UPLOAD_BYTES, parse_upload, summarize_samples
+from govee_charts.db import Database, coverage_from_minute_set
 from govee_charts.decode import Reading
+from govee_charts.federation import csv_source
 from govee_charts.hvac import hvac_active_bands, is_hvac_active
 from govee_charts.weather import WeatherService
 
@@ -216,6 +218,182 @@ def create_app(
         snap["recent_jobs"] = await db.recent_backfill_jobs(limit=job_limit)
         return snap
 
+    async def _read_import_upload(file: UploadFile) -> tuple[str, bytes]:
+        filename = file.filename or "upload.csv"
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="Empty upload")
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB limit",
+            )
+        return filename, data
+
+    async def _resolve_import_device(address: str) -> dict[str, Any]:
+        addr = address.strip().upper()
+        if not addr:
+            raise HTTPException(status_code=400, detail="address is required")
+        device = await db.get_device(addr)
+        if device is None:
+            raise HTTPException(status_code=404, detail=f"Unknown device {addr}")
+        return device
+
+    @app.post("/api/backfill/import/preview")
+    async def api_backfill_import_preview(
+        address: str = Form(...),
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        """Parse a Govee CSV/ZIP and compare against existing readings (no write)."""
+        device = await _resolve_import_device(address)
+        addr = str(device["address"]).upper()
+        labels: dict[str, str] = app.state.labels
+        name = labels.get(addr) or str(device.get("name") or addr)
+        filename, data = await _read_import_upload(file)
+        try:
+            samples, bad_rows, files, file_stats = parse_upload(filename, data)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        file_summary = summarize_samples(samples)
+        file_summary["bad_rows"] = bad_rows
+        file_summary["file_count"] = len(files)
+        empty_cov_meta = {
+            "coverage_pct": 0.0,
+            "counts": {"full": 0, "partial": 0, "missing": 0},
+        }
+
+        if not samples:
+            return {
+                "address": addr,
+                "name": name,
+                "files": files,
+                "file_stats": file_stats,
+                "file": file_summary,
+                "existing": {
+                    "samples_in_range": 0,
+                    "range": {"start": None, "end": None},
+                    "temp": {"min": None, "max": None},
+                    "humidity": {"min": None, "max": None},
+                    "sources": {},
+                },
+                "compare": {
+                    "already_present": 0,
+                    "would_insert": 0,
+                    "file_only_minutes": 0,
+                    "db_only_minutes": 0,
+                    "overlap_pct": 0.0,
+                },
+                "file_segments": [],
+                "db_segments": [],
+                "coverage": {
+                    "bucket": "day",
+                    "file": empty_cov_meta,
+                    "db": empty_cov_meta,
+                },
+            }
+
+        start = float(file_summary["range"]["start"])
+        end = float(file_summary["range"]["end"])
+        # Inclusive end minute → exclusive window end for coverage helpers.
+        end_excl = end + 60.0
+        file_minutes = {int(ts // 60) for ts, _, _ in samples}
+        existing_minutes = await db.reading_exact_minutes(addr, start, end_excl)
+        already = len(file_minutes & existing_minutes)
+        would_insert = len(file_minutes - existing_minutes)
+        db_only = len(existing_minutes - file_minutes)
+        overlap_pct = (
+            round(100.0 * already / len(file_minutes), 1) if file_minutes else 0.0
+        )
+        existing = await db.reading_range_stats(addr, start, end_excl)
+
+        file_cov = coverage_from_minute_set(file_minutes, start, end_excl)
+        db_cov = coverage_from_minute_set(existing_minutes, start, end_excl)
+
+        return {
+            "address": addr,
+            "name": name,
+            "files": files,
+            "file_stats": file_stats,
+            "file": file_summary,
+            "existing": existing,
+            "compare": {
+                "already_present": already,
+                "would_insert": would_insert,
+                "file_only_minutes": would_insert,
+                "db_only_minutes": db_only,
+                "overlap_pct": overlap_pct,
+            },
+            "file_segments": file_cov.get("segments") or [],
+            "db_segments": db_cov.get("segments") or [],
+            "coverage": {
+                "bucket": file_cov.get("bucket") or "day",
+                "file": {
+                    "coverage_pct": file_cov.get("coverage_pct"),
+                    "counts": file_cov.get("counts"),
+                },
+                "db": {
+                    "coverage_pct": db_cov.get("coverage_pct"),
+                    "counts": db_cov.get("counts"),
+                },
+            },
+        }
+
+    @app.post("/api/backfill/import")
+    async def api_backfill_import(
+        address: str = Form(...),
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        """Ingest a previously previewed Govee CSV/ZIP into readings."""
+        device = await _resolve_import_device(address)
+        addr = str(device["address"]).upper()
+        labels: dict[str, str] = app.state.labels
+        name = labels.get(addr) or str(device.get("name") or addr)
+        model = str(device.get("model") or "h5075")
+        filename, data = await _read_import_upload(file)
+        try:
+            samples, bad_rows, files, _file_stats = parse_upload(filename, data)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not samples:
+            raise HTTPException(status_code=400, detail="No valid samples in upload")
+
+        battery = await db.last_battery(addr)
+        if battery is None:
+            battery = 0
+        source = csv_source(str(app.state.node_id))
+        inserted = await db.insert_gatt_readings(
+            address=addr,
+            display_name=name,
+            model=model,
+            samples=samples,
+            battery=int(battery),
+            rssi=None,
+            source=source,
+        )
+        summary = summarize_samples(samples)
+        skipped = max(0, len(samples) - inserted)
+        logger.info(
+            "CSV import %s → %s: inserted=%d skipped=%d bad_rows=%d files=%s",
+            source,
+            name,
+            inserted,
+            skipped,
+            bad_rows,
+            files,
+        )
+        return {
+            "address": addr,
+            "name": name,
+            "files": files,
+            "source": source,
+            "parsed": len(samples),
+            "bad_rows": bad_rows,
+            "inserted": inserted,
+            "skipped": skipped,
+            "range": summary["range"],
+        }
+
     @app.post("/api/restart")
     async def api_restart() -> dict[str, Any]:
         if app.state.restart_scheduled:
@@ -260,6 +438,83 @@ def create_app(
     @app.get("/api/devices")
     async def api_devices() -> list[dict[str, Any]]:
         return await db.list_devices()
+
+    @app.get("/api/coverage")
+    async def api_coverage(
+        address: str = Query(..., min_length=1),
+        hours: float | None = Query(default=2160.0, gt=0, le=26280),
+        since: float | None = Query(default=None),
+        until: float | None = Query(default=None),
+        since_first: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        """Per-sensor full / partial / missing coverage segments."""
+        addr = address.strip().upper()
+        device = await db.get_device(addr)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        labels: dict[str, str] = app.state.labels
+        name = labels.get(addr) or str(device.get("name") or addr)
+
+        now = time.time()
+        if since is not None and until is not None:
+            t0 = float(since)
+            t1 = float(until)
+            if t1 < t0:
+                t0, t1 = t1, t0
+        elif since_first:
+            first = device.get("first_seen")
+            t0 = float(first) if first is not None else now - 90 * 86400.0
+            t1 = now
+            t0 = max(t0, t1 - 26280 * 3600.0)
+        else:
+            h = float(hours if hours is not None else 2160.0)
+            t1 = now
+            t0 = t1 - h * 3600.0
+
+        report = await db.coverage_report(addr, t0, t1)
+        return {
+            "address": addr,
+            "name": name,
+            "range": report["range"],
+            "bucket": report["bucket"],
+            "coverage_pct": report["coverage_pct"],
+            "segments": report["segments"],
+            "sources": report.get("sources") or {},
+            "samples": report.get("samples") or 0,
+            "counts": report.get("counts") or {},
+        }
+
+    @app.get("/api/coverage/overview")
+    async def api_coverage_overview(
+        hours: float | None = Query(default=2160.0, gt=0, le=26280),
+        since_first: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        """Coverage bars for all sensors over a shared window."""
+        now = time.time()
+        labels: dict[str, str] = app.state.labels
+        if since_first:
+            devices = await db.list_devices()
+            firsts = [
+                float(d["first_seen"])
+                for d in devices
+                if d.get("first_seen") is not None
+            ]
+            t0 = min(firsts) if firsts else now - 90 * 86400.0
+            t1 = now
+            t0 = max(t0, t1 - 26280 * 3600.0)
+        else:
+            h = float(hours if hours is not None else 2160.0)
+            t1 = now
+            t0 = t1 - h * 3600.0
+
+        sensors = await db.coverage_overview(t0, t1, labels=labels)
+        bucket = "hour" if (t1 - t0) <= 14 * 86400.0 else "day"
+        return {
+            "range": {"start": t0, "end": t1},
+            "bucket": bucket,
+            "sensors": sensors,
+            "count": len(sensors),
+        }
 
     @app.get("/api/categories")
     async def api_categories() -> dict[str, Any]:
@@ -591,15 +846,47 @@ def create_app(
     @app.get("/api/history")
     async def api_history(
         address: str = Query(..., min_length=1),
-        hours: float = Query(24.0, gt=0, le=2160),
+        hours: float = Query(24.0, gt=0, le=26280),
+        since: float | None = Query(default=None),
+        until: float | None = Query(default=None),
     ) -> dict[str, Any]:
-        points = await db.history(address, hours)
+        use_abs = since is not None and until is not None
+        if use_abs:
+            t0 = float(since)
+            t1 = float(until)
+            if t1 < t0:
+                t0, t1 = t1, t0
+            span_h = (t1 - t0) / 3600.0
+            if span_h <= 0 or span_h > 26280:
+                raise HTTPException(
+                    status_code=400,
+                    detail="since/until window must be between 0 and 26280 hours",
+                )
+            points = await db.history(address, since=t0, until=t1)
+            hours_out = span_h
+        else:
+            if since is not None or until is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="since and until must both be set, or neither",
+                )
+            t0 = t1 = None
+            points = await db.history(address, hours)
+            hours_out = hours
         if not points:
             devices = await db.list_devices()
             known = {d["address"].upper() for d in devices}
             if address.upper() not in known:
                 raise HTTPException(status_code=404, detail="Unknown device")
-        return {"address": address.upper(), "hours": hours, "points": points}
+        payload: dict[str, Any] = {
+            "address": address.upper(),
+            "hours": hours_out,
+            "points": points,
+        }
+        if use_abs:
+            payload["since"] = t0
+            payload["until"] = t1
+        return payload
 
     @app.get("/api/doors")
     async def api_doors() -> dict[str, Any]:
@@ -637,7 +924,7 @@ def create_app(
 
     @app.get("/api/doors/history")
     async def api_doors_history(
-        hours: float = Query(168.0, gt=0, le=8760),
+        hours: float = Query(168.0, gt=0, le=26280),
         sensor_id: str | None = Query(default=None),
     ) -> dict[str, Any]:
         """Open/close event history (usable as time-series data)."""
@@ -663,7 +950,7 @@ def create_app(
 
     @app.get("/api/hvac/history")
     async def api_hvac_history(
-        hours: float = Query(168.0, gt=0, le=8760),
+        hours: float = Query(168.0, gt=0, le=26280),
         entity_id: str | None = Query(default=None),
     ) -> dict[str, Any]:
         """Climate / HVAC event history + derived active bands."""
@@ -679,7 +966,7 @@ def create_app(
 
     @app.get("/api/power/history")
     async def api_power_history(
-        hours: float = Query(168.0, gt=0, le=8760),
+        hours: float = Query(168.0, gt=0, le=26280),
         entity_id: str | None = Query(default=None),
     ) -> dict[str, Any]:
         """Whole-home (or other) power samples in watts."""

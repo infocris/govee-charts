@@ -265,6 +265,8 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `GET /api/backfill` — GATT history backfill queue + selected sensors + last recovered readings / jobs
 - `POST /api/backfill/pause` / `resume` / `refresh` — control the backfill worker
 - `POST /api/backfill/devices` — opt a sensor in/out (`{address, enabled}`)
+- `POST /api/backfill/import/preview` — parse Govee Home CSV/ZIP and compare to existing readings (no write)
+- `POST /api/backfill/import` — confirm ingest of the same CSV/ZIP for a chosen sensor
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
 - `GET /api/health` — health + `node_id`
 
@@ -273,3 +275,4 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - Soft-blocked Bluetooth: `rfkill unblock bluetooth`
 - No Govee cloud API — BLE only
 - Optional GATT history backfill (`[backfill]`) recovers onboard minute samples for gaps missed by live ads. Opt-in per sensor in the Backfill UI (none selected by default). One device at a time; lookback up to ~20 days. Prefer sensors with RSSI ≥ `min_rssi` (default −75 dBm). With federation, recovered history is shared as `{node_id}/gatt` and the best-RSSI node does the pull.
+- Manual **Import CSV** on the Coverage tab accepts Govee Home app exports (`.csv` or `.zip`). Analyze shows a file recap and a compare vs existing minutes (already present / would insert); Import stores new samples as `{node_id}/csv` (local only, no federation push). The Coverage view also shows full/partial/missing timelines for all sensors.
