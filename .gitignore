@@ -10,4 +10,5 @@ data/weather_cache.tmp
 data/ssl/
 data/apartment_overrides.json
 data/apartment_overrides.tmp
+data/secrets/
 config.toml

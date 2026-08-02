@@ -26,6 +26,9 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA synchronous=NORMAL")
+        await self._db.execute("PRAGMA busy_timeout=5000")
         await self._db.executescript(
             """
             CREATE TABLE IF NOT EXISTS devices (
@@ -1186,6 +1189,9 @@ class Database:
         await self.db.commit()
         return cursor.rowcount
 
+    async def commit(self) -> None:
+        await self.db.commit()
+
     async def enqueue_backfill_job(
         self,
         *,
@@ -1195,6 +1201,7 @@ class Database:
         window_end: float,
         priority: int,
         samples_expected: int,
+        commit: bool = True,
     ) -> int | None:
         """Insert a pending job if that window is not already queued/done recently."""
         address = address.upper()
@@ -1216,7 +1223,6 @@ class Database:
                 now,
             ),
         )
-        await self.db.commit()
         if cursor.rowcount <= 0:
             # Re-open failed/deferred jobs for the same window.
             cursor = await self.db.execute(
@@ -1244,9 +1250,12 @@ class Database:
                     float(window_end),
                 ),
             )
-            await self.db.commit()
             if cursor.rowcount <= 0:
+                if commit:
+                    await self.db.commit()
                 return None
+        if commit:
+            await self.db.commit()
         cursor = await self.db.execute(
             """
             SELECT id FROM backfill_jobs

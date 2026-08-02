@@ -82,7 +82,11 @@ def _missing_ranges(
     max_job_minutes: int,
 ) -> list[tuple[float, float, int]]:
     """
-    Contiguous missing minute ranges in [start_ts, end_ts), split to ≤ max_job_minutes.
+    Missing minutes in [start_ts, end_ts), grouped into absolute job windows.
+
+    Windows align to a fixed unix-minute grid of ``max_job_minutes`` so a sliding
+    lookback tip does not rename the same gap every minute (which would explode
+    the pending queue via UNIQUE(address, phase, window_start, window_end)).
     Returns list of (window_start, window_end, expected_samples).
     """
     start_m = _minute_floor(start_ts)
@@ -90,25 +94,20 @@ def _missing_ranges(
     if end_m <= start_m:
         return []
 
-    missing: list[int] = []
-    for m in range(start_m, end_m):
-        if m not in existing:
-            missing.append(m)
-    if not missing:
-        return []
-
+    chunk = max(1, int(max_job_minutes))
     ranges: list[tuple[float, float, int]] = []
-    run_start = missing[0]
-    prev = missing[0]
-    for m in missing[1:]:
-        if m == prev + 1 and (m - run_start + 1) <= max_job_minutes:
-            prev = m
-            continue
-        # close run
-        ranges.append((run_start * 60.0, (prev + 1) * 60.0, prev - run_start + 1))
-        run_start = m
-        prev = m
-    ranges.append((run_start * 60.0, (prev + 1) * 60.0, prev - run_start + 1))
+    # Walk absolute grid cells that intersect [start_m, end_m).
+    grid = (start_m // chunk) * chunk
+    while grid < end_m:
+        cell_start = max(start_m, grid)
+        cell_end = min(end_m, grid + chunk)
+        missing = [m for m in range(cell_start, cell_end) if m not in existing]
+        if missing:
+            # Keep one stable job per grid cell (full cell bounds), not a
+            # tip-relative contiguous run that shifts every minute.
+            expected = len(missing)
+            ranges.append((grid * 60.0, (grid + chunk) * 60.0, expected))
+        grid += chunk
     return ranges
 
 
@@ -321,7 +320,7 @@ class BackfillService:
             devices = await self.db.list_devices()
             enqueued = 0
             bands = _phase_bands(now_q, self.cfg.lookback_days)
-            for device in devices:
+            for device_i, device in enumerate(devices):
                 addr = str(device["address"]).upper()
                 model = str(device.get("model") or "").lower()
                 if model and model not in ("h5075", "h5072", "h5179"):
@@ -346,15 +345,22 @@ class BackfillService:
                             window_end=win_end,
                             priority=PHASE_PRIORITY[phase],
                             samples_expected=expected,
+                            commit=False,
                         )
                         if job_id is not None:
                             enqueued += 1
+                # Yield so BLE ads / HTTP stay responsive during large refreshes.
+                if device_i % 2 == 1:
+                    await asyncio.sleep(0)
             if enqueued:
+                await self.db.commit()
                 logger.info(
                     "Backfill enqueued %d job(s)%s",
                     enqueued,
                     " (rebuild)" if rebuild else "",
                 )
+            else:
+                await self.db.commit()
             return enqueued
 
     async def _local_rssi_map(self) -> dict[str, int | None]:
