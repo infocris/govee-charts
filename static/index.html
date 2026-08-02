@@ -343,6 +343,37 @@
       <ul class="coverage-segments" id="coverage-segments"></ul>
       <p class="status" id="coverage-status"></p>
 
+      <div class="coverage-agg" id="coverage-agg" hidden>
+        <div class="coverage-agg-head">
+          <h3>Aggregates</h3>
+          <div class="ranges coverage-agg-ranges" role="group" aria-label="Aggregate period">
+            <button type="button" data-agg-bucket="day" class="active">Day</button>
+            <button type="button" data-agg-bucket="week">Week</button>
+            <button type="button" data-agg-bucket="month">Month</button>
+          </div>
+        </div>
+        <p class="coverage-agg-hint" id="coverage-agg-hint"></p>
+        <div class="overview-table-wrap">
+          <table class="overview-table coverage-agg-table" id="coverage-agg-table">
+            <thead>
+              <tr>
+                <th scope="col">Period</th>
+                <th scope="col" class="num">Temp avg</th>
+                <th scope="col" class="num">Temp min</th>
+                <th scope="col" class="num">Temp max</th>
+                <th scope="col" class="num">Hum avg</th>
+                <th scope="col" class="num">Hum min</th>
+                <th scope="col" class="num">Hum max</th>
+                <th scope="col" class="num">Samples</th>
+              </tr>
+            </thead>
+            <tbody id="coverage-agg-body">
+              <tr><td colspan="8" class="overview-empty">Select a sensor…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <div class="overview-head overview-head-secondary">
         <h2>Import CSV</h2>
         <p class="overview-hint">Govee Home app export (.csv or .zip) — analyze, compare coverage, then import</p>

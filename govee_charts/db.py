@@ -493,6 +493,85 @@ class Database:
         rows = [dict(row) for row in await cursor.fetchall()]
         return _downsample_readings(rows, max_points=max(100, int(max_points)))
 
+    async def history_aggregate(
+        self,
+        address: str,
+        start_ts: float,
+        end_ts: float,
+        *,
+        bucket: str = "day",
+    ) -> list[dict[str, Any]]:
+        """
+        Aggregate temperature/humidity by calendar day, week, or month (local time).
+
+        Returns rows with avg/min/max for both metrics plus sample count.
+        """
+        address = address.upper()
+        start_ts = float(start_ts)
+        end_ts = float(end_ts)
+        if end_ts <= start_ts:
+            return []
+
+        key = (bucket or "day").lower().strip()
+        if key not in ("day", "week", "month"):
+            raise ValueError("bucket must be day, week, or month")
+
+        if key == "day":
+            period_expr = "strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime')"
+        elif key == "week":
+            # ISO week-year + week number (Monday-based).
+            period_expr = (
+                "printf('%s-W%02d', "
+                "strftime('%G', ts, 'unixepoch', 'localtime'), "
+                "CAST(strftime('%V', ts, 'unixepoch', 'localtime') AS INTEGER))"
+            )
+        else:
+            period_expr = "strftime('%Y-%m', ts, 'unixepoch', 'localtime')"
+
+        cursor = await self.db.execute(
+            f"""
+            SELECT
+                {period_expr} AS period,
+                COUNT(*) AS n,
+                AVG(temperature_c) AS temp_avg,
+                MIN(temperature_c) AS temp_min,
+                MAX(temperature_c) AS temp_max,
+                AVG(humidity) AS hum_avg,
+                MIN(humidity) AS hum_min,
+                MAX(humidity) AS hum_max,
+                MIN(ts) AS ts_min,
+                MAX(ts) AS ts_max
+            FROM readings
+            WHERE address = ? AND ts >= ? AND ts < ?
+            GROUP BY period
+            ORDER BY period ASC
+            """,
+            (address, start_ts, end_ts),
+        )
+        rows = await cursor.fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            out.append(
+                {
+                    "period": str(row[0]),
+                    "count": int(row[1] or 0),
+                    "temperature_c": {
+                        "avg": round(float(row[2]), 2) if row[2] is not None else None,
+                        "min": round(float(row[3]), 2) if row[3] is not None else None,
+                        "max": round(float(row[4]), 2) if row[4] is not None else None,
+                    },
+                    "humidity": {
+                        "avg": round(float(row[5]), 2) if row[5] is not None else None,
+                        "min": round(float(row[6]), 2) if row[6] is not None else None,
+                        "max": round(float(row[7]), 2) if row[7] is not None else None,
+                    },
+                    "range": {
+                        "start": float(row[8]) if row[8] is not None else None,
+                        "end": float(row[9]) if row[9] is not None else None,
+                    },
+                }
+            )
+        return out
 
     async def insert_door_event(
         self,

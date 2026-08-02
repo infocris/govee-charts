@@ -36,6 +36,12 @@
   const coverageStatusEl = document.getElementById("coverage-status");
   const coverageAllListEl = document.getElementById("coverage-all-list");
   const coverageAllSummaryEl = document.getElementById("coverage-all-summary");
+  const coverageAggEl = document.getElementById("coverage-agg");
+  const coverageAggBodyEl = document.getElementById("coverage-agg-body");
+  const coverageAggHintEl = document.getElementById("coverage-agg-hint");
+  const coverageAggButtons = [
+    ...document.querySelectorAll(".coverage-agg-ranges > button[data-agg-bucket]"),
+  ];
   const coverageFileBarEl = document.getElementById("coverage-file-bar");
   const coverageDbBarEl = document.getElementById("coverage-db-bar");
   const coverageImportBarsEl = document.getElementById("coverage-import-bars");
@@ -95,6 +101,11 @@
   let coverageHours = "2160";
   /** @type {string} */
   let coverageAddress = localStorage.getItem("govee-charts.coverageAddress") || "";
+  /** @type {string} */
+  let coverageAggBucket = localStorage.getItem("govee-charts.coverageAggBucket") || "day";
+  if (!["day", "week", "month"].includes(coverageAggBucket)) {
+    coverageAggBucket = "day";
+  }
   let coverageLoaded = false;
 
   const PALETTE = [
@@ -701,6 +712,7 @@
   }
 
   async function probePeer(url) {
+    // Kept as fallback; prefer server-side probes from /api/federation.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 2500);
     try {
@@ -719,10 +731,27 @@
     }
   }
 
+  function peerLinkUrl(peer) {
+    if (peer.browse_url) return peer.browse_url;
+    if (location.protocol === "https:" && peer.url) {
+      try {
+        const u = new URL(peer.url);
+        u.protocol = "https:";
+        if (!u.port || u.port === "8080") u.port = "8081";
+        return u.toString().replace(/\/$/, "");
+      } catch {
+        /* ignore */
+      }
+    }
+    return peer.url;
+  }
+
   function renderPeers(peers) {
     peerByNodeId = new Map();
     for (const peer of peers) {
-      if (peer.node_id) peerByNodeId.set(peer.node_id, peer.url);
+      if (peer.node_id) {
+        peerByNodeId.set(peer.node_id, peerLinkUrl(peer));
+      }
     }
 
     if (localNodeId && nodeLineEl) {
@@ -739,11 +768,12 @@
     peerLinksEl.hidden = false;
     for (const peer of peers) {
       const a = document.createElement("a");
-      a.href = peer.url;
+      const href = peerLinkUrl(peer);
+      a.href = href;
       a.target = "_blank";
       a.rel = "noopener noreferrer";
       a.textContent = peer.node_id;
-      a.title = peer.url;
+      a.title = href + (peer.online ? "" : " (offline)");
       if (!peer.online) a.classList.add("offline");
       peerLinksEl.appendChild(a);
     }
@@ -754,9 +784,24 @@
     if (!res.ok) throw new Error(`federation HTTP ${res.status}`);
     const data = await res.json();
     localNodeId = data.node_id || "";
-    const urls = (data.peers || []).map((p) => p.url).filter(Boolean);
-    const peers = await Promise.all(urls.map(probePeer));
-    renderPeers(peers);
+    const peers = Array.isArray(data.peers) ? data.peers : [];
+    // Server already probed health (same-origin → no mixed-content errors).
+    // Fall back to client probe only if peers are plain URL strings.
+    const normalized = await Promise.all(
+      peers.map(async (p) => {
+        if (p && typeof p === "object" && p.url) {
+          return {
+            url: p.url,
+            browse_url: p.browse_url || null,
+            node_id: p.node_id || peerHostLabel(p.url),
+            online: Boolean(p.online),
+          };
+        }
+        const url = String(p || "");
+        return probePeer(url);
+      })
+    );
+    renderPeers(normalized);
   }
 
   function sourceHtml(source) {
@@ -1424,10 +1469,12 @@
       if (coverageBarEl) coverageBarEl.innerHTML = "";
       if (coverageSegmentsEl) coverageSegmentsEl.innerHTML = "";
       if (coverageStatusEl) coverageStatusEl.textContent = "";
+      if (coverageAggEl) coverageAggEl.hidden = true;
       return;
     }
     if (coverageStatusEl) coverageStatusEl.textContent = "Loading coverage…";
     if (coverageSummaryEl) coverageSummaryEl.textContent = "Loading…";
+    if (coverageAggEl) coverageAggEl.hidden = false;
     const params = new URLSearchParams({ address: coverageAddress });
     if (coverageHours === "all") {
       params.set("since_first", "true");
@@ -1457,6 +1504,86 @@
         : "—";
       coverageStatusEl.textContent = `Sources · ${srcTxt}`;
     }
+    await loadCoverageAggregates();
+  }
+
+  function syncCoverageAggButtons() {
+    coverageAggButtons.forEach((btn) => {
+      btn.classList.toggle(
+        "active",
+        btn.dataset.aggBucket === String(coverageAggBucket)
+      );
+    });
+  }
+
+  function fmtAggNum(v, digits) {
+    if (v == null || Number.isNaN(Number(v))) return "—";
+    return Number(v).toFixed(digits);
+  }
+
+  async function loadCoverageAggregates() {
+    syncCoverageAggButtons();
+    if (!coverageAggBodyEl) return;
+    if (!coverageAddress) {
+      if (coverageAggEl) coverageAggEl.hidden = true;
+      return;
+    }
+    if (coverageAggEl) coverageAggEl.hidden = false;
+    if (coverageAggHintEl) coverageAggHintEl.textContent = "Loading aggregates…";
+    coverageAggBodyEl.innerHTML =
+      '<tr><td colspan="8" class="overview-empty">Loading…</td></tr>';
+    try {
+      const params = new URLSearchParams({
+        address: coverageAddress,
+        bucket: coverageAggBucket,
+      });
+      if (coverageHours === "all") {
+        params.set("since_first", "true");
+      } else {
+        params.set("hours", String(coverageHours));
+      }
+      const res = await fetch(`/api/history/aggregate?${params}`);
+      if (!res.ok) throw new Error(`aggregate HTTP ${res.status}`);
+      const data = await res.json();
+      const rows = data.rows || [];
+      if (coverageAggHintEl) {
+        coverageAggHintEl.textContent =
+          `${data.name || data.address} · ${rows.length} ${coverageAggBucket} row(s)` +
+          ` · ${formatImportRange(data.range)}`;
+      }
+      if (!rows.length) {
+        coverageAggBodyEl.innerHTML =
+          '<tr><td colspan="8" class="overview-empty">No samples in this window</td></tr>';
+        return;
+      }
+      // Newest first for scanning recent stats.
+      const ordered = rows.slice().reverse();
+      coverageAggBodyEl.innerHTML = ordered
+        .map((r) => {
+          const t = r.temperature_c || {};
+          const h = r.humidity || {};
+          return (
+            `<tr>` +
+            `<td>${escapeHtml(r.period || "—")}</td>` +
+            `<td class="num">${fmtAggNum(t.avg, 1)}</td>` +
+            `<td class="num">${fmtAggNum(t.min, 1)}</td>` +
+            `<td class="num">${fmtAggNum(t.max, 1)}</td>` +
+            `<td class="num">${fmtAggNum(h.avg, 0)}</td>` +
+            `<td class="num">${fmtAggNum(h.min, 0)}</td>` +
+            `<td class="num">${fmtAggNum(h.max, 0)}</td>` +
+            `<td class="num">${Number(r.count) || 0}</td>` +
+            `</tr>`
+          );
+        })
+        .join("");
+    } catch (err) {
+      console.warn(err);
+      if (coverageAggHintEl) {
+        coverageAggHintEl.textContent = `Error: ${err.message}`;
+      }
+      coverageAggBodyEl.innerHTML =
+        `<tr><td colspan="8" class="overview-empty">${escapeHtml(err.message)}</td></tr>`;
+    }
   }
 
   async function loadCoverage() {
@@ -1485,6 +1612,7 @@
   function persistCoverageState() {
     localStorage.setItem("govee-charts.coverageAddress", coverageAddress || "");
     localStorage.setItem("govee-charts.coverageHours", String(coverageHours));
+    localStorage.setItem("govee-charts.coverageAggBucket", String(coverageAggBucket));
   }
 
   function renderBackfillImportPreview(preview) {
@@ -4706,6 +4834,15 @@
       persistCoverageState();
       syncCoverageRangeButtons();
       loadCoverage().catch((err) => console.warn(err));
+    });
+  });
+
+  coverageAggButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      coverageAggBucket = btn.dataset.aggBucket || "day";
+      persistCoverageState();
+      syncCoverageAggButtons();
+      loadCoverageAggregates().catch((err) => console.warn(err));
     });
   });
 

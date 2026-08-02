@@ -9,7 +9,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,6 +37,56 @@ from govee_charts.weather import WeatherService
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
 logger = logging.getLogger(__name__)
+
+
+def peer_browse_url(peer: str, ssl_port: int | None) -> str:
+    """HTTPS UI URL for a federation peer (same host, local ssl_port convention)."""
+    peer = peer.rstrip("/")
+    if not ssl_port:
+        return peer
+    parsed = urlparse(peer)
+    host = parsed.hostname
+    if not host:
+        return peer
+    return f"https://{host}:{int(ssl_port)}"
+
+
+async def probe_peer_health(peer: str, *, ssl_port: int | None) -> dict[str, Any]:
+    """Server-side /api/health probe (avoids browser mixed-content blocks)."""
+    peer = peer.rstrip("/")
+    browse = peer_browse_url(peer, ssl_port)
+    label = peer
+    try:
+        parsed = urlparse(peer)
+        if parsed.hostname:
+            label = parsed.hostname
+    except Exception:
+        pass
+    try:
+        async with httpx.AsyncClient(timeout=2.5, verify=False) as client:
+            res = await client.get(f"{peer}/api/health")
+            if res.status_code >= 400:
+                return {
+                    "url": peer,
+                    "browse_url": browse,
+                    "node_id": label,
+                    "online": False,
+                }
+            data = res.json() if res.content else {}
+            node_id = str((data or {}).get("node_id") or label).strip() or label
+            return {
+                "url": peer,
+                "browse_url": browse,
+                "node_id": node_id,
+                "online": True,
+            }
+    except Exception:
+        return {
+            "url": peer,
+            "browse_url": browse,
+            "node_id": label,
+            "online": False,
+        }
 
 
 class IngestReading(BaseModel):
@@ -94,6 +146,7 @@ def create_app(
     weather: WeatherService | None = None,
     on_restart: Callable[[], None] | None = None,
     backfill: BackfillService | None = None,
+    ssl_port: int | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Govee Charts", docs_url=None, redoc_url=None)
     app.state.db = db
@@ -106,6 +159,7 @@ def create_app(
     app.state.on_restart = on_restart
     app.state.backfill = backfill
     app.state.restart_scheduled = False
+    app.state.ssl_port = int(ssl_port) if ssl_port else None
 
     @app.get("/")
     async def index() -> FileResponse:
@@ -430,9 +484,16 @@ def create_app(
 
     @app.get("/api/federation")
     async def api_federation() -> dict[str, Any]:
+        """Local node id + peers with server-side health probes."""
+        ssl_port = app.state.ssl_port
+        peers_cfg: list[str] = list(app.state.peers or [])
+        probed = await asyncio.gather(
+            *(probe_peer_health(url, ssl_port=ssl_port) for url in peers_cfg)
+        )
         return {
             "node_id": app.state.node_id,
-            "peers": [{"url": url} for url in app.state.peers],
+            "ssl_port": ssl_port,
+            "peers": list(probed),
         }
 
     @app.get("/api/devices")
@@ -482,6 +543,53 @@ def create_app(
             "sources": report.get("sources") or {},
             "samples": report.get("samples") or 0,
             "counts": report.get("counts") or {},
+        }
+
+    @app.get("/api/history/aggregate")
+    async def api_history_aggregate(
+        address: str = Query(..., min_length=1),
+        bucket: str = Query("day", pattern="^(day|week|month)$"),
+        hours: float | None = Query(default=2160.0, gt=0, le=26280),
+        since: float | None = Query(default=None),
+        until: float | None = Query(default=None),
+        since_first: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        """Per-sensor temperature/humidity aggregates by day, week, or month."""
+        addr = address.strip().upper()
+        device = await db.get_device(addr)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        labels: dict[str, str] = app.state.labels
+        name = labels.get(addr) or str(device.get("name") or addr)
+
+        now = time.time()
+        if since is not None and until is not None:
+            t0 = float(since)
+            t1 = float(until)
+            if t1 < t0:
+                t0, t1 = t1, t0
+        elif since_first:
+            first = device.get("first_seen")
+            t0 = float(first) if first is not None else now - 90 * 86400.0
+            t1 = now
+            t0 = max(t0, t1 - 26280 * 3600.0)
+        else:
+            h = float(hours if hours is not None else 2160.0)
+            t1 = now
+            t0 = t1 - h * 3600.0
+
+        try:
+            rows = await db.history_aggregate(addr, t0, t1, bucket=bucket)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return {
+            "address": addr,
+            "name": name,
+            "bucket": bucket,
+            "range": {"start": t0, "end": t1},
+            "rows": rows,
+            "count": len(rows),
         }
 
     @app.get("/api/coverage/overview")

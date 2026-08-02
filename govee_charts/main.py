@@ -350,6 +350,12 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         for server in servers:
             server.should_exit = True
 
+    host = str(cfg["server"]["host"])
+    port = int(cfg["server"]["port"])
+    ssl_port = int(cfg["server"].get("ssl_port") or 8081)
+    certfile, keyfile = resolve_ssl_files(cfg["server"])
+    display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+
     app = create_app(
         db,
         labels=cfg["labels"],
@@ -360,13 +366,8 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         weather=weather,
         on_restart=request_restart,
         backfill=backfill,
+        ssl_port=ssl_port if certfile and keyfile else None,
     )
-
-    host = str(cfg["server"]["host"])
-    port = int(cfg["server"]["port"])
-    ssl_port = int(cfg["server"].get("ssl_port") or 8081)
-    certfile, keyfile = resolve_ssl_files(cfg["server"])
-    display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
 
     http_config = uvicorn.Config(
         app,

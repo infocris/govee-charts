@@ -434,6 +434,37 @@ main {
   }
 }
 
+.coverage-agg {
+  margin: 1rem 0 1.25rem;
+}
+
+.coverage-agg-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin: 0 0 0.4rem;
+}
+
+.coverage-agg-head h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 500;
+}
+
+.coverage-agg-hint {
+  margin: 0 0 0.45rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.coverage-agg-table th,
+.coverage-agg-table td {
+  white-space: nowrap;
+}
+
 .coverage-bar {
   display: flex;
   width: 100%;
