@@ -22,6 +22,11 @@ def gatt_source(node_id: str) -> str:
     return f"{node_id.strip()}/gatt"
 
 
+def csv_source(node_id: str) -> str:
+    """Provenance string for Govee Home CSV imports."""
+    return f"{node_id.strip()}/csv"
+
+
 class PeerPublisher:
     """Fire-and-forget fan-out of locally produced readings to peer nodes."""
 

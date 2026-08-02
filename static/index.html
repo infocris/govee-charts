@@ -27,6 +27,7 @@
       <button type="button" role="tab" data-view="overview" class="active" aria-selected="true">Overview</button>
       <button type="button" role="tab" data-view="compare" aria-selected="false">Compare</button>
       <button type="button" role="tab" data-view="facades" aria-selected="false">Facades</button>
+      <button type="button" role="tab" data-view="coverage" aria-selected="false">Coverage</button>
       <button type="button" role="tab" data-view="backfill" aria-selected="false">Backfill</button>
       <button type="button" id="restart-btn" class="restart-btn" title="Restart service">Restart</button>
     </nav>
@@ -77,13 +78,16 @@
               <th scope="col">
                 <button type="button" class="sort-btn" data-sort="last_source">Source</button>
               </th>
+              <th scope="col" class="num">
+                <button type="button" class="sort-btn" data-sort="sample_count" title="Approximate SQLite footprint (~120 B per sample)">Stored</button>
+              </th>
               <th scope="col">
                 <button type="button" class="sort-btn" data-sort="last_reading_ts">Last reading</button>
               </th>
             </tr>
           </thead>
           <tbody id="overview-body">
-            <tr><td colspan="10" class="overview-empty">Loading…</td></tr>
+            <tr><td colspan="11" class="overview-empty">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -91,7 +95,7 @@
 
       <div class="overview-head overview-head-secondary">
         <h2>Doors &amp; windows</h2>
-        <p class="overview-hint">Contact sensors — set kind (door/window) and room</p>
+        <p class="overview-hint">Contact sensors — set kind/room; click a name for open/close log</p>
       </div>
       <div class="overview-table-wrap">
         <table class="overview-table" id="doors-table">
@@ -108,6 +112,27 @@
             <tr><td colspan="5" class="overview-empty">Loading…</td></tr>
           </tbody>
         </table>
+      </div>
+      <div class="door-log" id="door-log" hidden>
+        <div class="door-log-head">
+          <h3 id="door-log-title">Open / close log</h3>
+          <button type="button" class="backfill-btn" id="door-log-close" title="Close log">Close</button>
+        </div>
+        <p class="overview-hint" id="door-log-hint">Last 7 days</p>
+        <div class="overview-table-wrap">
+          <table class="overview-table door-log-table">
+            <thead>
+              <tr>
+                <th scope="col">Time</th>
+                <th scope="col">State</th>
+                <th scope="col">Source</th>
+              </tr>
+            </thead>
+            <tbody id="door-log-body">
+              <tr><td colspan="3" class="overview-empty">Select a contact…</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
       <p class="status" id="doors-status" hidden></p>
     </section>
@@ -137,8 +162,31 @@
           <button type="button" data-hours="6">6 h</button>
           <button type="button" data-hours="24" class="active">24 h</button>
           <button type="button" data-hours="168">7 d</button>
-          <button type="button" data-hours="720">30 d</button>
-          <button type="button" data-hours="2160">90 d</button>
+          <button type="button" data-hours="336">14 d</button>
+          <label class="range-more">
+            <span class="visually-hidden">Longer range</span>
+            <select id="range-select" aria-label="Longer time range">
+              <option value="">More…</option>
+              <option value="720">30 d</option>
+              <option value="2160">90 d</option>
+              <option value="4320">180 d</option>
+              <option value="8760">1 y</option>
+              <option value="17520">2 y</option>
+              <option value="26280">3 y</option>
+              <option value="custom">Custom…</option>
+            </select>
+          </label>
+          <div id="range-custom" class="range-custom" hidden>
+            <label>
+              <span>From</span>
+              <input type="datetime-local" id="range-since" step="60">
+            </label>
+            <label>
+              <span>To</span>
+              <input type="datetime-local" id="range-until" step="60">
+            </label>
+            <button type="button" id="range-apply">Apply</button>
+          </div>
         </div>
         <label class="forecast-toggle">
           <input type="checkbox" id="show-forecast" checked>
@@ -249,12 +297,130 @@
       <p class="status" id="facade-status">Loading…</p>
     </section>
 
+    <section id="view-coverage" class="view" role="tabpanel" aria-label="Coverage" hidden>
+      <div class="overview-head">
+        <h2>Sensor coverage</h2>
+        <p class="overview-hint">
+          Coverage for all sensors; select one for details. Import Govee CSV or ZIP to fill gaps.
+        </p>
+      </div>
+
+      <div class="coverage-controls">
+        <div class="ranges coverage-ranges" role="group" aria-label="Coverage window">
+          <button type="button" data-cov-hours="336">14 d</button>
+          <button type="button" data-cov-hours="720">30 d</button>
+          <button type="button" data-cov-hours="2160" class="active">90 d</button>
+          <button type="button" data-cov-hours="8760">1 y</button>
+          <button type="button" data-cov-hours="all">All</button>
+        </div>
+      </div>
+
+      <div class="coverage-legend" aria-hidden="true">
+        <span class="cov-leg cov-leg-full">Full</span>
+        <span class="cov-leg cov-leg-partial">Partial</span>
+        <span class="cov-leg cov-leg-missing">Missing</span>
+      </div>
+      <div class="coverage-all" id="coverage-all" aria-label="All sensors coverage">
+        <p class="coverage-summary" id="coverage-all-summary">Loading…</p>
+        <ul class="coverage-all-list" id="coverage-all-list"></ul>
+      </div>
+
+      <div class="overview-head overview-head-secondary">
+        <h2>Sensor detail</h2>
+        <p class="overview-hint">Segments and sources for the selected sensor</p>
+      </div>
+      <div class="coverage-controls">
+        <label class="coverage-field">
+          <span>Sensor</span>
+          <select id="coverage-device">
+            <option value="">Select a sensor…</option>
+          </select>
+        </label>
+      </div>
+
+      <p class="coverage-summary" id="coverage-summary" aria-live="polite">Select a sensor…</p>
+      <div class="coverage-bar" id="coverage-bar" role="img" aria-label="Coverage timeline"></div>
+      <ul class="coverage-segments" id="coverage-segments"></ul>
+      <p class="status" id="coverage-status"></p>
+
+      <div class="overview-head overview-head-secondary">
+        <h2>Import CSV</h2>
+        <p class="overview-hint">Govee Home app export (.csv or .zip) — analyze, compare coverage, then import</p>
+      </div>
+      <div class="backfill-import" id="coverage-import">
+        <div class="backfill-import-form">
+          <label class="backfill-import-field">
+            <span>Sensor</span>
+            <select id="coverage-import-device">
+              <option value="">Select a sensor…</option>
+            </select>
+          </label>
+          <label class="backfill-import-field">
+            <span>File</span>
+            <input type="file" id="coverage-import-file" accept=".csv,.zip,text/csv,application/zip" />
+          </label>
+          <button type="button" class="backfill-btn" id="coverage-import-analyze">Analyze</button>
+        </div>
+        <p class="backfill-import-status" id="coverage-import-status" aria-live="polite"></p>
+        <div class="backfill-import-recap" id="coverage-import-recap" hidden>
+          <div class="coverage-import-bars" id="coverage-import-bars" hidden>
+            <div class="coverage-import-bar-block">
+              <h3>File coverage</h3>
+              <div class="coverage-bar coverage-bar-thin" id="coverage-file-bar"></div>
+            </div>
+            <div class="coverage-import-bar-block">
+              <h3>Existing in DB</h3>
+              <div class="coverage-bar coverage-bar-thin" id="coverage-db-bar"></div>
+            </div>
+          </div>
+          <div class="backfill-import-grid">
+            <section class="backfill-import-block">
+              <h3>File</h3>
+              <dl class="backfill-import-dl" id="coverage-import-file-stats"></dl>
+            </section>
+            <section class="backfill-import-block">
+              <h3>Existing in range</h3>
+              <dl class="backfill-import-dl" id="coverage-import-existing-stats"></dl>
+            </section>
+          </div>
+          <section class="backfill-import-block">
+            <h3>Compare</h3>
+            <dl class="backfill-import-dl" id="coverage-import-compare-stats"></dl>
+          </section>
+          <section class="backfill-import-block" id="coverage-import-members-wrap" hidden>
+            <h3>ZIP members</h3>
+            <ul class="backfill-import-members" id="coverage-import-members"></ul>
+          </section>
+          <div class="backfill-import-actions">
+            <button type="button" class="backfill-btn" id="coverage-import-cancel">Cancel</button>
+            <button type="button" class="backfill-btn" id="coverage-import-confirm">Import</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section id="view-backfill" class="view" role="tabpanel" aria-label="Backfill" hidden>
       <div class="overview-head">
         <h2>History backfill</h2>
         <p class="overview-hint">
-          GATT recovery queue — newest gaps first; shared over federation as node_id/gatt
+          GATT recovery queue — newest gaps first; shared over federation as node_id/gatt.
+          Select sensors below to opt in (none by default).
         </p>
+      </div>
+
+      <div class="overview-head overview-head-secondary">
+        <h2>Sensors</h2>
+        <p class="overview-hint">Enable individual sensors for GATT history recovery</p>
+      </div>
+      <div class="backfill-sensors" id="backfill-sensors">
+        <div class="backfill-sensors-actions">
+          <button type="button" class="backfill-btn" id="backfill-select-all">Select all</button>
+          <button type="button" class="backfill-btn" id="backfill-clear-all">Clear all</button>
+        </div>
+        <p class="backfill-sensors-hint" id="backfill-sensors-hint" hidden></p>
+        <ul class="backfill-sensor-list" id="backfill-sensor-list">
+          <li class="overview-empty">Loading…</li>
+        </ul>
       </div>
 
       <div class="backfill-panel" id="backfill-panel">

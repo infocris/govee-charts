@@ -238,6 +238,38 @@ class BackfillService:
             )
         )
 
+        enabled_set = await self.db.list_backfill_enabled()
+        queued_by_addr = {
+            str(row["address"]).upper(): row for row in summaries
+        }
+        device_rows: list[dict[str, Any]] = []
+        for device in devices.values():
+            addr = str(device.get("address") or "").upper()
+            if not addr:
+                continue
+            model = str(device.get("model") or "").lower()
+            if model and model not in ("h5075", "h5072", "h5179"):
+                continue
+            local = local_rssi.get(addr)
+            peer = peer_rssi.get(addr)
+            local_best = False
+            if local is not None:
+                local_best = peer is None or peer <= local + margin
+            q = queued_by_addr.get(addr) or {}
+            device_rows.append(
+                {
+                    "address": addr,
+                    "name": self._label(addr, str(device.get("name") or addr)),
+                    "model": model or None,
+                    "enabled": addr in enabled_set,
+                    "rssi": local,
+                    "local_best": local_best,
+                    "queued_jobs": int(q.get("jobs") or 0),
+                    "phase": q.get("phase"),
+                }
+            )
+        device_rows.sort(key=lambda e: (e["name"].lower(), e["address"]))
+
         live = self._live
         current = None
         if live.job_id is not None and self._worker == "busy":
@@ -269,6 +301,7 @@ class BackfillService:
             "worker": worker,
             "current": current,
             "queue": queue,
+            "devices": device_rows,
             "totals": {
                 "pending": int(counts.get("pending") or 0)
                 + int(counts.get("deferred") or 0),
@@ -290,7 +323,12 @@ class BackfillService:
     def _label(self, address: str, fallback: str) -> str:
         return self.labels.get(address.upper()) or fallback
 
-    async def refresh_gaps(self, *, force: bool = False) -> int:
+    async def refresh_gaps(
+        self,
+        *,
+        force: bool = False,
+        addresses: list[str] | None = None,
+    ) -> int:
         """Detect gaps and enqueue jobs. Returns number of newly enqueued jobs."""
         async with self._refresh_lock:
             now = time.time()
@@ -305,9 +343,27 @@ class BackfillService:
             now_q = float(int(now // 60) * 60)
             self._last_refresh_ts = now
 
-            rebuild = force or (
-                not self._last_rebuild_ts
-                or now - self._last_rebuild_ts >= self.cfg.rebuild_seconds
+            enabled_set = await self.db.list_backfill_enabled()
+            scope: set[str] | None = None
+            if addresses is not None:
+                scope = {str(a).upper() for a in addresses if a}
+                scope &= enabled_set
+
+            # Drop queue entries for sensors that are no longer opted in.
+            pruned = await self.db.clear_open_backfill_jobs_except(enabled_set)
+            if pruned:
+                logger.info(
+                    "Cleared %d open backfill job(s) for disabled sensor(s)",
+                    pruned,
+                )
+
+            rebuild = (
+                addresses is None
+                and (
+                    force
+                    or not self._last_rebuild_ts
+                    or now - self._last_rebuild_ts >= self.cfg.rebuild_seconds
+                )
             )
             if rebuild:
                 cleared = await self.db.clear_open_backfill_jobs()
@@ -317,11 +373,18 @@ class BackfillService:
                         "Cleared %d open backfill job(s) before rebuild", cleared
                     )
 
+            if not enabled_set or (scope is not None and not scope):
+                return 0
+
             devices = await self.db.list_devices()
             enqueued = 0
             bands = _phase_bands(now_q, self.cfg.lookback_days)
             for device_i, device in enumerate(devices):
                 addr = str(device["address"]).upper()
+                if addr not in enabled_set:
+                    continue
+                if scope is not None and addr not in scope:
+                    continue
                 model = str(device.get("model") or "").lower()
                 if model and model not in ("h5075", "h5072", "h5179"):
                     continue
@@ -362,6 +425,41 @@ class BackfillService:
             else:
                 await self.db.commit()
             return enqueued
+
+    async def set_device_enabled(self, address: str, enabled: bool) -> dict[str, Any]:
+        """Opt a sensor in/out of GATT backfill; cancel or enqueue accordingly."""
+        address = address.upper()
+        device = await self.db.get_device(address)
+        if device is None:
+            raise KeyError(f"Unknown device {address}")
+        model = str(device.get("model") or "").lower()
+        if model and model not in ("h5075", "h5072", "h5179"):
+            raise ValueError(f"Model {model or '?'} does not support GATT history")
+
+        stored = await self.db.set_backfill_enabled(address, enabled)
+        cancelled = 0
+        enqueued = 0
+        if not stored:
+            cancelled = await self.db.cancel_open_backfill_jobs(address)
+            logger.info(
+                "Backfill disabled for %s (cancelled %d open job(s))",
+                address,
+                cancelled,
+            )
+        else:
+            enqueued = await self.refresh_gaps(force=True, addresses=[address])
+            logger.info(
+                "Backfill enabled for %s (enqueued %d job(s))",
+                address,
+                enqueued,
+            )
+        return {
+            "address": address,
+            "name": self._label(address, str(device.get("name") or address)),
+            "enabled": stored,
+            "cancelled": cancelled,
+            "enqueued": enqueued,
+        }
 
     async def _local_rssi_map(self) -> dict[str, int | None]:
         """Latest known local RSSI per address (this node's readings / state)."""
@@ -436,9 +534,16 @@ class BackfillService:
         return (local_best, above_min, rssi_score)
 
     async def _pick_job(self) -> dict[str, Any] | None:
+        enabled_set = await self.db.list_backfill_enabled()
+        if not enabled_set:
+            return None
+
         pending = await self.db.list_backfill_jobs(
             statuses=["pending"], limit=300
         )
+        pending = [
+            j for j in pending if str(j["address"]).upper() in enabled_set
+        ]
         if not pending:
             # Promote deferred that are old enough.
             deferred = await self.db.list_backfill_jobs(
@@ -447,6 +552,8 @@ class BackfillService:
             now = time.time()
             for job in deferred:
                 addr = str(job["address"]).upper()
+                if addr not in enabled_set:
+                    continue
                 until = self._weak_backoff.get(addr, 0.0)
                 if now >= until:
                     await self.db.update_backfill_job(job["id"], status="pending")
@@ -623,6 +730,14 @@ class BackfillService:
             started_at=time.time(),
         )
 
+        if not await self.db.is_backfill_enabled(address):
+            await self.db.update_backfill_job(
+                job_id,
+                status="cancelled",
+                error="disabled by user",
+            )
+            return
+
         # Gate: recently seen?
         last_seen = float((device or {}).get("last_seen") or 0.0)
         age = time.time() - last_seen if last_seen else 1e9
@@ -722,6 +837,15 @@ class BackfillService:
         finally:
             if self.scanner is not None:
                 await self.scanner.resume_after_gatt()
+
+        if not await self.db.is_backfill_enabled(address):
+            await self.db.update_backfill_job(
+                job_id,
+                status="cancelled",
+                samples_done=done_samples,
+                error="disabled by user",
+            )
+            return
 
         if result.rssi is not None:
             self._live.rssi = result.rssi
@@ -833,6 +957,14 @@ class BackfillService:
         recovered = await self.db.reset_running_backfill_jobs()
         if recovered:
             logger.info("Re-queued %d interrupted backfill job(s)", recovered)
+
+        enabled_set = await self.db.list_backfill_enabled()
+        pruned = await self.db.clear_open_backfill_jobs_except(enabled_set)
+        if pruned:
+            logger.info(
+                "Cleared %d open backfill job(s) for disabled sensor(s) at startup",
+                pruned,
+            )
 
         logger.info(
             "GATT history backfill started (lookback=%.0fd, max_job=%dm, min_rssi=%d)",

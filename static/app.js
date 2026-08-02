@@ -6,6 +6,12 @@
   const overviewStatus = document.getElementById("overview-status");
   const doorsBody = document.getElementById("doors-body");
   const doorsStatus = document.getElementById("doors-status");
+  const doorLogEl = document.getElementById("door-log");
+  const doorLogTitleEl = document.getElementById("door-log-title");
+  const doorLogHintEl = document.getElementById("door-log-hint");
+  const doorLogBodyEl = document.getElementById("door-log-body");
+  const doorLogCloseBtn = document.getElementById("door-log-close");
+  let selectedDoorId = null;
   const modelFiltersEl = document.getElementById("model-filters");
   const compareModelFiltersEl = document.getElementById("compare-model-filters");
   const nodeLineEl = document.getElementById("node-line");
@@ -14,9 +20,30 @@
   const viewCompare = document.getElementById("view-compare");
   const viewFacades = document.getElementById("view-facades");
   const viewBackfill = document.getElementById("view-backfill");
+  const viewCoverage = document.getElementById("view-coverage");
   const selectAllBtn = document.getElementById("select-all");
   const selectNoneBtn = document.getElementById("select-none");
-  const rangeButtons = [...document.querySelectorAll(".ranges button")];
+  const rangeButtons = [
+    ...document.querySelectorAll(".ranges > button[data-hours]"),
+  ];
+  const coverageRangeButtons = [
+    ...document.querySelectorAll(".coverage-ranges > button[data-cov-hours]"),
+  ];
+  const coverageDeviceEl = document.getElementById("coverage-device");
+  const coverageSummaryEl = document.getElementById("coverage-summary");
+  const coverageBarEl = document.getElementById("coverage-bar");
+  const coverageSegmentsEl = document.getElementById("coverage-segments");
+  const coverageStatusEl = document.getElementById("coverage-status");
+  const coverageAllListEl = document.getElementById("coverage-all-list");
+  const coverageAllSummaryEl = document.getElementById("coverage-all-summary");
+  const coverageFileBarEl = document.getElementById("coverage-file-bar");
+  const coverageDbBarEl = document.getElementById("coverage-db-bar");
+  const coverageImportBarsEl = document.getElementById("coverage-import-bars");
+  const rangeSelectEl = document.getElementById("range-select");
+  const rangeCustomEl = document.getElementById("range-custom");
+  const rangeSinceEl = document.getElementById("range-since");
+  const rangeUntilEl = document.getElementById("range-until");
+  const rangeApplyBtn = document.getElementById("range-apply");
   const viewButtons = [...document.querySelectorAll(".views [data-view]")];
   const sortButtons = [...document.querySelectorAll(".sort-btn")];
   const restartBtn = document.getElementById("restart-btn");
@@ -37,8 +64,38 @@
   const backfillRefreshBtn = document.getElementById("backfill-refresh");
   const backfillJobsBody = document.getElementById("backfill-jobs-body");
   const backfillRecentBody = document.getElementById("backfill-recent-body");
+  const backfillSensorListEl = document.getElementById("backfill-sensor-list");
+  const backfillSensorsHintEl = document.getElementById("backfill-sensors-hint");
+  const backfillSelectAllBtn = document.getElementById("backfill-select-all");
+  const backfillClearAllBtn = document.getElementById("backfill-clear-all");
+  const coverageImportDeviceEl = document.getElementById("coverage-import-device");
+  const coverageImportFileEl = document.getElementById("coverage-import-file");
+  const coverageImportAnalyzeBtn = document.getElementById("coverage-import-analyze");
+  const coverageImportConfirmBtn = document.getElementById("coverage-import-confirm");
+  const coverageImportCancelBtn = document.getElementById("coverage-import-cancel");
+  const coverageImportStatusEl = document.getElementById("coverage-import-status");
+  const coverageImportRecapEl = document.getElementById("coverage-import-recap");
+  const coverageImportFileStatsEl = document.getElementById("coverage-import-file-stats");
+  const coverageImportExistingStatsEl = document.getElementById(
+    "coverage-import-existing-stats"
+  );
+  const coverageImportCompareStatsEl = document.getElementById(
+    "coverage-import-compare-stats"
+  );
+  const coverageImportMembersWrapEl = document.getElementById(
+    "coverage-import-members-wrap"
+  );
+  const coverageImportMembersEl = document.getElementById("coverage-import-members");
   let backfillTimer = null;
   let backfillSnapshot = null;
+  let backfillDeviceBusy = false;
+  let coverageImportFile = null;
+  let coverageImportPreview = null;
+  /** @type {string} */
+  let coverageHours = "2160";
+  /** @type {string} */
+  let coverageAddress = localStorage.getItem("govee-charts.coverageAddress") || "";
+  let coverageLoaded = false;
 
   const PALETTE = [
     "#e8a87c",
@@ -65,11 +122,20 @@
   const GEO_KEY = "govee-charts.geo";
   const CAT_FILTER_KEY = "govee-charts.catFilters";
   const CHART_HEIGHT_KEY = "govee-charts.chartHeight";
+  const RANGE_KEY = "govee-charts.range";
   const CHART_HEIGHT_DEFAULT = 260;
   const CHART_HEIGHT_MIN = 160;
   const CHART_HEIGHT_MAX = 520;
+  const RANGE_MAX_HOURS = 26280;
+  const QUICK_RANGE_HOURS = new Set([1, 6, 24, 168, 336]);
+  const SELECT_RANGE_HOURS = new Set([720, 2160, 4320, 8760, 17520, 26280]);
 
+  /** @type {number} relative window in hours (ignored when customSince/Until set) */
   let hours = 24;
+  /** @type {number|null} */
+  let customSince = null;
+  /** @type {number|null} */
+  let customUntil = null;
   let devices = [];
   let taxonomyData = { zones: [], heights: [], rooms: [], contact_kinds: [] };
   /** @type {Array<{sensor_id:string,name:string,state:string,ts:number,room?:string,kind?:string}>} */
@@ -78,7 +144,7 @@
   let modelFilter = localStorage.getItem(MODEL_KEY) || "all";
   let catFilters = loadCatFilters();
   let sortState = loadSortState();
-  let currentView = ["compare", "facades", "backfill"].includes(
+  let currentView = ["compare", "facades", "coverage", "backfill"].includes(
     localStorage.getItem(VIEW_KEY)
   )
     ? localStorage.getItem(VIEW_KEY)
@@ -420,6 +486,212 @@
     localStorage.setItem(MODEL_KEY, modelFilter);
   }
 
+  function isCustomRange() {
+    return customSince != null && customUntil != null;
+  }
+
+  /** Hours spanning the active chart window (for overlays / forecast clamp). */
+  function rangeSpanHours() {
+    if (isCustomRange()) {
+      return Math.max(1 / 60, (customUntil - customSince) / 3600);
+    }
+    return Number(hours) || 24;
+  }
+
+  /**
+   * Hours-from-now query param for APIs that only accept relative `hours`
+   * (covers absolute windows that start in the past).
+   */
+  function rangeOverlayHours() {
+    let h;
+    if (isCustomRange()) {
+      h = (Date.now() / 1000 - customSince) / 3600;
+    } else {
+      h = Number(hours) || 24;
+    }
+    return Math.min(RANGE_MAX_HOURS, Math.max(1 / 60, h));
+  }
+
+  function rangeAxisBounds() {
+    if (isCustomRange()) {
+      return {
+        xMin: customSince * 1000,
+        xMax: customUntil * 1000,
+      };
+    }
+    const xMax = Date.now();
+    return {
+      xMin: xMax - Number(hours) * 3600 * 1000,
+      xMax,
+    };
+  }
+
+  function formatRangeLabel() {
+    if (isCustomRange()) {
+      const fmt = (sec) =>
+        new Date(sec * 1000).toLocaleString("en-GB", {
+          day: "numeric",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      return `${fmt(customSince)} → ${fmt(customUntil)}`;
+    }
+    const h = Number(hours);
+    if (h < 24) return `${h} h`;
+    if (h % 8760 === 0) {
+      const y = h / 8760;
+      return y === 1 ? "1 y" : `${y} y`;
+    }
+    if (h % 24 === 0) {
+      const d = h / 24;
+      return d === 1 ? "1 d" : `${d} d`;
+    }
+    return `${h} h`;
+  }
+
+  function toDatetimeLocalValue(sec) {
+    const d = new Date(sec * 1000);
+    const pad = (n) => String(n).padStart(2, "0");
+    return (
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+      `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+    );
+  }
+
+  function fromDatetimeLocalValue(value) {
+    if (!value) return null;
+    const ms = Date.parse(value);
+    if (!Number.isFinite(ms)) return null;
+    return ms / 1000;
+  }
+
+  function persistRange() {
+    if (isCustomRange()) {
+      localStorage.setItem(
+        RANGE_KEY,
+        JSON.stringify({ since: customSince, until: customUntil })
+      );
+      return;
+    }
+    localStorage.setItem(RANGE_KEY, JSON.stringify({ hours: Number(hours) }));
+  }
+
+  function loadPersistedRange() {
+    try {
+      const raw = localStorage.getItem(RANGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (
+        parsed &&
+        typeof parsed.since === "number" &&
+        typeof parsed.until === "number" &&
+        Number.isFinite(parsed.since) &&
+        Number.isFinite(parsed.until)
+      ) {
+        customSince = Math.min(parsed.since, parsed.until);
+        customUntil = Math.max(parsed.since, parsed.until);
+        hours = Math.max(1 / 60, (customUntil - customSince) / 3600);
+        return;
+      }
+      if (parsed && typeof parsed.hours === "number" && parsed.hours > 0) {
+        hours = Math.min(RANGE_MAX_HOURS, parsed.hours);
+        customSince = null;
+        customUntil = null;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function syncRangeControls() {
+    rangeButtons.forEach((b) => b.classList.remove("active"));
+    if (rangeSelectEl) {
+      rangeSelectEl.classList.remove("active");
+    }
+    const custom = isCustomRange();
+    if (rangeCustomEl) rangeCustomEl.hidden = !custom;
+
+    if (custom) {
+      if (rangeSelectEl) {
+        rangeSelectEl.value = "custom";
+        rangeSelectEl.classList.add("active");
+      }
+      if (rangeSinceEl) rangeSinceEl.value = toDatetimeLocalValue(customSince);
+      if (rangeUntilEl) rangeUntilEl.value = toDatetimeLocalValue(customUntil);
+      return;
+    }
+
+    const h = Number(hours);
+    const quick = rangeButtons.find((b) => Number(b.dataset.hours) === h);
+    if (quick) {
+      quick.classList.add("active");
+      if (rangeSelectEl) rangeSelectEl.value = "";
+      return;
+    }
+    if (rangeSelectEl && SELECT_RANGE_HOURS.has(h)) {
+      rangeSelectEl.value = String(h);
+      rangeSelectEl.classList.add("active");
+      return;
+    }
+    // Unknown hours: show as custom absolute window ending now
+    if (rangeSelectEl) {
+      rangeSelectEl.value = "custom";
+      rangeSelectEl.classList.add("active");
+    }
+  }
+
+  function setRelativeRange(h, { fromSelect = false } = {}) {
+    hours = Math.min(RANGE_MAX_HOURS, Math.max(1 / 60, Number(h) || 24));
+    customSince = null;
+    customUntil = null;
+    if (rangeCustomEl) rangeCustomEl.hidden = true;
+    rangeButtons.forEach((b) => b.classList.remove("active"));
+    if (rangeSelectEl) {
+      rangeSelectEl.classList.remove("active");
+      if (fromSelect && SELECT_RANGE_HOURS.has(hours)) {
+        rangeSelectEl.value = String(hours);
+        rangeSelectEl.classList.add("active");
+      } else if (QUICK_RANGE_HOURS.has(hours)) {
+        rangeSelectEl.value = "";
+        const btn = rangeButtons.find((b) => Number(b.dataset.hours) === hours);
+        if (btn) btn.classList.add("active");
+      } else if (SELECT_RANGE_HOURS.has(hours)) {
+        rangeSelectEl.value = String(hours);
+        rangeSelectEl.classList.add("active");
+      } else {
+        rangeSelectEl.value = "";
+      }
+    } else {
+      const btn = rangeButtons.find((b) => Number(b.dataset.hours) === hours);
+      if (btn) btn.classList.add("active");
+    }
+    persistRange();
+  }
+
+  function setCustomRange(sinceSec, untilSec) {
+    let t0 = Number(sinceSec);
+    let t1 = Number(untilSec);
+    if (!Number.isFinite(t0) || !Number.isFinite(t1)) return false;
+    if (t1 < t0) [t0, t1] = [t1, t0];
+    const spanH = (t1 - t0) / 3600;
+    if (spanH <= 0 || spanH > RANGE_MAX_HOURS) return false;
+    customSince = t0;
+    customUntil = t1;
+    hours = spanH;
+    rangeButtons.forEach((b) => b.classList.remove("active"));
+    if (rangeSelectEl) {
+      rangeSelectEl.value = "custom";
+      rangeSelectEl.classList.add("active");
+    }
+    if (rangeCustomEl) rangeCustomEl.hidden = false;
+    if (rangeSinceEl) rangeSinceEl.value = toDatetimeLocalValue(t0);
+    if (rangeUntilEl) rangeUntilEl.value = toDatetimeLocalValue(t1);
+    persistRange();
+    return true;
+  }
+
   function peerHostLabel(url) {
     try {
       return new URL(url).host;
@@ -491,12 +763,17 @@
     if (!source || source === "—") return "—";
     const raw = String(source);
     const isGatt = raw.endsWith("/gatt");
-    const nodeId = isGatt ? raw.slice(0, -"/gatt".length) : raw;
+    const isCsv = raw.endsWith("/csv");
+    const nodeId = isGatt
+      ? raw.slice(0, -"/gatt".length)
+      : isCsv
+        ? raw.slice(0, -"/csv".length)
+        : raw;
     const url = peerByNodeId.get(nodeId);
-    const label = isGatt ? `${nodeId}/gatt` : nodeId;
+    const suffix = isGatt ? "/gatt" : isCsv ? "/csv" : "";
+    const label = suffix ? `${nodeId}${suffix}` : nodeId;
     if (!url) return escapeHtml(label);
-    const linkText = isGatt ? nodeId : label;
-    const suffix = isGatt ? "/gatt" : "";
+    const linkText = suffix ? nodeId : label;
     return (
       `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">` +
       `${escapeHtml(linkText)}</a>${escapeHtml(suffix)}`
@@ -679,6 +956,150 @@
       .join("");
   }
 
+  function renderBackfillSensors(devices, serviceEnabled) {
+    if (!backfillSensorListEl) return;
+    const rows = Array.isArray(devices) ? devices : [];
+    const anyOn = rows.some((d) => d.enabled);
+    if (backfillSensorsHintEl) {
+      if (!serviceEnabled) {
+        backfillSensorsHintEl.hidden = true;
+      } else if (!rows.length) {
+        backfillSensorsHintEl.hidden = false;
+        backfillSensorsHintEl.textContent = "No eligible Govee sensors found.";
+      } else if (!anyOn) {
+        backfillSensorsHintEl.hidden = false;
+        backfillSensorsHintEl.textContent =
+          "No sensors selected — enable at least one to enqueue GATT recovery.";
+      } else {
+        backfillSensorsHintEl.hidden = true;
+      }
+    }
+    if (backfillSelectAllBtn) {
+      backfillSelectAllBtn.disabled =
+        !serviceEnabled || !rows.length || backfillDeviceBusy;
+    }
+    if (backfillClearAllBtn) {
+      backfillClearAllBtn.disabled =
+        !serviceEnabled || !rows.length || backfillDeviceBusy;
+    }
+    if (!rows.length) {
+      backfillSensorListEl.innerHTML =
+        `<li class="overview-empty">No eligible sensors</li>`;
+      return;
+    }
+    backfillSensorListEl.innerHTML = rows
+      .map((d) => {
+        const safe = String(d.address || "").replace(/:/g, "");
+        const id = `bf-dev-${escapeHtml(safe)}`;
+        const meta = [
+          d.local_best ? "★" : null,
+          d.rssi != null ? `${Number(d.rssi)} dBm` : null,
+          d.queued_jobs ? `${Number(d.queued_jobs)} job(s)` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return (
+          `<li><label for="${id}">` +
+          `<input type="checkbox" id="${id}" data-address="${escapeHtml(d.address)}" ` +
+          (d.enabled ? "checked " : "") +
+          (!serviceEnabled || backfillDeviceBusy ? "disabled " : "") +
+          `/>` +
+          `<span>${escapeHtml(d.name || d.address)}</span>` +
+          (meta
+            ? ` <span class="backfill-sensor-meta">${escapeHtml(meta)}</span>`
+            : "") +
+          `</label></li>`
+        );
+      })
+      .join("");
+  }
+
+  async function setBackfillDevice(address, enabled) {
+    backfillDeviceBusy = true;
+    try {
+      const res = await fetch("/api/backfill/devices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address, enabled: Boolean(enabled) }),
+      });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = body.detail;
+        } catch (_) {
+          /* ignore */
+        }
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
+      renderBackfill(await res.json());
+      syncBackfillPolling();
+    } finally {
+      backfillDeviceBusy = false;
+      if (backfillSnapshot) {
+        renderBackfillSensors(
+          backfillSnapshot.devices,
+          !(
+            !backfillSnapshot ||
+            backfillSnapshot.worker === "disabled" ||
+            backfillSnapshot.enabled === false
+          )
+        );
+      }
+    }
+  }
+
+  async function setBackfillDevicesBulk(enabled) {
+    const devices = (backfillSnapshot && backfillSnapshot.devices) || [];
+    const targets = devices.filter((d) => Boolean(d.enabled) !== Boolean(enabled));
+    if (!targets.length) return;
+    backfillDeviceBusy = true;
+    renderBackfillSensors(
+      devices,
+      Boolean(backfillSnapshot && backfillSnapshot.enabled !== false)
+    );
+    try {
+      let last = null;
+      for (const d of targets) {
+        const res = await fetch("/api/backfill/devices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            address: d.address,
+            enabled: Boolean(enabled),
+          }),
+        });
+        if (!res.ok) {
+          let detail = res.statusText;
+          try {
+            const body = await res.json();
+            if (body && body.detail) detail = body.detail;
+          } catch (_) {
+            /* ignore */
+          }
+          throw new Error(detail || `HTTP ${res.status}`);
+        }
+        last = await res.json();
+      }
+      if (last) {
+        renderBackfill(last);
+        syncBackfillPolling();
+      }
+    } finally {
+      backfillDeviceBusy = false;
+      if (backfillSnapshot) {
+        renderBackfillSensors(
+          backfillSnapshot.devices,
+          !(
+            !backfillSnapshot ||
+            backfillSnapshot.worker === "disabled" ||
+            backfillSnapshot.enabled === false
+          )
+        );
+      }
+    }
+  }
+
   function renderBackfill(data) {
     backfillSnapshot = data;
     if (!backfillPanelEl || !backfillCurrentEl) return;
@@ -693,9 +1114,12 @@
       backfillRefreshBtn.disabled = disabled;
     }
 
+    renderBackfillSensors(data && data.devices, !disabled);
+
     const current = data && data.current;
     const queue = (data && data.queue) || [];
     const totals = (data && data.totals) || {};
+    const anyOn = ((data && data.devices) || []).some((d) => d.enabled);
 
     if (disabled) {
       backfillCurrentEl.innerHTML =
@@ -705,9 +1129,11 @@
         `<p class="backfill-idle">` +
         (data.paused
           ? "Paused"
-          : data.worker === "idle" && !(totals.pending > 0)
-            ? "Queue empty — waiting for gaps"
-            : `Worker ${escapeHtml(data.worker || "idle")} · ${Number(totals.pending) || 0} job(s) pending`) +
+          : !anyOn
+            ? "Idle — no sensors selected"
+            : data.worker === "idle" && !(totals.pending > 0)
+              ? "Queue empty — waiting for gaps"
+              : `Worker ${escapeHtml(data.worker || "idle")} · ${Number(totals.pending) || 0} job(s) pending`) +
         `</p>`;
     } else {
       const done = Number(current.samples_done) || 0;
@@ -774,6 +1200,551 @@
 
     renderBackfillJobs(data && data.recent_jobs);
     renderBackfillRecent(data && data.recent);
+  }
+
+  function populateCoverageDevices() {
+    const rows = Array.isArray(devices) ? devices.slice() : [];
+    rows.sort((a, b) =>
+      String(a.name || a.address).localeCompare(String(b.name || b.address), "en")
+    );
+    const opts = ['<option value="">Select a sensor…</option>'].concat(
+      rows.map(
+        (d) =>
+          `<option value="${escapeHtml(d.address)}">${escapeHtml(
+            d.name || d.address
+          )}</option>`
+      )
+    );
+    const html = opts.join("");
+    if (coverageDeviceEl) {
+      const prev = coverageAddress || coverageDeviceEl.value;
+      coverageDeviceEl.innerHTML = html;
+      if (prev && rows.some((d) => d.address === prev)) {
+        coverageDeviceEl.value = prev;
+        coverageAddress = prev;
+      }
+    }
+    if (coverageImportDeviceEl) {
+      const prev = coverageImportDeviceEl.value || coverageAddress;
+      coverageImportDeviceEl.innerHTML = html;
+      if (prev && rows.some((d) => d.address === prev)) {
+        coverageImportDeviceEl.value = prev;
+      }
+    }
+  }
+
+  function formatImportTs(ts) {
+    if (ts == null || !Number.isFinite(Number(ts))) return "—";
+    return new Date(Number(ts) * 1000).toLocaleString("en-GB", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  function formatImportRange(range) {
+    if (!range || range.start == null || range.end == null) return "—";
+    return `${formatImportTs(range.start)} → ${formatImportTs(range.end)}`;
+  }
+
+  function formatImportMinMax(obj, digits, unit) {
+    if (!obj || obj.min == null || obj.max == null) return "—";
+    const a = Number(obj.min).toFixed(digits);
+    const b = Number(obj.max).toFixed(digits);
+    return `${a} – ${b}${unit || ""}`;
+  }
+
+  function dlRows(pairs) {
+    return pairs
+      .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd>`)
+      .join("");
+  }
+
+  function clearCoverageImportRecap() {
+    coverageImportPreview = null;
+    if (coverageImportRecapEl) coverageImportRecapEl.hidden = true;
+    if (coverageImportConfirmBtn) coverageImportConfirmBtn.disabled = true;
+    if (coverageImportBarsEl) coverageImportBarsEl.hidden = true;
+    if (coverageFileBarEl) coverageFileBarEl.innerHTML = "";
+    if (coverageDbBarEl) coverageDbBarEl.innerHTML = "";
+  }
+
+  function renderCoverageBar(container, segments, range) {
+    if (!container) return;
+    container.innerHTML = "";
+    const list = Array.isArray(segments) ? segments : [];
+    const t0 = range && range.start != null ? Number(range.start) : null;
+    const t1 = range && range.end != null ? Number(range.end) : null;
+    const span =
+      t0 != null && t1 != null && t1 > t0
+        ? t1 - t0
+        : list.reduce((s, seg) => s + Math.max(0, Number(seg.end) - Number(seg.start)), 0);
+    if (!list.length || !(span > 0)) {
+      const empty = document.createElement("div");
+      empty.className = "coverage-seg coverage-seg-empty";
+      empty.style.flex = "1";
+      empty.title = "No data";
+      container.appendChild(empty);
+      return;
+    }
+    for (const seg of list) {
+      const w = Math.max(0, Number(seg.end) - Number(seg.start));
+      const el = document.createElement("div");
+      el.className = `coverage-seg coverage-seg-${seg.status || "missing"}`;
+      el.style.flex = String(Math.max(w / span, 0.0001));
+      const dens = Math.round(Number(seg.density || 0) * 100);
+      el.title =
+        `${seg.status || "?"} · ${dens}% · ` +
+        `${formatImportTs(seg.start)} → ${formatImportTs(seg.end)}`;
+      container.appendChild(el);
+    }
+  }
+
+  function formatCoverageSegmentLabel(seg) {
+    const status = String(seg.status || "?");
+    const label = status.charAt(0).toUpperCase() + status.slice(1);
+    const dens = Math.round(Number(seg.density || 0) * 100);
+    return `${label} · ${dens}% · ${formatImportTs(seg.start)} → ${formatImportTs(seg.end)}`;
+  }
+
+  function renderCoverageSegmentsList(segments) {
+    if (!coverageSegmentsEl) return;
+    const list = Array.isArray(segments) ? segments : [];
+    if (!list.length) {
+      coverageSegmentsEl.innerHTML = "";
+      return;
+    }
+    // Prefer listing gaps and partials; include full only if few segments.
+    const interesting = list.filter((s) => s.status !== "full");
+    const show = interesting.length ? interesting : list;
+    const capped = show.slice(0, 40);
+    coverageSegmentsEl.innerHTML = capped
+      .map(
+        (s) =>
+          `<li class="coverage-seg-item coverage-seg-item-${escapeHtml(
+            s.status || "missing"
+          )}">${escapeHtml(formatCoverageSegmentLabel(s))}</li>`
+      )
+      .join("");
+    if (show.length > capped.length) {
+      coverageSegmentsEl.innerHTML +=
+        `<li class="coverage-seg-item">… ${show.length - capped.length} more</li>`;
+    }
+  }
+
+  function renderCoverageAllList(sensors, range) {
+    if (!coverageAllListEl) return;
+    const rows = Array.isArray(sensors) ? sensors : [];
+    if (!rows.length) {
+      coverageAllListEl.innerHTML =
+        '<li class="coverage-all-empty">No sensors</li>';
+      return;
+    }
+    coverageAllListEl.innerHTML = "";
+    for (const s of rows) {
+      const li = document.createElement("li");
+      li.className = "coverage-all-row";
+      if (s.address === coverageAddress) li.classList.add("active");
+      li.dataset.address = s.address;
+
+      const meta = document.createElement("div");
+      meta.className = "coverage-all-meta";
+      const name = document.createElement("span");
+      name.className = "coverage-all-name";
+      name.textContent = s.name || s.address;
+      const pct = document.createElement("span");
+      pct.className = "coverage-all-pct";
+      pct.textContent = `${Number(s.coverage_pct || 0).toFixed(0)}%`;
+      meta.append(name, pct);
+
+      const bar = document.createElement("div");
+      bar.className = "coverage-bar coverage-bar-thin coverage-all-bar";
+      bar.setAttribute("role", "img");
+      bar.setAttribute(
+        "aria-label",
+        `${s.name || s.address} ${Number(s.coverage_pct || 0)}% covered`
+      );
+      renderCoverageBar(bar, s.segments, range || s.range);
+
+      li.append(meta, bar);
+      li.addEventListener("click", () => {
+        coverageAddress = s.address;
+        persistCoverageState();
+        if (coverageDeviceEl) coverageDeviceEl.value = s.address;
+        if (coverageImportDeviceEl) coverageImportDeviceEl.value = s.address;
+        loadCoverageDetail().catch((err) => console.warn(err));
+        coverageAllListEl
+          .querySelectorAll(".coverage-all-row")
+          .forEach((el) => {
+            el.classList.toggle("active", el.dataset.address === coverageAddress);
+          });
+      });
+      coverageAllListEl.appendChild(li);
+    }
+  }
+
+  async function loadCoverageOverview() {
+    syncCoverageRangeButtons();
+    if (coverageAllSummaryEl) coverageAllSummaryEl.textContent = "Loading…";
+    if (coverageAllListEl) {
+      coverageAllListEl.innerHTML =
+        '<li class="coverage-all-empty">Loading…</li>';
+    }
+    const params = new URLSearchParams();
+    if (coverageHours === "all") {
+      params.set("since_first", "true");
+    } else {
+      params.set("hours", String(coverageHours));
+    }
+    const res = await fetch(`/api/coverage/overview?${params}`);
+    if (!res.ok) throw new Error(`coverage overview HTTP ${res.status}`);
+    const data = await res.json();
+    const sensors = data.sensors || [];
+    const avg =
+      sensors.length > 0
+        ? sensors.reduce((n, s) => n + Number(s.coverage_pct || 0), 0) /
+          sensors.length
+        : 0;
+    if (coverageAllSummaryEl) {
+      coverageAllSummaryEl.textContent =
+        `${sensors.length} sensor(s) · avg ${avg.toFixed(0)}% covered` +
+        ` · window ${formatImportRange(data.range)}` +
+        ` · buckets: ${data.bucket || "day"}`;
+    }
+    renderCoverageAllList(sensors, data.range);
+    return data;
+  }
+
+  async function loadCoverageDetail() {
+    populateCoverageDevices();
+    if (!coverageAddress) {
+      if (coverageSummaryEl) coverageSummaryEl.textContent = "Select a sensor…";
+      if (coverageBarEl) coverageBarEl.innerHTML = "";
+      if (coverageSegmentsEl) coverageSegmentsEl.innerHTML = "";
+      if (coverageStatusEl) coverageStatusEl.textContent = "";
+      return;
+    }
+    if (coverageStatusEl) coverageStatusEl.textContent = "Loading coverage…";
+    if (coverageSummaryEl) coverageSummaryEl.textContent = "Loading…";
+    const params = new URLSearchParams({ address: coverageAddress });
+    if (coverageHours === "all") {
+      params.set("since_first", "true");
+    } else {
+      params.set("hours", String(coverageHours));
+    }
+    const res = await fetch(`/api/coverage?${params}`);
+    if (!res.ok) throw new Error(`coverage HTTP ${res.status}`);
+    const data = await res.json();
+    const counts = data.counts || {};
+    const unit = data.bucket === "hour" ? "hours" : "days";
+    if (coverageSummaryEl) {
+      coverageSummaryEl.textContent =
+        `${data.name || data.address} · ${Number(data.coverage_pct || 0)}% covered` +
+        ` · ${counts.full || 0} full / ${counts.partial || 0} partial / ${counts.missing || 0} missing` +
+        ` segment(s) (${unit})` +
+        ` · ${Number(data.samples || 0)} soft-covered minute(s)`;
+    }
+    renderCoverageBar(coverageBarEl, data.segments, data.range);
+    renderCoverageSegmentsList(data.segments);
+    if (coverageStatusEl) {
+      const src = data.sources || {};
+      const srcTxt = Object.keys(src).length
+        ? Object.entries(src)
+            .map(([k, n]) => `${k}: ${n}`)
+            .join(", ")
+        : "—";
+      coverageStatusEl.textContent = `Sources · ${srcTxt}`;
+    }
+  }
+
+  async function loadCoverage() {
+    populateCoverageDevices();
+    syncCoverageRangeButtons();
+    try {
+      await loadCoverageOverview();
+      await loadCoverageDetail();
+      coverageLoaded = true;
+    } catch (err) {
+      console.warn(err);
+      if (coverageAllSummaryEl) {
+        coverageAllSummaryEl.textContent = `Error: ${err.message}`;
+      }
+      if (coverageSummaryEl) coverageSummaryEl.textContent = `Error: ${err.message}`;
+      if (coverageStatusEl) coverageStatusEl.textContent = "";
+    }
+  }
+
+  function syncCoverageRangeButtons() {
+    coverageRangeButtons.forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.covHours === String(coverageHours));
+    });
+  }
+
+  function persistCoverageState() {
+    localStorage.setItem("govee-charts.coverageAddress", coverageAddress || "");
+    localStorage.setItem("govee-charts.coverageHours", String(coverageHours));
+  }
+
+  function renderBackfillImportPreview(preview) {
+    coverageImportPreview = preview;
+    if (!coverageImportRecapEl) return;
+    const file = preview.file || {};
+    const existing = preview.existing || {};
+    const compare = preview.compare || {};
+    const fileNames = (preview.files || []).join(", ") || "—";
+    const fileCount = Number((file && file.file_count) || (preview.files || []).length || 0);
+    if (coverageImportFileStatsEl) {
+      coverageImportFileStatsEl.innerHTML = dlRows([
+        ["Sensor", preview.name || preview.address || "—"],
+        ["CSV files", String(fileCount || 1)],
+        ["Files", fileNames],
+        ["Samples (merged)", String(file.parsed ?? 0)],
+        ["Bad rows", String(file.bad_rows ?? 0)],
+        ["Time span", formatImportRange(file.range)],
+        ["Temperature", formatImportMinMax(file.temp, 1, " °C")],
+        ["Humidity", formatImportMinMax(file.humidity, 1, " %")],
+      ]);
+    }
+    const sources = existing.sources || {};
+    const sourceText = Object.keys(sources).length
+      ? Object.entries(sources)
+          .map(([k, n]) => `${k}: ${n}`)
+          .join(", ")
+      : "—";
+    if (coverageImportExistingStatsEl) {
+      coverageImportExistingStatsEl.innerHTML = dlRows([
+        ["Samples in range", String(existing.samples_in_range ?? 0)],
+        ["Time span", formatImportRange(existing.range)],
+        ["Temperature", formatImportMinMax(existing.temp, 1, " °C")],
+        ["Humidity", formatImportMinMax(existing.humidity, 1, " %")],
+        ["Sources", sourceText],
+      ]);
+    }
+    if (coverageImportCompareStatsEl) {
+      coverageImportCompareStatsEl.innerHTML = dlRows([
+        ["Already present", String(compare.already_present ?? 0)],
+        ["Would insert", String(compare.would_insert ?? 0)],
+        ["DB-only minutes", String(compare.db_only_minutes ?? 0)],
+        ["Overlap", `${Number(compare.overlap_pct ?? 0)} %`],
+      ]);
+    }
+    const memberStats = Array.isArray(preview.file_stats) ? preview.file_stats : [];
+    if (coverageImportMembersWrapEl && coverageImportMembersEl) {
+      if (memberStats.length > 1) {
+        coverageImportMembersWrapEl.hidden = false;
+        coverageImportMembersEl.innerHTML = memberStats
+          .map((m) => {
+            const err = m.error ? ` · error: ${m.error}` : "";
+            const span =
+              m.range && m.range.start != null
+                ? ` · ${formatImportRange(m.range)}`
+                : "";
+            return (
+              `<li><span class="m-name">${escapeHtml(m.name || "—")}</span>` +
+              `<span>${Number(m.parsed) || 0} samples` +
+              (m.bad_rows ? ` · ${Number(m.bad_rows)} bad` : "") +
+              `${escapeHtml(span)}${escapeHtml(err)}</span></li>`
+            );
+          })
+          .join("");
+      } else {
+        coverageImportMembersWrapEl.hidden = true;
+        coverageImportMembersEl.innerHTML = "";
+      }
+    }
+
+    const fileSegs = preview.file_segments || [];
+    const dbSegs = preview.db_segments || [];
+    const fileRange = (preview.file && preview.file.range) || {};
+    const covRange =
+      fileRange.start != null
+        ? { start: fileRange.start, end: Number(fileRange.end) + 60 }
+        : null;
+    if (coverageImportBarsEl && covRange) {
+      coverageImportBarsEl.hidden = false;
+      renderCoverageBar(coverageFileBarEl, fileSegs, covRange);
+      renderCoverageBar(coverageDbBarEl, dbSegs, covRange);
+      const covMeta = preview.coverage || {};
+      const filePct = (covMeta.file && covMeta.file.coverage_pct) || 0;
+      const dbPct = (covMeta.db && covMeta.db.coverage_pct) || 0;
+      if (coverageImportCompareStatsEl) {
+        coverageImportCompareStatsEl.innerHTML += dlRows([
+          ["File coverage", `${filePct} %`],
+          ["DB coverage (exact)", `${dbPct} %`],
+        ]);
+      }
+    } else if (coverageImportBarsEl) {
+      coverageImportBarsEl.hidden = true;
+    }
+
+    coverageImportRecapEl.hidden = false;
+    if (coverageImportConfirmBtn) {
+      coverageImportConfirmBtn.disabled = !(Number(compare.would_insert) > 0);
+    }
+  }
+
+  function foldImportLabel(text) {
+    return String(text || "")
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "");
+  }
+
+  /** True if filename / ZIP member seems to refer to the sensor label. */
+  function filenameMentionsSensor(filename, sensorName) {
+    const nameFold = foldImportLabel(sensorName);
+    if (!nameFold || nameFold.length < 3) return true;
+    const fileFold = foldImportLabel(filename);
+    if (!fileFold) return true;
+    if (fileFold.includes(nameFold)) return true;
+    const tokens = String(sensorName || "")
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 3);
+    if (tokens.length >= 2) {
+      return tokens.every((t) => fileFold.includes(t));
+    }
+    return false;
+  }
+
+  function importFilenameWarning(file, sensorName, memberNames) {
+    const names = [];
+    if (file && file.name) names.push(file.name);
+    for (const n of memberNames || []) {
+      if (n) names.push(String(n));
+    }
+    if (!names.length || !sensorName) return "";
+    if (names.some((n) => filenameMentionsSensor(n, sensorName))) return "";
+    return (
+      `Warning: file name does not mention “${sensorName}” — confirm the selected sensor.`
+    );
+  }
+
+  async function analyzeCoverageImport() {
+    if (!coverageImportDeviceEl || !coverageImportFileEl) return;
+    const address = coverageImportDeviceEl.value;
+    const file =
+      coverageImportFile ||
+      (coverageImportFileEl.files && coverageImportFileEl.files[0]);
+    if (!address) {
+      if (coverageImportStatusEl) {
+        coverageImportStatusEl.textContent = "Select a sensor first.";
+      }
+      return;
+    }
+    if (!file) {
+      if (coverageImportStatusEl) {
+        coverageImportStatusEl.textContent = "Choose a CSV or ZIP file.";
+      }
+      return;
+    }
+    coverageImportFile = file;
+    clearCoverageImportRecap();
+    if (coverageImportStatusEl) coverageImportStatusEl.textContent = "Analyzing…";
+    if (coverageImportAnalyzeBtn) coverageImportAnalyzeBtn.disabled = true;
+    try {
+      const body = new FormData();
+      body.append("address", address);
+      body.append("file", file, file.name);
+      const res = await fetch("/api/backfill/import/preview", {
+        method: "POST",
+        body,
+      });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try {
+          const err = await res.json();
+          if (err && err.detail) detail = err.detail;
+        } catch (_) {
+          /* ignore */
+        }
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
+      const preview = await res.json();
+      renderBackfillImportPreview(preview);
+      const would = Number((preview.compare || {}).would_insert) || 0;
+      const sensorName =
+        preview.name ||
+        (coverageImportDeviceEl.selectedOptions[0] &&
+          coverageImportDeviceEl.selectedOptions[0].textContent) ||
+        "";
+      const warn = importFilenameWarning(
+        file,
+        sensorName,
+        preview.files || (preview.file_stats || []).map((m) => m.name)
+      );
+      if (coverageImportStatusEl) {
+        const base = would
+          ? `Ready to import ${would} new minute(s).`
+          : "Nothing new to import (full overlap or empty file).";
+        coverageImportStatusEl.textContent = warn ? `${warn} ${base}` : base;
+        coverageImportStatusEl.classList.toggle("import-name-warn", Boolean(warn));
+      }
+    } catch (err) {
+      console.warn(err);
+      if (coverageImportStatusEl) {
+        coverageImportStatusEl.textContent = `Analyze failed: ${err.message}`;
+        coverageImportStatusEl.classList.remove("import-name-warn");
+      }
+    } finally {
+      if (coverageImportAnalyzeBtn) coverageImportAnalyzeBtn.disabled = false;
+    }
+  }
+
+  async function confirmCoverageImport() {
+    if (!coverageImportPreview || !coverageImportFile) return;
+    const address =
+      (coverageImportDeviceEl && coverageImportDeviceEl.value) ||
+      coverageImportPreview.address;
+    if (!address) return;
+    if (coverageImportConfirmBtn) coverageImportConfirmBtn.disabled = true;
+    if (coverageImportStatusEl) coverageImportStatusEl.textContent = "Importing…";
+    try {
+      const body = new FormData();
+      body.append("address", address);
+      body.append("file", coverageImportFile, coverageImportFile.name);
+      const res = await fetch("/api/backfill/import", { method: "POST", body });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try {
+          const err = await res.json();
+          if (err && err.detail) detail = err.detail;
+        } catch (_) {
+          /* ignore */
+        }
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
+      const result = await res.json();
+      clearCoverageImportRecap();
+      coverageImportFile = null;
+      if (coverageImportFileEl) coverageImportFileEl.value = "";
+      if (coverageImportStatusEl) {
+        coverageImportStatusEl.textContent =
+          `Imported ${result.inserted || 0} sample(s)` +
+          (result.skipped ? ` · skipped ${result.skipped} duplicate(s)` : "") +
+          (result.bad_rows ? ` · ${result.bad_rows} bad row(s)` : "") +
+          `.`;
+      }
+      await loadDevices();
+      if (currentView === "coverage") {
+        await loadCoverage();
+      }
+    } catch (err) {
+      console.warn(err);
+      if (coverageImportStatusEl) {
+        coverageImportStatusEl.textContent = `Import failed: ${err.message}`;
+      }
+      if (coverageImportConfirmBtn && coverageImportPreview) {
+        const would = Number((coverageImportPreview.compare || {}).would_insert) || 0;
+        coverageImportConfirmBtn.disabled = !(would > 0);
+      }
+    }
   }
 
   async function loadBackfill() {
@@ -1015,6 +1986,7 @@
         doorsStatus.textContent =
           "Waiting for MQTT contact sensors (enable [doors] in config)…";
       }
+      if (doorLogEl) doorLogEl.hidden = true;
       return;
     }
     if (doorsStatus) {
@@ -1025,11 +1997,24 @@
     const rooms = taxonomyData.rooms || [];
     for (const sensor of doorSensors) {
       const tr = document.createElement("tr");
+      if (selectedDoorId && sensor.sensor_id === selectedDoorId) {
+        tr.classList.add("is-selected");
+      }
       const nameTd = document.createElement("td");
-      nameTd.innerHTML = `
+      const nameBtn = document.createElement("button");
+      nameBtn.type = "button";
+      nameBtn.className = "door-sensor-link";
+      if (selectedDoorId && sensor.sensor_id === selectedDoorId) {
+        nameBtn.classList.add("is-active");
+      }
+      nameBtn.innerHTML = `
         <span class="overview-name">${escapeHtml(sensor.name || sensor.sensor_id)}</span>
         <span class="overview-meta">${escapeHtml(sensor.sensor_id)}</span>
       `;
+      nameBtn.addEventListener("click", () => {
+        loadDoorLog(sensor).catch((err) => console.warn(err));
+      });
+      nameTd.appendChild(nameBtn);
 
       const stateTd = document.createElement("td");
       const st = sensor.state || "—";
@@ -1048,6 +2033,64 @@
 
       tr.append(nameTd, stateTd, kindTd, roomTd, timeTd);
       doorsBody.appendChild(tr);
+    }
+  }
+
+  function hideDoorLog() {
+    selectedDoorId = null;
+    if (doorLogEl) doorLogEl.hidden = true;
+    if (doorLogBodyEl) {
+      doorLogBodyEl.innerHTML =
+        '<tr><td colspan="3" class="overview-empty">Select a contact…</td></tr>';
+    }
+    updateDoorsTable();
+  }
+
+  async function loadDoorLog(sensor, hours = 168) {
+    if (!doorLogEl || !doorLogBodyEl) return;
+    selectedDoorId = sensor.sensor_id;
+    updateDoorsTable();
+    doorLogEl.hidden = false;
+    if (doorLogTitleEl) {
+      doorLogTitleEl.textContent = `${sensor.name || sensor.sensor_id} — open / close log`;
+    }
+    if (doorLogHintEl) {
+      doorLogHintEl.textContent = `Last ${hours >= 24 ? `${hours / 24} days` : `${hours} h`}`;
+    }
+    doorLogBodyEl.innerHTML =
+      '<tr><td colspan="3" class="overview-empty">Loading…</td></tr>';
+    try {
+      const res = await fetch(
+        `/api/doors/history?hours=${encodeURIComponent(hours)}` +
+          `&sensor_id=${encodeURIComponent(sensor.sensor_id)}`
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const events = Array.isArray(data.events) ? data.events.slice() : [];
+      // Newest first for a log view.
+      events.reverse();
+      if (!events.length) {
+        doorLogBodyEl.innerHTML =
+          '<tr><td colspan="3" class="overview-empty">No open/close events in this period</td></tr>';
+        return;
+      }
+      doorLogBodyEl.innerHTML = events
+        .map((ev) => {
+          const st = String(ev.state || "—");
+          return (
+            `<tr>` +
+            `<td>${escapeHtml(fmtTime(ev.ts))}</td>` +
+            `<td><span class="door-state door-state-${escapeHtml(st)}">${escapeHtml(st)}</span></td>` +
+            `<td class="overview-meta">${escapeHtml(ev.source || "—")}</td>` +
+            `</tr>`
+          );
+        })
+        .join("");
+    } catch (err) {
+      doorLogBodyEl.innerHTML =
+        `<tr><td colspan="3" class="overview-empty">Log unavailable: ${escapeHtml(
+          err.message
+        )}</td></tr>`;
     }
   }
 
@@ -1125,7 +2168,7 @@
   }
 
   function setView(view) {
-    if (!["overview", "compare", "facades", "backfill"].includes(view)) {
+    if (!["overview", "compare", "facades", "coverage", "backfill"].includes(view)) {
       view = "overview";
     }
     currentView = view;
@@ -1133,6 +2176,7 @@
     if (viewOverview) viewOverview.hidden = view !== "overview";
     if (viewCompare) viewCompare.hidden = view !== "compare";
     if (viewFacades) viewFacades.hidden = view !== "facades";
+    if (viewCoverage) viewCoverage.hidden = view !== "coverage";
     if (viewBackfill) viewBackfill.hidden = view !== "backfill";
     viewButtons.forEach((btn) => {
       const active = btn.dataset.view === view;
@@ -1156,6 +2200,8 @@
       if (facadeChartInstances.length) {
         facadeChartInstances.forEach((c) => c.resize());
       }
+    } else if (view === "coverage") {
+      loadCoverage().catch((err) => console.warn(err));
     } else if (view === "backfill") {
       loadBackfill().catch((err) => console.warn(err));
     }
@@ -2536,7 +3582,7 @@
     await requestBrowserGeo(false);
     const params = new URLSearchParams({
       // Forecast API caps at 168 h; chart history may be longer.
-      hours: String(Math.min(Number(hours) || 24, 168)),
+      hours: String(Math.min(rangeSpanHours(), 168)),
     });
     for (const address of addresses) {
       params.append("address", address);
@@ -2550,19 +3596,38 @@
     return res.json();
   }
 
+  function formatBytes(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v) || v < 0) return "—";
+    if (v < 1024) return `${Math.round(v)} B`;
+    if (v < 1024 * 1024) return `${(v / 1024).toFixed(v < 10 * 1024 ? 1 : 0)} KB`;
+    if (v < 1024 * 1024 * 1024) {
+      return `${(v / (1024 * 1024)).toFixed(v < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+    }
+    return `${(v / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
+  function formatSampleCount(n) {
+    const v = Number(n) || 0;
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 10_000) return `${Math.round(v / 1000)}k`;
+    if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
+    return String(v);
+  }
+
   function updateOverview() {
     overviewBody.innerHTML = "";
     updateSortButtons();
     const visible = filteredDevices();
     if (!devices.length) {
       overviewBody.innerHTML =
-        '<tr><td colspan="10" class="overview-empty">No devices detected</td></tr>';
+        '<tr><td colspan="11" class="overview-empty">No devices detected</td></tr>';
       overviewStatus.textContent = "Waiting for BLE devices…";
       return;
     }
     if (!visible.length) {
       overviewBody.innerHTML =
-        '<tr><td colspan="10" class="overview-empty">No sensors for these filters</td></tr>';
+        '<tr><td colspan="11" class="overview-empty">No sensors for these filters</td></tr>';
       overviewStatus.textContent = `0 / ${devices.length} sensor(s) · filters active`;
       return;
     }
@@ -2614,6 +3679,22 @@
       sourceTd.className = "overview-source";
       sourceTd.innerHTML = sourceHtml(source);
 
+      const storeTd = document.createElement("td");
+      storeTd.className = "num";
+      const samples = Number(device.sample_count) || 0;
+      const bytes =
+        device.storage_bytes_est != null
+          ? Number(device.storage_bytes_est)
+          : samples * 120;
+      storeTd.title = `${samples.toLocaleString("en-GB")} samples · ~${formatBytes(
+        bytes
+      )} (est.)`;
+      storeTd.innerHTML =
+        samples > 0
+          ? `<span>${escapeHtml(formatSampleCount(samples))}</span>` +
+            `<span class="overview-meta"> · ${escapeHtml(formatBytes(bytes))}</span>`
+          : "—";
+
       const timeTd = document.createElement("td");
       timeTd.textContent = fmtTime(device.last_reading_ts || device.last_seen);
 
@@ -2627,6 +3708,7 @@
         battTd,
         rssiTd,
         sourceTd,
+        storeTd,
         timeTd
       );
       tr.addEventListener("click", (ev) => {
@@ -2650,6 +3732,22 @@
       temps.length >= 2
         ? ` · Δ ${(Math.max(...temps) - Math.min(...temps)).toFixed(1)} °C`
         : "";
+    const totalSamples = ranked.reduce(
+      (acc, d) => acc + (Number(d.sample_count) || 0),
+      0
+    );
+    const totalBytes = ranked.reduce(
+      (acc, d) =>
+        acc +
+        (d.storage_bytes_est != null
+          ? Number(d.storage_bytes_est)
+          : (Number(d.sample_count) || 0) * 120),
+      0
+    );
+    const storeNote =
+      totalSamples > 0
+        ? ` · ~${formatSampleCount(totalSamples)} samples / ${formatBytes(totalBytes)}`
+        : "";
     const activeCats = ["zone", "height", "room"]
       .filter((k) => catFilters[k] !== "all")
       .map((k) => catFilters[k]);
@@ -2661,7 +3759,7 @@
       .join(" · ");
     overviewStatus.textContent =
       `${ranked.length}${ranked.length === devices.length ? "" : ` / ${devices.length}`} sensor(s)` +
-      `${filterNote ? ` · ${filterNote}` : ""}${span} · updated ${new Date().toLocaleTimeString("en-GB")}`;
+      `${filterNote ? ` · ${filterNote}` : ""}${span}${storeNote} · updated ${new Date().toLocaleTimeString("en-GB")}`;
   }
 
   function updateCurrent() {
@@ -2755,8 +3853,9 @@
     }
     const visibleAddrs = new Set(visible.map((d) => d.address));
     const selectedVisible = [...selected].filter((a) => visibleAddrs.has(a));
+    // Keep selection of filtered-out devices; only auto-pick among visible ones.
     if (!selectedVisible.length) {
-      selected = new Set([visible[0].address]);
+      selected.add(visible[0].address);
     }
 
     for (const d of visible) {
@@ -2806,15 +3905,23 @@
     }
     syncModelFilterButtons();
     fillDeviceList();
+    populateCoverageDevices();
     updateOverview();
     updateCurrent();
     await loadDoors();
   }
 
   async function fetchHistory(address) {
-    const res = await fetch(
-      `/api/history?address=${encodeURIComponent(address)}&hours=${hours}`
-    );
+    const params = new URLSearchParams({
+      address,
+    });
+    if (isCustomRange()) {
+      params.set("since", String(customSince));
+      params.set("until", String(customUntil));
+    } else {
+      params.set("hours", String(hours));
+    }
+    const res = await fetch(`/api/history?${params}`);
     if (!res.ok) throw new Error(`history HTTP ${res.status}`);
     return res.json();
   }
@@ -2839,15 +3946,16 @@
       return;
     }
 
+    const overlayHours = rangeOverlayHours();
     const hvacPromise = showHvac
       ? Promise.all([
           fetch(`/api/hvac`).then(async (res) =>
             res.ok ? res.json() : { climate: null, power: null, active: false }
           ),
-          fetch(`/api/hvac/history?hours=${hours}`).then(async (res) =>
+          fetch(`/api/hvac/history?hours=${overlayHours}`).then(async (res) =>
             res.ok ? res.json() : { events: [], bands: [] }
           ),
-          fetch(`/api/power/history?hours=${hours}`).then(async (res) =>
+          fetch(`/api/power/history?hours=${overlayHours}`).then(async (res) =>
             res.ok ? res.json() : { points: [] }
           ),
         ]).catch((err) => {
@@ -3057,11 +4165,12 @@
 
     // Lock the X axis to the selected window so empty history is visible
     // (otherwise Chart.js zooms to the first available sample).
-    let xMax = Date.now();
-    const xMin = xMax - Number(hours) * 3600 * 1000;
-    for (const ds of tempDatasets) {
-      for (const p of ds.data || []) {
-        if (p && Number(p.x) > xMax) xMax = Number(p.x);
+    let { xMin, xMax } = rangeAxisBounds();
+    if (!isCustomRange()) {
+      for (const ds of tempDatasets) {
+        for (const p of ds.data || []) {
+          if (p && Number(p.x) > xMax) xMax = Number(p.x);
+        }
       }
     }
     for (const chart of [tempChart, humChart, dewChart]) {
@@ -3147,7 +4256,7 @@
       extra = " · forecast off (allow location or set [weather] place)";
     }
     statusEl.textContent =
-      `${names} · ${totalPoints} point(s) · window ${hours} h${extra}${windowExtra}${hvacExtra} · updated ` +
+      `${names} · ${totalPoints} point(s) · ${formatRangeLabel()}${extra}${windowExtra}${hvacExtra} · updated ` +
       new Date().toLocaleTimeString("en-GB");
   }
 
@@ -3160,6 +4269,8 @@
       } else if (currentView === "facades") {
         await loadFacades();
         await updateWindowBanner(null);
+      } else if (currentView === "coverage") {
+        await loadCoverage();
       } else if (currentView === "backfill") {
         await loadBackfill();
       } else {
@@ -3198,7 +4309,9 @@
 
   selectAllBtn.addEventListener("click", () => {
     const visible = filteredDevices();
-    selected = new Set(visible.map((d) => d.address));
+    for (const d of visible) {
+      selected.add(d.address);
+    }
     for (const input of deviceList.querySelectorAll('input[type="checkbox"]')) {
       input.checked = true;
     }
@@ -3210,7 +4323,8 @@
   });
 
   selectNoneBtn.addEventListener("click", () => {
-    selected = new Set();
+    const visibleAddrs = new Set(filteredDevices().map((d) => d.address));
+    selected = new Set([...selected].filter((a) => !visibleAddrs.has(a)));
     for (const input of deviceList.querySelectorAll('input[type="checkbox"]')) {
       input.checked = false;
     }
@@ -3238,14 +4352,57 @@
 
   rangeButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
-      rangeButtons.forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      hours = Number(btn.dataset.hours);
+      setRelativeRange(btn.dataset.hours);
       loadHistory().catch((err) => {
         statusEl.textContent = `Error: ${err.message}`;
       });
     });
   });
+
+  if (rangeSelectEl) {
+    rangeSelectEl.addEventListener("change", () => {
+      const val = rangeSelectEl.value;
+      if (!val) {
+        setRelativeRange(24);
+        loadHistory().catch((err) => {
+          statusEl.textContent = `Error: ${err.message}`;
+        });
+        return;
+      }
+      if (val === "custom") {
+        const until = Date.now() / 1000;
+        const since = until - (Number(hours) || 24) * 3600;
+        if (rangeCustomEl) rangeCustomEl.hidden = false;
+        if (rangeSinceEl) rangeSinceEl.value = toDatetimeLocalValue(since);
+        if (rangeUntilEl) rangeUntilEl.value = toDatetimeLocalValue(until);
+        rangeButtons.forEach((b) => b.classList.remove("active"));
+        rangeSelectEl.classList.add("active");
+        return;
+      }
+      setRelativeRange(Number(val), { fromSelect: true });
+      loadHistory().catch((err) => {
+        statusEl.textContent = `Error: ${err.message}`;
+      });
+    });
+  }
+
+  if (rangeApplyBtn) {
+    rangeApplyBtn.addEventListener("click", () => {
+      const since = fromDatetimeLocalValue(rangeSinceEl && rangeSinceEl.value);
+      const until = fromDatetimeLocalValue(rangeUntilEl && rangeUntilEl.value);
+      if (since == null || until == null) {
+        statusEl.textContent = "Choose valid From / To dates";
+        return;
+      }
+      if (!setCustomRange(since, until)) {
+        statusEl.textContent = "Custom range must be between a minute and 3 years";
+        return;
+      }
+      loadHistory().catch((err) => {
+        statusEl.textContent = `Error: ${err.message}`;
+      });
+    });
+  }
 
   if (showForecastEl) {
     showForecastEl.checked = showForecast;
@@ -3447,6 +4604,117 @@
     });
   }
 
+  if (backfillSensorListEl) {
+    backfillSensorListEl.addEventListener("change", (ev) => {
+      const input = ev.target;
+      if (!(input instanceof HTMLInputElement) || input.type !== "checkbox") {
+        return;
+      }
+      const address = input.dataset.address;
+      if (!address) return;
+      setBackfillDevice(address, input.checked).catch((err) => {
+        console.warn(err);
+        input.checked = !input.checked;
+      });
+    });
+  }
+  if (backfillSelectAllBtn) {
+    backfillSelectAllBtn.addEventListener("click", () => {
+      setBackfillDevicesBulk(true).catch((err) => console.warn(err));
+    });
+  }
+  if (backfillClearAllBtn) {
+    backfillClearAllBtn.addEventListener("click", () => {
+      setBackfillDevicesBulk(false).catch((err) => console.warn(err));
+    });
+  }
+
+  if (coverageImportFileEl) {
+    coverageImportFileEl.addEventListener("change", () => {
+      coverageImportFile =
+        coverageImportFileEl.files && coverageImportFileEl.files[0]
+          ? coverageImportFileEl.files[0]
+          : null;
+      clearCoverageImportRecap();
+      if (coverageImportStatusEl) {
+        coverageImportStatusEl.textContent = "";
+        coverageImportStatusEl.classList.remove("import-name-warn");
+      }
+      if (coverageImportFile) {
+        analyzeCoverageImport().catch((err) => console.warn(err));
+      }
+    });
+  }
+  if (coverageImportDeviceEl) {
+    coverageImportDeviceEl.addEventListener("change", () => {
+      clearCoverageImportRecap();
+      if (coverageImportStatusEl) {
+        coverageImportStatusEl.textContent = "";
+        coverageImportStatusEl.classList.remove("import-name-warn");
+      }
+      const addr = coverageImportDeviceEl.value;
+      if (addr && coverageDeviceEl) {
+        coverageAddress = addr;
+        coverageDeviceEl.value = addr;
+        persistCoverageState();
+        loadCoverage().catch((err) => console.warn(err));
+      }
+      if (addr && coverageImportFile) {
+        analyzeCoverageImport().catch((err) => console.warn(err));
+      }
+    });
+  }
+  if (coverageImportAnalyzeBtn) {
+    coverageImportAnalyzeBtn.addEventListener("click", () => {
+      analyzeCoverageImport().catch((err) => console.warn(err));
+    });
+  }
+  if (coverageImportCancelBtn) {
+    coverageImportCancelBtn.addEventListener("click", () => {
+      clearCoverageImportRecap();
+      if (coverageImportStatusEl) {
+        coverageImportStatusEl.textContent = "";
+        coverageImportStatusEl.classList.remove("import-name-warn");
+      }
+    });
+  }
+  if (coverageImportConfirmBtn) {
+    coverageImportConfirmBtn.addEventListener("click", () => {
+      confirmCoverageImport().catch((err) => console.warn(err));
+    });
+  }
+
+  if (coverageDeviceEl) {
+    coverageDeviceEl.addEventListener("change", () => {
+      coverageAddress = coverageDeviceEl.value || "";
+      persistCoverageState();
+      if (coverageImportDeviceEl && coverageAddress) {
+        coverageImportDeviceEl.value = coverageAddress;
+      }
+      loadCoverageDetail().catch((err) => console.warn(err));
+      if (coverageAllListEl) {
+        coverageAllListEl.querySelectorAll(".coverage-all-row").forEach((el) => {
+          el.classList.toggle("active", el.dataset.address === coverageAddress);
+        });
+      }
+    });
+  }
+
+  coverageRangeButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      coverageHours = btn.dataset.covHours || "2160";
+      persistCoverageState();
+      syncCoverageRangeButtons();
+      loadCoverage().catch((err) => console.warn(err));
+    });
+  });
+
+  if (doorLogCloseBtn) {
+    doorLogCloseBtn.addEventListener("click", () => {
+      hideDoorLog();
+    });
+  }
+
   // Collapsible panels — default collapsed; remember open state
   if (foldCurrentEl) {
     foldCurrentEl.open = localStorage.getItem(FOLD_CURRENT_KEY) === "1";
@@ -3461,6 +4729,14 @@
     });
   }
 
+  const savedCovHours = localStorage.getItem("govee-charts.coverageHours");
+  if (savedCovHours && ["336", "720", "2160", "8760", "all"].includes(savedCovHours)) {
+    coverageHours = savedCovHours;
+  }
+  syncCoverageRangeButtons();
+
+  loadPersistedRange();
+  syncRangeControls();
   setView(currentView);
   refresh();
   setInterval(refresh, 30000);
