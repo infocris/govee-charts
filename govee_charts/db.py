@@ -103,6 +103,18 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_power_samples_entity_ts
                 ON power_samples(entity_id, ts);
 
+            CREATE TABLE IF NOT EXISTS energy_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_id TEXT NOT NULL,
+                value_kwh REAL NOT NULL,
+                ts REAL NOT NULL,
+                source TEXT,
+                UNIQUE(entity_id, ts)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_energy_samples_entity_ts
+                ON energy_samples(entity_id, ts);
+
             CREATE TABLE IF NOT EXISTS backfill_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 address TEXT NOT NULL,
@@ -1196,6 +1208,130 @@ class Database:
         await self.db.commit()
         return cursor.rowcount
 
+    async def insert_energy_sample(
+        self,
+        *,
+        entity_id: str,
+        value_kwh: float,
+        ts: float | None = None,
+        source: str = "ha",
+    ) -> bool:
+        """Record an energy meter reading in kWh. Returns True if inserted."""
+        entity_id = str(entity_id).strip()
+        if not entity_id:
+            return False
+        when = float(ts if ts is not None else time.time())
+        cursor = await self.db.execute(
+            """
+            INSERT OR IGNORE INTO energy_samples (entity_id, value_kwh, ts, source)
+            VALUES (?, ?, ?, ?)
+            """,
+            (entity_id, float(value_kwh), when, source),
+        )
+        await self.db.commit()
+        return cursor.rowcount > 0
+
+    async def latest_energy(
+        self, entity_id: str | None = None
+    ) -> dict[str, Any] | None:
+        if entity_id:
+            cursor = await self.db.execute(
+                """
+                SELECT entity_id, value_kwh, ts, source
+                FROM energy_samples
+                WHERE entity_id = ?
+                ORDER BY ts DESC
+                LIMIT 1
+                """,
+                (entity_id,),
+            )
+        else:
+            cursor = await self.db.execute(
+                """
+                SELECT entity_id, value_kwh, ts, source
+                FROM energy_samples
+                ORDER BY ts DESC
+                LIMIT 1
+                """
+            )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def energy_history(
+        self,
+        *,
+        hours: float = 168.0,
+        entity_id: str | None = None,
+        since: float | None = None,
+    ) -> list[dict[str, Any]]:
+        start = float(since) if since is not None else time.time() - hours * 3600.0
+        if entity_id:
+            cursor = await self.db.execute(
+                """
+                SELECT entity_id, value_kwh, ts, source
+                FROM energy_samples
+                WHERE entity_id = ? AND ts >= ?
+                ORDER BY ts ASC
+                """,
+                (entity_id, start),
+            )
+        else:
+            cursor = await self.db.execute(
+                """
+                SELECT entity_id, value_kwh, ts, source
+                FROM energy_samples
+                WHERE ts >= ?
+                ORDER BY ts ASC
+                """,
+                (start,),
+            )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def energy_at_or_before(
+        self, entity_id: str, ts: float
+    ) -> dict[str, Any] | None:
+        """Latest sample at or before ts (for cumulative meter deltas)."""
+        cursor = await self.db.execute(
+            """
+            SELECT entity_id, value_kwh, ts, source
+            FROM energy_samples
+            WHERE entity_id = ? AND ts <= ?
+            ORDER BY ts DESC
+            LIMIT 1
+            """,
+            (entity_id, float(ts)),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def energy_at_or_after(
+        self, entity_id: str, ts: float
+    ) -> dict[str, Any] | None:
+        cursor = await self.db.execute(
+            """
+            SELECT entity_id, value_kwh, ts, source
+            FROM energy_samples
+            WHERE entity_id = ? AND ts >= ?
+            ORDER BY ts ASC
+            LIMIT 1
+            """,
+            (entity_id, float(ts)),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def prune_energy_samples(self, retention_days: float) -> int:
+        if retention_days <= 0:
+            return 0
+        cutoff = time.time() - retention_days * 86400.0
+        cursor = await self.db.execute(
+            "DELETE FROM energy_samples WHERE ts < ?",
+            (cutoff,),
+        )
+        await self.db.commit()
+        return cursor.rowcount
+
     async def last_battery(self, address: str) -> int | None:
         cursor = await self.db.execute(
             """
@@ -1578,36 +1714,12 @@ class Database:
             ),
         )
         if cursor.rowcount <= 0:
-            # Re-open failed/deferred jobs for the same window.
-            cursor = await self.db.execute(
-                """
-                UPDATE backfill_jobs
-                SET status = 'pending',
-                    priority = ?,
-                    samples_done = 0,
-                    samples_expected = ?,
-                    error = NULL,
-                    updated_at = ?
-                WHERE address = ?
-                  AND phase = ?
-                  AND window_start = ?
-                  AND window_end = ?
-                  AND status IN ('failed', 'deferred')
-                """,
-                (
-                    int(priority),
-                    int(samples_expected),
-                    now,
-                    address,
-                    phase,
-                    float(window_start),
-                    float(window_end),
-                ),
-            )
-            if cursor.rowcount <= 0:
-                if commit:
-                    await self.db.commit()
-                return None
+            # Row already exists (pending/running/deferred/failed/done). Do not
+            # reopen failed/deferred here — the worker promotes deferred after
+            # backoff, and failed/done windows stay closed.
+            if commit:
+                await self.db.commit()
+            return None
         if commit:
             await self.db.commit()
         cursor = await self.db.execute(

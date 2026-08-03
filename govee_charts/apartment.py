@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import math
@@ -53,6 +54,426 @@ ORIENTATION_DEG = {
 }
 # Below this effective wind (m/s), natural draft is weak.
 WIND_MIN_MS = 1.5
+
+# Infer air coupling between rooms from |ΔT_max| when no door contact exists.
+# Close daily maxima ⇒ rooms likely share air (door open / large opening).
+TEMP_COUPLE_OPEN_C = 0.8
+TEMP_COUPLE_CLOSED_C = 2.0
+
+
+def infer_temp_coupling(
+    temp_max_a: float | None,
+    temp_max_b: float | None,
+    *,
+    open_c: float = TEMP_COUPLE_OPEN_C,
+    closed_c: float = TEMP_COUPLE_CLOSED_C,
+) -> dict[str, Any]:
+    """
+    Classify inter-room communication from how close their max temperatures are.
+
+    Returns opening in {open, closed, unknown}, plus delta_c when computable.
+    """
+    if temp_max_a is None or temp_max_b is None:
+        return {
+            "opening": "unknown",
+            "delta_c": None,
+            "source": "temp_coupling",
+        }
+    delta = abs(float(temp_max_a) - float(temp_max_b))
+    if delta <= float(open_c):
+        opening = "open"
+    elif delta >= float(closed_c):
+        opening = "closed"
+    else:
+        opening = "unknown"
+    return {
+        "opening": opening,
+        "delta_c": round(delta, 2),
+        "source": "temp_coupling",
+        "open_threshold_c": float(open_c),
+        "closed_threshold_c": float(closed_c),
+    }
+
+
+def _room_live_temp(room: dict[str, Any]) -> float | None:
+    for key in ("temp_c", "temp_max", "temp_min"):
+        val = room.get(key)
+        if val is None:
+            continue
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _facade_sep_deg(a: list[str] | tuple[str, ...], b: list[str] | tuple[str, ...]) -> float:
+    best = 0.0
+    for ra in a or ():
+        da = ORIENTATION_DEG.get(str(ra).strip().lower())
+        if da is None:
+            continue
+        for rb in b or ():
+            db = ORIENTATION_DEG.get(str(rb).strip().lower())
+            if db is None:
+                continue
+            best = max(best, abs(_angle_diff_deg(da, db)))
+    return best
+
+
+def suggest_cooling_airflow(
+    rooms: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    outdoor_temp_c: float | None = None,
+    wind_speed_ms: float | None = None,
+    wind_direction_deg: float | None = None,
+) -> dict[str, Any]:
+    """
+    Suggest a through-flow path to cool the apartment (inlet → rooms → outlet).
+
+    Prefers opposing façades, windward inlet / leeward outlet when wind is known,
+    otherwise hottest façade as chimney outlet and coolest as inlet. Edges marked
+    closed are still allowed on the path but listed as doors to open.
+    """
+    by_id = {str(r.get("id")): r for r in rooms if r.get("id")}
+    indoor_temps = [
+        t for t in (_room_live_temp(r) for r in by_id.values()) if t is not None
+    ]
+    indoor_avg = (
+        round(sum(indoor_temps) / len(indoor_temps), 2) if indoor_temps else None
+    )
+    outdoor = None
+    if outdoor_temp_c is not None:
+        try:
+            outdoor = float(outdoor_temp_c)
+        except (TypeError, ValueError):
+            outdoor = None
+
+    if outdoor is not None and indoor_avg is not None and outdoor >= indoor_avg - 0.3:
+        return {
+            "mode": "hold",
+            "outdoor_temp_c": round(outdoor, 2),
+            "indoor_temp_c": indoor_avg,
+            "delta_c": round(outdoor - indoor_avg, 2),
+            "inlet": None,
+            "outlet": None,
+            "path": [],
+            "flows": [],
+            "actions": [
+                "Outdoor air is not cooler than indoors — keep windows closed "
+                "or use mechanical cooling; through-draft would warm the flat."
+            ],
+        }
+
+    facade_rooms = [
+        r
+        for r in by_id.values()
+        if list(r.get("exterior") or [])
+    ]
+    if len(facade_rooms) < 1:
+        return {
+            "mode": "unknown",
+            "outdoor_temp_c": outdoor,
+            "indoor_temp_c": indoor_avg,
+            "delta_c": (
+                round(outdoor - indoor_avg, 2)
+                if outdoor is not None and indoor_avg is not None
+                else None
+            ),
+            "inlet": None,
+            "outlet": None,
+            "path": [],
+            "flows": [],
+            "actions": ["No exterior façades configured — cannot suggest draft."],
+        }
+
+    # Graph of passable / openable links (not solid walls).
+    adj: dict[str, list[tuple[str, dict[str, Any]]]] = {rid: [] for rid in by_id}
+    for edge in edges:
+        kind = str(edge.get("kind") or "door")
+        if kind == "wall":
+            continue
+        a = str(edge.get("a") or "")
+        b = str(edge.get("b") or "")
+        if a not in adj or b not in adj:
+            continue
+        adj[a].append((b, edge))
+        adj[b].append((a, edge))
+
+    def path_cost(edge: dict[str, Any]) -> float:
+        opening = str(edge.get("opening") or "unknown")
+        kind = str(edge.get("kind") or "door")
+        if opening == "open":
+            base = 1.0
+        elif kind == "wall_partial":
+            base = 1.2
+        elif opening == "unknown":
+            base = 1.6
+        elif opening == "closed":
+            base = 3.5
+        else:
+            base = 2.0
+        return base
+
+    def shortest_path(src: str, dst: str) -> tuple[list[str], list[dict[str, Any]]]:
+        if src == dst:
+            return [src], []
+        pq: list[tuple[float, str]] = [(0.0, src)]
+        dist = {src: 0.0}
+        prev: dict[str, tuple[str, dict[str, Any]]] = {}
+        while pq:
+            cost, node = heapq.heappop(pq)
+            if node == dst:
+                break
+            if cost > dist.get(node, 1e18):
+                continue
+            for nxt, edge in adj.get(node, []):
+                nc = cost + path_cost(edge)
+                if nc < dist.get(nxt, 1e18):
+                    dist[nxt] = nc
+                    prev[nxt] = (node, edge)
+                    heapq.heappush(pq, (nc, nxt))
+        if dst not in prev and src != dst:
+            return [], []
+        nodes = [dst]
+        used: list[dict[str, Any]] = []
+        cur = dst
+        while cur != src:
+            parent, edge = prev[cur]
+            used.append(edge)
+            nodes.append(parent)
+            cur = parent
+        nodes.reverse()
+        used.reverse()
+        return nodes, used
+
+    def inlet_score(room: dict[str, Any]) -> float:
+        orients = tuple(room.get("exterior") or ())
+        wind_on = wind_on_facade_ms(orients, wind_speed_ms, wind_direction_deg)
+        t = _room_live_temp(room)
+        score = 0.0
+        # Prefer already-open windows, then windward, then cooler room.
+        if str(room.get("window_state") or "") == "open":
+            score += 4.0
+        elif room.get("window_state") is None:
+            score += 1.0
+        score += min(wind_on, 6.0)
+        if t is not None and indoor_avg is not None:
+            score += max(0.0, indoor_avg - t)  # cooler indoor side
+        if outdoor is not None and t is not None:
+            score += max(0.0, t - outdoor) * 0.15
+        return score
+
+    def outlet_score(room: dict[str, Any], inlet_id: str) -> float:
+        orients = tuple(room.get("exterior") or ())
+        inlet = by_id.get(inlet_id) or {}
+        sep = _facade_sep_deg(orients, tuple(inlet.get("exterior") or ()))
+        wind_on = wind_on_facade_ms(orients, wind_speed_ms, wind_direction_deg)
+        # Leeward preference: low wind-on when wind known.
+        leeward = 0.0
+        if wind_speed_ms is not None and float(wind_speed_ms) >= WIND_MIN_MS:
+            leeward = max(0.0, float(wind_speed_ms) - wind_on)
+        t = _room_live_temp(room)
+        score = 0.0
+        if str(room.get("window_state") or "") == "open":
+            score += 3.0
+        score += min(sep / 45.0, 4.0)  # opposing façades
+        score += min(leeward, 5.0)
+        if t is not None:
+            score += t * 0.35  # hotter chimney
+        return score
+
+    ranked_inlets = sorted(facade_rooms, key=inlet_score, reverse=True)
+    best: dict[str, Any] | None = None
+    for inlet in ranked_inlets[:4]:
+        inlet_id = str(inlet["id"])
+        outlets = [
+            r for r in facade_rooms if str(r["id"]) != inlet_id
+        ] or facade_rooms
+        outlets = sorted(
+            outlets, key=lambda r: outlet_score(r, inlet_id), reverse=True
+        )
+        for outlet in outlets[:4]:
+            outlet_id = str(outlet["id"])
+            if outlet_id == inlet_id:
+                continue
+            nodes, used = shortest_path(inlet_id, outlet_id)
+            if not nodes:
+                continue
+            open_penalty = sum(
+                2.0
+                for e in used
+                if str(e.get("opening") or "") == "closed"
+            )
+            quality = (
+                inlet_score(inlet)
+                + outlet_score(outlet, inlet_id)
+                - 0.4 * sum(path_cost(e) for e in used)
+                - open_penalty
+            )
+            if best is None or quality > best["quality"]:
+                best = {
+                    "quality": quality,
+                    "inlet": inlet,
+                    "outlet": outlet,
+                    "path": nodes,
+                    "edges": used,
+                }
+
+    if best is None:
+        # Single façade: still suggest inlet/exhaust on that room.
+        room = ranked_inlets[0]
+        rid = str(room["id"])
+        label = room.get("label") or rid
+        win = str(room.get("window_state") or "")
+        actions = []
+        if win != "open":
+            actions.append(f"Open {label} window for night purge when outdoor is cooler.")
+        else:
+            actions.append(f"Keep {label} window open; add a fan toward the corridor.")
+        return {
+            "mode": "cooling",
+            "outdoor_temp_c": outdoor,
+            "indoor_temp_c": indoor_avg,
+            "delta_c": (
+                round(outdoor - indoor_avg, 2)
+                if outdoor is not None and indoor_avg is not None
+                else None
+            ),
+            "inlet": {"room": rid, "label": label, "role": "inlet"},
+            "outlet": {"room": rid, "label": label, "role": "outlet"},
+            "path": [rid],
+            "flows": [
+                {
+                    "from": f"ext:{rid}",
+                    "to": rid,
+                    "kind": "exterior",
+                    "role": "inlet",
+                    "strength": 1.0,
+                },
+                {
+                    "from": rid,
+                    "to": f"ext:{rid}",
+                    "kind": "exterior",
+                    "role": "outlet",
+                    "strength": 0.6,
+                },
+            ],
+            "actions": actions,
+        }
+
+    inlet = best["inlet"]
+    outlet = best["outlet"]
+    path: list[str] = best["path"]
+    used_edges: list[dict[str, Any]] = best["edges"]
+    inlet_id = str(inlet["id"])
+    outlet_id = str(outlet["id"])
+    inlet_label = inlet.get("label") or inlet_id
+    outlet_label = outlet.get("label") or outlet_id
+
+    flows: list[dict[str, Any]] = [
+        {
+            "from": f"ext:{inlet_id}",
+            "to": inlet_id,
+            "kind": "exterior",
+            "role": "inlet",
+            "strength": 1.0,
+        }
+    ]
+    for i in range(len(path) - 1):
+        a, b = path[i], path[i + 1]
+        edge = used_edges[i] if i < len(used_edges) else {}
+        opening = str(edge.get("opening") or "unknown")
+        strength = 1.0 if opening == "open" else 0.7 if opening != "closed" else 0.45
+        flows.append(
+            {
+                "from": a,
+                "to": b,
+                "kind": str(edge.get("kind") or "door"),
+                "role": "path",
+                "strength": strength,
+                "opening": opening,
+                "needs_open": opening == "closed",
+            }
+        )
+    flows.append(
+        {
+            "from": outlet_id,
+            "to": f"ext:{outlet_id}",
+            "kind": "exterior",
+            "role": "outlet",
+            "strength": 1.0,
+        }
+    )
+
+    actions: list[str] = []
+    if str(inlet.get("window_state") or "") != "open":
+        actions.append(f"Open {inlet_label} window (cool air inlet).")
+    else:
+        actions.append(f"Keep {inlet_label} window open (inlet).")
+    if str(outlet.get("window_state") or "") != "open":
+        actions.append(f"Open {outlet_label} window (warm air outlet).")
+    else:
+        actions.append(f"Keep {outlet_label} window open (outlet).")
+    for edge in used_edges:
+        if str(edge.get("opening") or "") != "closed":
+            continue
+        a = str(edge.get("a") or "")
+        b = str(edge.get("b") or "")
+        la = (by_id.get(a) or {}).get("label") or a
+        lb = (by_id.get(b) or {}).get("label") or b
+        actions.append(f"Open door between {la} and {lb} to complete the draft.")
+    # Discourage trapping heat in rooms off the path with open windows only.
+    for room in facade_rooms:
+        rid = str(room["id"])
+        if rid in (inlet_id, outlet_id):
+            continue
+        if str(room.get("window_state") or "") == "open":
+            label = room.get("label") or rid
+            actions.append(
+                f"Optional: close {label} window if it short-circuits the "
+                f"{inlet_label} → {outlet_label} path."
+            )
+
+    mode = "cooling"
+    if outdoor is None:
+        mode = "cooling_est"
+    return {
+        "mode": mode,
+        "outdoor_temp_c": outdoor,
+        "indoor_temp_c": indoor_avg,
+        "delta_c": (
+            round(outdoor - indoor_avg, 2)
+            if outdoor is not None and indoor_avg is not None
+            else None
+        ),
+        "inlet": {
+            "room": inlet_id,
+            "label": inlet_label,
+            "role": "inlet",
+            "exterior": list(inlet.get("exterior") or []),
+            "window_state": inlet.get("window_state"),
+        },
+        "outlet": {
+            "room": outlet_id,
+            "label": outlet_label,
+            "role": "outlet",
+            "exterior": list(outlet.get("exterior") or []),
+            "window_state": outlet.get("window_state"),
+        },
+        "path": path,
+        "flows": flows,
+        "actions": actions,
+        "wind_compass": (
+            (compass_from_deg(wind_direction_deg) or "").upper() or None
+            if wind_direction_deg is not None
+            else None
+        ),
+        "wind_speed_ms": (
+            round(float(wind_speed_ms), 2) if wind_speed_ms is not None else None
+        ),
+    }
 
 
 def _angle_diff_deg(a: float, b: float) -> float:

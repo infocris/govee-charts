@@ -15,7 +15,11 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from govee_charts.apartment import ApartmentLayout, simulate_network
+from govee_charts.apartment import (
+    ApartmentLayout,
+    simulate_network,
+    solar_bias_c,
+)
 from govee_charts.db import Database
 
 logger = logging.getLogger(__name__)
@@ -273,6 +277,41 @@ def _anchor_temp_points(
     return [anchor, *trimmed]
 
 
+def facade_effective_outdoor(
+    outdoor: list[dict[str, Any]],
+    orientations: tuple[str, ...] | list[str],
+    timezone: str,
+) -> list[dict[str, Any]] | None:
+    """
+    Outdoor points with temperature_c = T_meteo + solar façade bias.
+
+    Same effective outdoor as the Facades view ``facade_projection``.
+    Returns None when the room has no exterior orientations (caller keeps
+    raw meteo).
+    """
+    orients = tuple(
+        str(o).strip().lower() for o in orientations if str(o).strip()
+    )
+    if not orients or not outdoor:
+        return None
+    out: list[dict[str, Any]] = []
+    for p in outdoor:
+        sw = p.get("shortwave_radiation")
+        cloud = p.get("cloud_cover")
+        bias = solar_bias_c(
+            orients,
+            float(p["ts"]),
+            timezone,
+            shortwave_radiation=float(sw) if sw is not None else None,
+            cloud_cover=float(cloud) if cloud is not None else None,
+        )
+        point = dict(p)
+        point["temperature_c"] = float(p["temperature_c"]) + bias
+        point["solar_bias_c"] = round(bias, 2)
+        out.append(point)
+    return out
+
+
 def build_window_scenarios(
     outdoor_future: list[dict[str, Any]],
     *,
@@ -285,16 +324,23 @@ def build_window_scenarios(
     closed_source: str = "default",
     open_source: str = "default",
     anchor_ts: float | None = None,
+    open_outdoor_future: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     What-if indoor temperatures driven only by outdoor forecast.
 
-    - windows_closed: slow building RC (fitted Δ / τ)
-    - windows_open: fast exchange toward outdoor air (Δ ≈ 0)
+    - windows_closed: slow building RC (fitted Δ / τ) vs meteo outdoor
+    - windows_open: fast exchange toward outdoor air; when
+      ``open_outdoor_future`` is set (façade-effective T), Δ is forced to 0
+      so solar bias is not double-counted with a meteo-calibrated delta
     """
     closed_tau = max(1e-3, float(closed_tau_hours))
     open_tau = max(1e-3, float(open_tau_hours))
     chart_ts = float(anchor_ts if anchor_ts is not None else ts0)
+    use_facade = open_outdoor_future is not None
+    open_series = open_outdoor_future if use_facade else outdoor_future
+    eff_open_delta = 0.0 if use_facade else float(open_delta)
+    eff_open_source = "facade" if use_facade else open_source
     closed_temps = simulate_rc_temp(
         outdoor_future,
         t0=t0,
@@ -303,20 +349,24 @@ def build_window_scenarios(
         tau_hours=closed_tau,
     )
     open_temps = simulate_rc_temp(
-        outdoor_future,
+        open_series,
         t0=t0,
         ts0=ts0,
-        delta=float(open_delta),
+        delta=eff_open_delta,
         tau_hours=open_tau,
     )
 
     def _pack(
-        temps: list[float], delta: float, tau: float, source: str
+        temps: list[float],
+        series: list[dict[str, Any]],
+        delta: float,
+        tau: float,
+        source: str,
     ) -> dict[str, Any]:
         points = _anchor_temp_points(
             [
                 {"ts": p["ts"], "temperature_c": round(temp, 2)}
-                for p, temp in zip(outdoor_future, temps)
+                for p, temp in zip(series, temps)
             ],
             ts0=chart_ts,
             t0=t0,
@@ -335,9 +385,19 @@ def build_window_scenarios(
 
     return {
         "windows_closed": _pack(
-            closed_temps, closed_delta, closed_tau, closed_source
+            closed_temps,
+            outdoor_future,
+            closed_delta,
+            closed_tau,
+            closed_source,
         ),
-        "windows_open": _pack(open_temps, open_delta, open_tau, open_source),
+        "windows_open": _pack(
+            open_temps,
+            open_series,
+            eff_open_delta,
+            open_tau,
+            eff_open_source,
+        ),
     }
 
 
@@ -488,6 +548,22 @@ class WeatherService:
     def has_config_location(self) -> bool:
         return bool(self.cfg.place) or (
             self.cfg.latitude is not None and self.cfg.longitude is not None
+        )
+
+    def _open_outdoor_for_room(
+        self,
+        outdoor: list[dict[str, Any]],
+        room_id: str | None,
+    ) -> list[dict[str, Any]] | None:
+        """Façade-effective outdoor for open-window RC, or None → use meteo."""
+        if not room_id:
+            return None
+        layout = self.apartment
+        room = layout.rooms.get(str(room_id).strip().lower())
+        if room is None or not room.exterior:
+            return None
+        return facade_effective_outdoor(
+            outdoor, room.exterior, layout.timezone
         )
 
     def _load_disk(self) -> dict[str, Any]:
@@ -933,19 +1009,23 @@ class WeatherService:
                     closed_source = "mixed"
 
             current_open = _opening_state_at(timeline, last_ts)
+            open_outdoor = self._open_outdoor_for_room(future_outdoor, room)
+            open_drive = open_outdoor if open_outdoor is not None else future_outdoor
+            # Façade T_eff already embeds solar bias — do not add meteo-fit Δ.
+            open_drive_delta = 0.0 if open_outdoor is not None else open_delta
             # When windows are open, outdoor air dominates over the closed
             # apartment network for this room's forward projection.
             if current_open == "open":
                 temps = simulate_rc_temp(
-                    future_outdoor,
+                    open_drive,
                     t0=float(device["temperature_c"]),
                     ts0=last_ts,
-                    delta=open_delta,
+                    delta=open_drive_delta,
                     tau_hours=open_tau,
                 )
                 proj_model = "network_open"
                 proj_tau = open_tau
-                proj_bias = open_delta
+                proj_bias = open_drive_delta
             else:
                 proj_model = "network"
                 proj_tau = 0.0
@@ -998,6 +1078,7 @@ class WeatherService:
                     closed_source=closed_source,
                     open_source=open_source,
                     anchor_ts=now,
+                    open_outdoor_future=open_outdoor,
                 ),
             }
 
@@ -1042,7 +1123,10 @@ class WeatherService:
         current_open = None
 
         if zone == "exterior":
-            # Fast tracking of outdoor air; Δ from recent median when possible.
+            # Fast tracking of outdoor air. Prefer a short recent Δ (or the
+            # instantaneous offset) so daytime solar heating in a 48 h median
+            # does not yank the night projection upward against a falling
+            # forecast — exterior curves should parallel outdoor weather.
             calib_since = now - self.cfg.calib_hours * 3600.0
             history = await db.history(addr, self.cfg.calib_hours)
             pairs = _align_hourly(
@@ -1051,8 +1135,14 @@ class WeatherService:
                 since=calib_since,
                 until=now,
             )
-            if len(pairs) >= 3:
-                bias_temp = _median([t_int - t_ext for _, t_int, t_ext in pairs])
+            recent_h = 3.0
+            recent = [
+                t_int - t_ext
+                for ts, t_int, t_ext in pairs
+                if ts >= now - recent_h * 3600.0
+            ]
+            if len(recent) >= 2:
+                bias_temp = _median(recent)
             else:
                 bias_temp = instant_bias_temp
             model = "rc"
@@ -1104,20 +1194,29 @@ class WeatherService:
 
             # If openings are currently open/closed, prefer the matching regime.
             current_open = _opening_state_at(timeline, float(last_ts))
+            open_outdoor = self._open_outdoor_for_room(future_outdoor, room)
             if regimes and current_open == "open":
                 open_fit = regimes["windows_open"]
-                bias_temp = float(open_fit["delta"])
                 tau_hours = float(open_fit["tau_hours"])
                 model = "rc_open"
+                if open_outdoor is not None:
+                    bias_temp = 0.0
+                else:
+                    bias_temp = float(open_fit["delta"])
             elif regimes and current_open == "closed":
                 closed_fit = regimes["windows_closed"]
                 bias_temp = float(closed_fit["delta"])
                 tau_hours = float(closed_fit["tau_hours"])
                 model = "rc_closed"
 
+            drive_outdoor = (
+                open_outdoor
+                if model == "rc_open" and open_outdoor is not None
+                else future_outdoor
+            )
             if model in ("rc", "rc_open", "rc_closed") and tau_hours > 0:
                 temps = simulate_rc_temp(
-                    future_outdoor,
+                    drive_outdoor,
                     t0=float(last_temp),
                     ts0=float(last_ts),
                     delta=bias_temp,
@@ -1168,6 +1267,10 @@ class WeatherService:
             },
         }
         if zone != "exterior":
+            open_outdoor = self._open_outdoor_for_room(
+                future_outdoor,
+                (device.get("room") or "").strip().lower() or None,
+            )
             if regimes:
                 closed_fit = regimes["windows_closed"]
                 open_fit = regimes["windows_open"]
@@ -1182,6 +1285,7 @@ class WeatherService:
                     closed_source=str(closed_fit["source"]),
                     open_source=str(open_fit["source"]),
                     anchor_ts=now,
+                    open_outdoor_future=open_outdoor,
                 )
                 result["opening_state"] = current_open
                 result["opening_samples"] = {
@@ -1201,6 +1305,7 @@ class WeatherService:
                     closed_delta=float(bias_temp),
                     closed_tau_hours=float(closed_tau),
                     anchor_ts=now,
+                    open_outdoor_future=open_outdoor,
                 )
         return result
 

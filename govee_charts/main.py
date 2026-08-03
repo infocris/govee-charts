@@ -97,6 +97,13 @@ DEFAULTS: dict[str, Any] = {
         "ha_token_file": "",
         "climate_entity": "climate.medion_smart_mobile_camping_ac_p502_md37735",
         "power_entity": "sensor.infocris_consommation_temps_reel",
+        "energy_entity": "sensor.infocris_consommation_reseau",
+        "water_heater_energy_entity": "sensor.compteur_intelligent_wifi_energie_totale",
+        "water_heater_indoor_fraction": 0.30,
+        "other_loads_indoor_fraction": 0.90,
+        "ac_cop": 3.0,
+        "ac_idle_floor_w": 150,
+        "timezone": "Europe/Paris",
         "poll_seconds": 15,
         "retention_days": 365,
         "ha_db_path": "",
@@ -109,6 +116,7 @@ DEFAULTS: dict[str, Any] = {
         "min_rssi": -75,
         "seen_max_age_seconds": 600,
         "federation_share": True,
+        "federation_pull": True,
         "rssi_prefer_margin_db": 3,
         "peer_signal_cache_seconds": 45,
         "rebuild_seconds": 900,
@@ -286,21 +294,25 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     if hvac_cfg.enabled:
         if hvac_cfg.ha_db_path:
             try:
-                n_hvac, n_power = await import_ha_hvac_history(db, hvac_cfg)
-                if n_hvac or n_power:
+                n_hvac, n_power, n_energy = await import_ha_hvac_history(db, hvac_cfg)
+                if n_hvac or n_power or n_energy:
                     logging.info(
-                        "Imported %d HVAC event(s) and %d power sample(s) from Home Assistant",
+                        "Imported %d HVAC event(s), %d power sample(s), %d energy sample(s) from Home Assistant",
                         n_hvac,
                         n_power,
+                        n_energy,
                     )
             except Exception:
                 logging.exception("Failed to import Home Assistant HVAC/power history")
         pruned_h = await db.prune_hvac_events(hvac_cfg.retention_days)
         pruned_p = await db.prune_power_samples(hvac_cfg.retention_days)
+        pruned_e = await db.prune_energy_samples(hvac_cfg.retention_days)
         if pruned_h:
             logging.info("Pruned %d old HVAC event(s)", pruned_h)
         if pruned_p:
             logging.info("Pruned %d old power sample(s)", pruned_p)
+        if pruned_e:
+            logging.info("Pruned %d old energy sample(s)", pruned_e)
         poller = HvacHaPoller(db, hvac_cfg)
         hvac_task = asyncio.create_task(poller.run(stop_event), name="hvac-ha-poll")
         logging.info(
@@ -367,6 +379,7 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         on_restart=request_restart,
         backfill=backfill,
         ssl_port=ssl_port if certfile and keyfile else None,
+        hvac=hvac_cfg,
     )
 
     http_config = uvicorn.Config(

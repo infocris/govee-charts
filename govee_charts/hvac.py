@@ -65,6 +65,15 @@ class HvacConfig:
     ha_token_file: str = ""
     climate_entity: str = "climate.medion_smart_mobile_camping_ac_p502_md37735"
     power_entity: str = "sensor.infocris_consommation_temps_reel"
+    # Daily-reset whole-home energy (kWh since midnight).
+    energy_entity: str = "sensor.infocris_consommation_reseau"
+    # Cumulative water-heater energy (kWh total).
+    water_heater_energy_entity: str = "sensor.compteur_intelligent_wifi_energie_totale"
+    water_heater_indoor_fraction: float = 0.30
+    other_loads_indoor_fraction: float = 0.90
+    ac_cop: float = 3.0
+    ac_idle_floor_w: float = 150.0
+    timezone: str = "Europe/Paris"
     poll_seconds: float = 15.0
     retention_days: float = 365.0
     # Optional one-shot import from Home Assistant recorder SQLite.
@@ -94,6 +103,45 @@ class HvacConfig:
             power_entity=str(
                 raw.get("power_entity") or "sensor.infocris_consommation_temps_reel"
             ).strip(),
+            energy_entity=str(
+                raw.get("energy_entity") or "sensor.infocris_consommation_reseau"
+            ).strip(),
+            water_heater_energy_entity=str(
+                raw.get("water_heater_energy_entity")
+                or "sensor.compteur_intelligent_wifi_energie_totale"
+            ).strip(),
+            water_heater_indoor_fraction=min(
+                1.0,
+                max(
+                    0.0,
+                    float(
+                        raw.get("water_heater_indoor_fraction")
+                        if raw.get("water_heater_indoor_fraction") is not None
+                        else 0.30
+                    ),
+                ),
+            ),
+            other_loads_indoor_fraction=min(
+                1.0,
+                max(
+                    0.0,
+                    float(
+                        raw.get("other_loads_indoor_fraction")
+                        if raw.get("other_loads_indoor_fraction") is not None
+                        else 0.90
+                    ),
+                ),
+            ),
+            ac_cop=max(0.0, float(raw.get("ac_cop") if raw.get("ac_cop") is not None else 3.0)),
+            ac_idle_floor_w=max(
+                0.0,
+                float(
+                    raw.get("ac_idle_floor_w")
+                    if raw.get("ac_idle_floor_w") is not None
+                    else 150.0
+                ),
+            ),
+            timezone=str(raw.get("timezone") or "Europe/Paris").strip() or "Europe/Paris",
             poll_seconds=max(5.0, float(raw.get("poll_seconds") or 15.0)),
             retention_days=float(raw.get("retention_days") or 365.0),
             ha_db_path=str(raw.get("ha_db_path") or "").strip(),
@@ -127,6 +175,7 @@ class HvacHaPoller:
         self.cfg = cfg
         self._last_climate_key: tuple[Any, ...] | None = None
         self._last_power_watts: float | None = None
+        self._last_energy: dict[str, float] = {}
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -162,6 +211,28 @@ class HvacHaPoller:
         except ValueError:
             logger.warning("HA non-JSON response for %s", entity_id)
             return None
+
+    async def _poll_energy(
+        self, client: httpx.AsyncClient, entity_id: str, now: float
+    ) -> None:
+        if not entity_id:
+            return
+        payload = await self._get_state(client, entity_id)
+        if not payload:
+            return
+        kwh = _as_float(payload.get("state"))
+        if kwh is None:
+            return
+        await self.db.insert_energy_sample(
+            entity_id=entity_id,
+            value_kwh=kwh,
+            ts=now,
+            source="ha",
+        )
+        prev = self._last_energy.get(entity_id)
+        if prev is None or abs(prev - kwh) >= 0.01:
+            logger.debug("Energy %s → %.3f kWh", entity_id, kwh)
+        self._last_energy[entity_id] = kwh
 
     async def _poll_once(self, client: httpx.AsyncClient) -> None:
         now = time.time()
@@ -214,6 +285,9 @@ class HvacHaPoller:
                         )
                     self._last_power_watts = watts
 
+        await self._poll_energy(client, self.cfg.energy_entity, now)
+        await self._poll_energy(client, self.cfg.water_heater_energy_entity, now)
+
     async def run(self, stop_event: asyncio.Event) -> None:
         if not self.cfg.ha_token:
             logger.error(
@@ -224,7 +298,7 @@ class HvacHaPoller:
         timeout = httpx.Timeout(10.0, connect=5.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             logger.info(
-                "HVAC poller started (%s + %s every %.0fs)",
+                "HVAC poller started (%s + %s + energy every %.0fs)",
                 self.cfg.climate_entity,
                 self.cfg.power_entity,
                 self.cfg.poll_seconds,
@@ -252,19 +326,22 @@ def _attrs_from_ha_row(shared_attrs: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-async def import_ha_hvac_history(db: Database, cfg: HvacConfig) -> tuple[int, int]:
+async def import_ha_hvac_history(
+    db: Database, cfg: HvacConfig
+) -> tuple[int, int, int]:
     """
-    Import climate transitions and power samples from a HA recorder SQLite DB.
-    Returns (hvac_inserted, power_inserted).
+    Import climate, power, and energy samples from a HA recorder SQLite DB.
+    Returns (hvac_inserted, power_inserted, energy_inserted).
     """
     path = Path(cfg.ha_db_path)
     if not path.is_file():
         logger.warning("HA recorder DB not found: %s", path)
-        return 0, 0
+        return 0, 0, 0
 
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     hvac_n = 0
     power_n = 0
+    energy_n = 0
     try:
         cur = con.cursor()
         if cfg.climate_entity:
@@ -344,7 +421,44 @@ async def import_ha_hvac_history(db: Database, cfg: HvacConfig) -> tuple[int, in
                         source="ha-import",
                     ):
                         power_n += 1
-        return hvac_n, power_n
+
+        for entity_id in (
+            cfg.energy_entity,
+            cfg.water_heater_energy_entity,
+        ):
+            if not entity_id:
+                continue
+            meta = cur.execute(
+                "SELECT metadata_id FROM states_meta WHERE entity_id = ?",
+                (entity_id,),
+            ).fetchone()
+            if not meta:
+                continue
+            rows = cur.execute(
+                """
+                SELECT state, last_updated_ts
+                FROM states
+                WHERE metadata_id = ?
+                ORDER BY last_updated_ts ASC
+                """,
+                (meta[0],),
+            ).fetchall()
+            prev_kwh: float | None = None
+            for raw_state, ts in rows:
+                kwh = _as_float(raw_state)
+                if kwh is None or ts is None:
+                    continue
+                if prev_kwh is not None and abs(kwh - prev_kwh) < 0.001:
+                    continue
+                prev_kwh = kwh
+                if await db.insert_energy_sample(
+                    entity_id=entity_id,
+                    value_kwh=kwh,
+                    ts=float(ts),
+                    source="ha-import",
+                ):
+                    energy_n += 1
+        return hvac_n, power_n, energy_n
     finally:
         con.close()
 

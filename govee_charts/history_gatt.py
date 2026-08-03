@@ -403,7 +403,8 @@ async def download_history(
             except Exception:
                 pass
     except Exception as exc:
-        result.error = f"gatt failed: {exc}"
+        detail = str(exc).strip() or repr(exc)
+        result.error = f"gatt failed: {type(exc).__name__}: {detail}"
         result.duration_s = time.perf_counter() - t0
         return result
 

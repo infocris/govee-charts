@@ -1350,6 +1350,17 @@ main {
   font: inherit;
 }
 
+.range-zoom-hint {
+  flex-basis: 100%;
+  margin: 0.15rem 0 0;
+  font-size: 0.78rem;
+  color: var(--muted, #8a9a88);
+}
+
+.ranges > .range-reset-zoom {
+  margin-left: 0.15rem;
+}
+
 .range-custom #range-apply {
   align-self: flex-end;
 }
@@ -1480,6 +1491,18 @@ main {
 .hvac-status .hvac-pill-off {
   background: rgba(120, 120, 130, 0.25);
   color: #a8b0a8;
+}
+
+.hvac-status .hvac-energy {
+  display: block;
+  flex-basis: 100%;
+  margin-top: 0.35rem;
+  opacity: 0.92;
+}
+
+.hvac-status .muted {
+  opacity: 0.7;
+  font-weight: 400;
 }
 
 .locate-btn {
@@ -1773,6 +1796,257 @@ main {
 .facade-table th:nth-child(3),
 .facade-table td.facade-orients {
   min-width: 14rem;
+}
+
+.network-meta {
+  margin: 0 0 0.65rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.network-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem 1rem;
+  margin: 0 0 0.85rem;
+}
+
+.network-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.9rem;
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.network-zoom button {
+  min-width: 2.4rem;
+  font-weight: 600;
+}
+
+.net-leg {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.net-leg::before {
+  content: "";
+  width: 1.1rem;
+  height: 0;
+  border-top: 3px solid var(--line);
+}
+
+.net-leg-open::before {
+  border-color: #2f9e6b;
+}
+
+.net-leg-closed::before {
+  border-color: #6b7280;
+}
+
+.net-leg-unknown::before {
+  border-color: #c4a35a;
+  border-style: dashed;
+}
+
+.net-leg-wall::before {
+  border-color: #8a908c;
+  border-width: 2px;
+  opacity: 0.85;
+}
+
+.net-leg-partial::before {
+  border-color: #8a908c;
+  border-style: dashed;
+  border-width: 2px;
+}
+
+.net-leg-exterior::before {
+  border-color: #5b8fd9;
+}
+
+.net-leg-flow::before {
+  border-color: #1f8a70;
+  border-width: 3px;
+}
+
+.network-airflow {
+  margin: 0 0 0.75rem;
+  padding: 0.55rem 0.7rem;
+  border-left: 3px solid #1f8a70;
+  background: color-mix(in srgb, #1f8a70 8%, transparent);
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.network-airflow[hidden],
+.network-airflow:empty {
+  display: none;
+}
+
+.network-airflow strong {
+  font-weight: 600;
+}
+
+.network-airflow ol {
+  margin: 0.35rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.network-airflow li {
+  margin: 0.15rem 0;
+}
+
+.network-canvas-wrap {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  touch-action: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background:
+    radial-gradient(ellipse at 20% 10%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 55%),
+    radial-gradient(ellipse at 80% 90%, color-mix(in srgb, #5b8fd9 10%, transparent), transparent 50%),
+    color-mix(in srgb, var(--bg) 92%, #dfe4e0);
+  cursor: grab;
+}
+
+.network-canvas-wrap.is-panning {
+  cursor: grabbing;
+}
+
+.network-svg {
+  display: block;
+  width: 100%;
+  min-height: 480px;
+  height: min(75vh, 720px);
+  user-select: none;
+}
+
+.network-edge {
+  fill: none;
+  stroke-linecap: round;
+}
+
+.network-edge-door.open {
+  stroke: #2f9e6b;
+  stroke-width: 3.5;
+}
+
+.network-edge-door.closed {
+  stroke: #6b7280;
+  stroke-width: 3;
+}
+
+.network-edge-door.unknown {
+  stroke: #c4a35a;
+  stroke-width: 2.5;
+  stroke-dasharray: 6 5;
+}
+
+.network-edge-wall {
+  stroke: #8a908c;
+  stroke-width: 2;
+  opacity: 0.75;
+}
+
+.network-edge-wall_partial {
+  stroke: #8a908c;
+  stroke-width: 2.25;
+  stroke-dasharray: 5 4;
+  opacity: 0.9;
+}
+
+.network-edge-exterior {
+  stroke: #5b8fd9;
+  stroke-width: 2.5;
+}
+
+.network-edge-exterior.open {
+  stroke: #2f9e6b;
+}
+
+.network-edge-exterior.closed {
+  stroke: #5b8fd9;
+}
+
+.network-edge-exterior.unknown {
+  stroke: #c4a35a;
+  stroke-dasharray: 6 5;
+}
+
+.network-node-room {
+  fill: color-mix(in srgb, var(--bg) 70%, #fff);
+  stroke: var(--line);
+  stroke-width: 1.5;
+}
+
+.network-node-room.has-open {
+  stroke: #2f9e6b;
+  stroke-width: 2.25;
+}
+
+.network-node-exterior {
+  fill: color-mix(in srgb, #5b8fd9 18%, var(--bg));
+  stroke: #5b8fd9;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+.network-label {
+  fill: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.network-sublabel {
+  fill: var(--muted);
+  font-size: 12px;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.network-edge-label {
+  fill: var(--muted);
+  font-size: 11px;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.network-flow {
+  fill: none;
+  stroke: #1f8a70;
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  opacity: 0.95;
+}
+
+.network-flow.needs-open {
+  stroke: #c4782a;
+  stroke-dasharray: 7 5;
+}
+
+.network-flow-inlet {
+  stroke: #2b7bbf;
+}
+
+.network-flow-outlet {
+  stroke: #c45c4a;
+}
+
+.network-flow-label {
+  fill: #1f8a70;
+  font-size: 11px;
+  font-weight: 700;
+  text-anchor: middle;
+  pointer-events: none;
 }
 
 @media (max-width: 720px) {

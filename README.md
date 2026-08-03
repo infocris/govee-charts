@@ -195,6 +195,9 @@ to project rooms as a **multi-node RC network**:
 - Passive nodes (bathroom, WC) without sensors
 - Solar bias from Open-Meteo **shortwave radiation** and **cloud cover**,
   weighted by façade orientation and local hour (SW stronger in afternoon)
+- **Open-window projections** track the same façade-effective outdoor
+  temperature (`T_meteo + solar bias`) as the Facades view, not raw air;
+  closed-building RC still uses meteo outdoor plus a fitted offset
 - **Wind** from Open-Meteo (`wind_speed_10m`, `wind_direction_10m`): on the
   Facades view, window open periods are split into **natural OK** (wind hits a
   façade or drives cross-ventilation NE↔SW above ~1.5 m/s) vs **mechanical
@@ -243,7 +246,22 @@ On startup, optional `hvac.ha_db_path` imports existing recorder history.
 The Compare **Temperature** chart can overlay **AC on** bands and a secondary
 **power (W)** axis (toggle **AC & power**).
 
-Query via `/api/hvac`, `/api/hvac/history`, `/api/power/history`.
+Energy meters are also polled when configured:
+- `energy_entity` — whole-home kWh since midnight (e.g. Infocris réseau)
+- `water_heater_energy_entity` — cumulative water-heater kWh
+
+From these (plus power during HVAC bands), the UI estimates **today's** grid /
+tank / AC kWh and **indoor heat** (MJ / kcal) using configurable fractions:
+tank losses stay indoors (`water_heater_indoor_fraction`), other loads mostly
+become heat (`other_loads_indoor_fraction`), and cooling extracts
+`ac_cop × E_ac` (outdoor compressor — not an indoor gain).
+
+With **AC & power** enabled on Compare, the temperature chart also overlays
+instantaneous **heat gain (W)** from `/api/energy/summary` (negative while
+cooling extracts heat).
+
+Query via `/api/hvac`, `/api/hvac/history`, `/api/power/history`,
+`/api/energy/summary`.
 
 Data © [Open-Meteo](https://open-meteo.com/).
 
@@ -259,9 +277,10 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `GET /api/doors` — latest door/window open/closed state (+ room / kind)
 - `PATCH /api/doors/{sensor_id}` — update `{room,kind,name}` for a contact
 - `GET /api/doors/history?hours=168&sensor_id=…` — open/close event history
-- `GET /api/hvac` — latest climate + power snapshot
+- `GET /api/hvac` — latest climate + power snapshot + energy/heat summary
 - `GET /api/hvac/history?hours=168` — climate events + active bands
 - `GET /api/power/history?hours=168` — power samples (W)
+- `GET /api/energy/summary` — today's (or `?hours=`) electrical + indoor heat estimate
 - `GET /api/backfill` — GATT history backfill queue + selected sensors + last recovered readings / jobs
 - `POST /api/backfill/pause` / `resume` / `refresh` — control the backfill worker
 - `POST /api/backfill/devices` — opt a sensor in/out (`{address, enabled}`)
@@ -274,5 +293,5 @@ Data © [Open-Meteo](https://open-meteo.com/).
 
 - Soft-blocked Bluetooth: `rfkill unblock bluetooth`
 - No Govee cloud API — BLE only
-- Optional GATT history backfill (`[backfill]`) recovers onboard minute samples for gaps missed by live ads. Opt-in per sensor in the Backfill UI (none selected by default). One device at a time; lookback up to ~20 days. Prefer sensors with RSSI ≥ `min_rssi` (default −75 dBm). With federation, recovered history is shared as `{node_id}/gatt` and the best-RSSI node does the pull.
+- Optional GATT history backfill (`[backfill]`) recovers onboard minute samples for gaps missed by live ads. Opt-in per sensor in the Backfill UI (none selected by default). One device at a time; lookback up to ~20 days. Prefer sensors with RSSI ≥ `min_rssi` (default −75 dBm). With federation, the worker first pulls peer `/api/history` for the gap (`federation_pull`); only remaining holes go to GATT. Recovered GATT history is shared as `{node_id}/gatt` and the best-RSSI node does the pull.
 - Manual **Import CSV** on the Coverage tab accepts Govee Home app exports (`.csv` or `.zip`). Analyze shows a file recap and a compare vs existing minutes (already present / would insert); Import stores new samples as `{node_id}/csv` (local only, no federation push). The Coverage view also shows full/partial/missing timelines for all sensors.

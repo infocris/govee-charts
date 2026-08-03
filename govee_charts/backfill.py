@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from govee_charts.db import Database
+from govee_charts.decode import Reading
 from govee_charts.federation import PeerPublisher, gatt_source
 from govee_charts.history_gatt import MAX_HISTORY_MINUTES, download_history
 from govee_charts.scanner import GoveeScanner
@@ -34,6 +35,8 @@ class BackfillConfig:
     connect_timeout: float = 25.0
     weak_rssi_backoff_seconds: float = 300.0
     federation_share: bool = True
+    # Before GATT, pull missing samples from federation peers when available.
+    federation_pull: bool = True
     # Defer only when a peer is at least this many dB stronger (ties → local).
     rssi_prefer_margin_db: float = 3.0
     peer_signal_cache_seconds: float = 45.0
@@ -58,6 +61,7 @@ class BackfillConfig:
                 30.0, float(raw.get("weak_rssi_backoff_seconds") or 300.0)
             ),
             federation_share=bool(raw.get("federation_share", True)),
+            federation_pull=bool(raw.get("federation_pull", True)),
             rssi_prefer_margin_db=float(
                 3.0 if margin_raw is None else margin_raw
             ),
@@ -315,6 +319,7 @@ class BackfillService:
                 "max_job_minutes": self.cfg.max_job_minutes,
                 "min_rssi": self.cfg.min_rssi,
                 "federation_share": self.cfg.federation_share,
+                "federation_pull": self.cfg.federation_pull,
                 "rssi_prefer_margin_db": self.cfg.rssi_prefer_margin_db,
                 "rebuild_seconds": self.cfg.rebuild_seconds,
             },
@@ -561,26 +566,14 @@ class BackfillService:
             if not pending:
                 return None
 
-        # Best phase priority first (hour → day → week → deep).
-        best_pri = min(int(j["priority"]) for j in pending)
-        candidates = [j for j in pending if int(j["priority"]) == best_pri]
-
+        # Prefer higher-priority phases (hour → day → week → deep), but skip a
+        # priority tier entirely when every address in that tier is in backoff
+        # so day/week work is not blocked behind unavailable hour sensors.
         now = time.time()
-        addresses = sorted(
-            {
-                str(j["address"]).upper()
-                for j in candidates
-                if now >= self._weak_backoff.get(str(j["address"]).upper(), 0.0)
-            }
-        )
-        if not addresses:
-            # Everything in backoff — fall back to full candidate set.
-            addresses = sorted(
-                {str(j["address"]).upper() for j in candidates}
-            )
-        if not addresses:
-            return None
-
+        priorities = sorted({int(j["priority"]) for j in pending})
+        preferred: str | None = None
+        candidates: list[dict[str, Any]] = []
+        best_pri = priorities[0]
         local_rssi = await self._local_rssi_map()
         peer_rssi = await self._peer_best_rssi_map()
 
@@ -589,12 +582,30 @@ class BackfillService:
                 addr, local_rssi=local_rssi, peer_rssi=peer_rssi
             )
 
-        addresses.sort(key=score, reverse=True)
-        top_score = score(addresses[0])
-        top = [a for a in addresses if score(a) == top_score]
-        self._rr_cursor = self._rr_cursor % len(top)
-        preferred = top[self._rr_cursor]
-        self._rr_cursor = (self._rr_cursor + 1) % len(top)
+        for pri in priorities:
+            tier = [j for j in pending if int(j["priority"]) == pri]
+            addresses = sorted(
+                {
+                    str(j["address"]).upper()
+                    for j in tier
+                    if now >= self._weak_backoff.get(str(j["address"]).upper(), 0.0)
+                }
+            )
+            if not addresses:
+                continue
+            best_pri = pri
+            candidates = tier
+            addresses.sort(key=score, reverse=True)
+            top_score = score(addresses[0])
+            top = [a for a in addresses if score(a) == top_score]
+            self._rr_cursor = self._rr_cursor % len(top)
+            preferred = top[self._rr_cursor]
+            self._rr_cursor = (self._rr_cursor + 1) % len(top)
+            break
+
+        if preferred is None or not candidates:
+            # All pending sensors are in weak-signal / not-found backoff.
+            return None
 
         device_jobs = [
             j for j in candidates if str(j["address"]).upper() == preferred
@@ -704,6 +715,123 @@ class BackfillService:
                 source,
             )
 
+    async def _fill_from_peers(
+        self,
+        *,
+        address: str,
+        name: str,
+        model: str,
+        window_start: float,
+        window_end: float,
+        battery: int | None,
+    ) -> tuple[int, list[str]]:
+        """
+        Pull peer history for the job window and insert missing samples.
+
+        Returns (inserted_count, peer_node_ids_that_contributed).
+        Does not re-publish (source = peer id — same as ingest).
+        """
+        pub = self.publisher
+        if (
+            not self.cfg.federation_pull
+            or pub is None
+            or not pub.enabled
+        ):
+            return 0, []
+
+        # Prefer denser than chart default so minute coverage is meaningful.
+        span_min = max(1, int((window_end - window_start) / 60.0) + 5)
+        max_points = max(500, min(20_000, span_min * 2))
+        bundles = await pub.fetch_peer_history(
+            address,
+            since=window_start,
+            until=window_end,
+            max_points=max_points,
+        )
+        if not bundles:
+            return 0, []
+
+        inserted = 0
+        contributors: list[str] = []
+        for bundle in bundles:
+            peer_id = str(bundle.get("node_id") or "").strip() or "peer"
+            points = bundle.get("points") or []
+            if not points:
+                continue
+            got = 0
+            for p in points:
+                try:
+                    ts = float(p["ts"])
+                    temp = float(p["temperature_c"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if ts < window_start or ts > window_end:
+                    continue
+                hum = p.get("humidity")
+                try:
+                    humidity = float(hum) if hum is not None else 0.0
+                except (TypeError, ValueError):
+                    humidity = 0.0
+                batt = p.get("battery")
+                if batt is None:
+                    batt = battery if battery is not None else 0
+                try:
+                    batt_i = int(batt)
+                except (TypeError, ValueError):
+                    batt_i = 0
+                rssi = p.get("rssi")
+                try:
+                    rssi_i = int(rssi) if rssi is not None else None
+                except (TypeError, ValueError):
+                    rssi_i = None
+                # Keep peer provenance; never claim local GATT / re-forward.
+                src = str(p.get("source") or "").strip() or peer_id
+                if src == self.node_id or src.startswith(f"{self.node_id}/"):
+                    continue
+                reading = Reading(
+                    temperature_c=temp,
+                    humidity=humidity,
+                    battery=batt_i,
+                    address=address,
+                    name=name,
+                    model=model,
+                    rssi=rssi_i,
+                )
+                ok = await self.db.upsert_reading(
+                    reading, name, ts=ts, source=src
+                )
+                if ok:
+                    inserted += 1
+                    got += 1
+            if got:
+                contributors.append(peer_id)
+        return inserted, contributors
+
+    async def _window_still_needs_gatt(
+        self,
+        address: str,
+        window_start: float,
+        window_end: float,
+    ) -> tuple[bool, int]:
+        """Return (needs_gatt, remaining_expected_minutes)."""
+        tip = time.time() - 60.0
+        eff_end = min(window_end, tip)
+        eff_start = min(window_start, eff_end)
+        if eff_end - eff_start < 60.0:
+            return False, 0
+        existing = await self.db.reading_minutes(
+            address, eff_start, eff_end, cover_seconds=75.0
+        )
+        remaining = _missing_ranges(
+            existing,
+            eff_start,
+            eff_end,
+            max_job_minutes=self.cfg.max_job_minutes,
+        )
+        expected = sum(int(e) for _a, _b, e in remaining)
+        # Same threshold as enqueue: ignore tiny holes.
+        return expected >= 3, expected
+
     async def _run_job(self, job: dict[str, Any]) -> None:
         job_id = int(job["id"])
         address = str(job["address"]).upper()
@@ -735,6 +863,56 @@ class BackfillService:
                 job_id,
                 status="cancelled",
                 error="disabled by user",
+            )
+            return
+
+        # Prefer federation history over GATT when peers already have the gap.
+        fed_inserted, fed_peers = await self._fill_from_peers(
+            address=address,
+            name=name,
+            model=model,
+            window_start=window_start,
+            window_end=window_end,
+            battery=None,
+        )
+        if fed_inserted:
+            self._live.samples_done = fed_inserted
+            logger.info(
+                "Backfill job %s %s [%s] pulled %d sample(s) from peer(s) %s",
+                job_id,
+                name,
+                phase,
+                fed_inserted,
+                ", ".join(fed_peers) or "?",
+            )
+        needs_gatt, remaining = await self._window_still_needs_gatt(
+            address, window_start, window_end
+        )
+        if not needs_gatt:
+            await self.db.update_backfill_job(
+                job_id,
+                status="done",
+                samples_done=fed_inserted,
+                samples_expected=expected,
+                error=(
+                    f"filled from federation ({', '.join(fed_peers)})"
+                    if fed_inserted
+                    else "window covered"
+                ),
+            )
+            await self.db.upsert_backfill_state(
+                address,
+                last_attempt_ts=time.time(),
+                success=True,
+            )
+            logger.info(
+                "Backfill job %s %s [%s] done without GATT "
+                "(fed=%d, remaining=%d)",
+                job_id,
+                name,
+                phase,
+                fed_inserted,
+                remaining,
             )
             return
 
@@ -835,13 +1013,38 @@ class BackfillService:
             self._live.last_sample_ts = sample.ts
             self._live.last_sample_temp = sample.temperature_c
 
-        # Capture the platform BLEDevice before pausing the continuous scanner.
+        # Capture the platform BLEDevice *before* pausing the continuous scanner.
+        # Pausing first leaves BlueZ unable to discover the sensor, and a stale
+        # or missing cache yields "not found" / InProgress thrash.
         # On macOS, CoreBluetooth uses UUIDs — find_device_by_address(MAC) fails.
         cached_device = None
         suffix_map = None
         if self.scanner is not None:
-            cached_device = self.scanner.get_ble_device(address)
             suffix_map = self.scanner.suffix_map
+            cached_device = self.scanner.get_ble_device(address)
+            if cached_device is None:
+                for _ in range(15):
+                    await asyncio.sleep(1.0)
+                    cached_device = self.scanner.get_ble_device(address)
+                    if cached_device is not None:
+                        break
+            if cached_device is None:
+                await self.db.update_backfill_job(
+                    job_id,
+                    status="deferred",
+                    samples_done=0,
+                    error="no recent BLE advertisement (scanner still running)",
+                )
+                self._weak_backoff[address] = time.time() + max(
+                    60.0, self.cfg.poll_seconds * 2.0
+                )
+                logger.warning(
+                    "Backfill job %s %s [%s] deferred: no cached BLEDevice",
+                    job_id,
+                    name,
+                    phase,
+                )
+                return
             await self.scanner.pause_for_gatt()
         try:
             result = await download_history(
@@ -888,6 +1091,23 @@ class BackfillService:
 
         if result.error and not result.samples:
             err_l = (result.error or "").lower()
+            # Device answered but has nothing for this window — close the job
+            # so gap refresh cannot reopen it and starve newer phases.
+            if "no samples" in err_l:
+                await self.db.update_backfill_job(
+                    job_id,
+                    status="done",
+                    samples_done=0,
+                    samples_expected=expected,
+                    error=result.error,
+                )
+                logger.info(
+                    "Backfill job %s %s [%s] empty window (device has no history)",
+                    job_id,
+                    name,
+                    phase,
+                )
+                return
             status = "failed"
             if "not found" in err_l or "inprogress" in err_l.replace(" ", ""):
                 status = "deferred"

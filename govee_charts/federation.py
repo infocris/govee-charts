@@ -27,6 +27,11 @@ def csv_source(node_id: str) -> str:
     return f"{node_id.strip()}/csv"
 
 
+def fed_pull_source(node_id: str) -> str:
+    """Provenance when this node copies history from a peer (not re-forwarded)."""
+    return f"{node_id.strip()}/pull"
+
+
 class PeerPublisher:
     """Fire-and-forget fan-out of locally produced readings to peer nodes."""
 
@@ -192,6 +197,86 @@ class PeerPublisher:
                 continue
             results.append(item)
         return results
+
+    async def fetch_peer_history(
+        self,
+        address: str,
+        *,
+        since: float,
+        until: float,
+        max_points: int = 10000,
+    ) -> list[dict[str, Any]]:
+        """
+        GET /api/history from each peer for ``address`` in [since, until].
+
+        Returns list of {url, node_id, points} for peers that answered OK.
+        """
+        if not self.enabled or self._client is None:
+            return []
+        address = str(address).upper()
+        since_f = float(since)
+        until_f = float(until)
+        if until_f < since_f:
+            since_f, until_f = until_f, since_f
+        params = {
+            "address": address,
+            "since": str(since_f),
+            "until": str(until_f),
+            "max_points": str(max(100, int(max_points))),
+        }
+
+        async def _one(peer: str) -> dict[str, Any] | None:
+            try:
+                assert self._client is not None
+                # Resolve node_id (cached devices probe when possible).
+                node_id = peer
+                cached = self._peer_cache.get(peer)
+                if cached and cached.get("node_id"):
+                    node_id = str(cached["node_id"])
+                else:
+                    try:
+                        fed = await self._client.get(f"{peer}/api/federation")
+                        if fed.status_code < 400:
+                            node_id = (
+                                str(fed.json().get("node_id") or peer).strip()
+                                or peer
+                            )
+                    except Exception:
+                        pass
+                res = await self._client.get(
+                    f"{peer}/api/history",
+                    params=params,
+                    timeout=30.0,
+                )
+                if res.status_code >= 400:
+                    return None
+                data = res.json()
+                points = data.get("points") if isinstance(data, dict) else None
+                if not isinstance(points, list) or not points:
+                    return None
+                return {
+                    "url": peer,
+                    "node_id": node_id,
+                    "points": points,
+                }
+            except Exception as exc:
+                logger.debug(
+                    "Peer history fetch %s %s failed: %s", peer, address, exc
+                )
+                return None
+
+        gathered = await asyncio.gather(
+            *(_one(peer) for peer in self.peers),
+            return_exceptions=True,
+        )
+        out: list[dict[str, Any]] = []
+        for item in gathered:
+            if isinstance(item, Exception):
+                logger.debug("Peer history gather error: %s", item)
+                continue
+            if item:
+                out.append(item)
+        return out
 
     async def _worker(self) -> None:
         assert self._client is not None

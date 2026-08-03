@@ -19,10 +19,14 @@ from pydantic import BaseModel, Field
 
 from govee_charts.address import register_mac, resolve_device_address
 from govee_charts.apartment import (
+    TEMP_COUPLE_CLOSED_C,
+    TEMP_COUPLE_OPEN_C,
+    infer_temp_coupling,
     ORIENTATIONS,
     compass_from_deg,
-    solar_bias_c,
     save_overrides,
+    solar_bias_c,
+    suggest_cooling_airflow,
     ventilation_mode,
 )
 from govee_charts.backfill import BackfillService
@@ -31,7 +35,8 @@ from govee_charts.csv_import import MAX_UPLOAD_BYTES, parse_upload, summarize_sa
 from govee_charts.db import Database, coverage_from_minute_set
 from govee_charts.decode import Reading
 from govee_charts.federation import csv_source
-from govee_charts.hvac import hvac_active_bands, is_hvac_active
+from govee_charts.energy import build_energy_summary
+from govee_charts.hvac import HvacConfig, hvac_active_bands, is_hvac_active
 from govee_charts.weather import WeatherService
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -147,6 +152,7 @@ def create_app(
     on_restart: Callable[[], None] | None = None,
     backfill: BackfillService | None = None,
     ssl_port: int | None = None,
+    hvac: HvacConfig | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Govee Charts", docs_url=None, redoc_url=None)
     app.state.db = db
@@ -160,6 +166,7 @@ def create_app(
     app.state.backfill = backfill
     app.state.restart_scheduled = False
     app.state.ssl_port = int(ssl_port) if ssl_port else None
+    app.state.hvac = hvac or HvacConfig()
 
     @app.get("/")
     async def index() -> FileResponse:
@@ -821,13 +828,11 @@ def create_app(
                 "gains": gains,
             }
 
-            # Indoor history (past) + projections (future) for rooms with sensors
+            # Projections (future) for rooms with sensors — needs outdoor forecast.
             addresses: list[str] = []
             addr_by_room: dict[str, str] = {}
             for room in payload["rooms"]:
-                room["room_history"] = None
-                room["room_projection"] = None
-                for s in room["sensors"]:
+                for s in room.get("sensors") or []:
                     zone = (s.get("zone") or "").strip().lower()
                     if zone == "exterior":
                         continue
@@ -836,28 +841,6 @@ def create_app(
                         addresses.append(addr)
                         addr_by_room[room["id"]] = addr
                         break
-
-            for room in payload["rooms"]:
-                addr = addr_by_room.get(room["id"])
-                if not addr:
-                    continue
-                try:
-                    hist = await db.history(addr, hours)
-                except Exception:
-                    hist = []
-                if hist:
-                    room["room_history"] = {
-                        "address": addr,
-                        "points": [
-                            {
-                                "ts": float(p["ts"]),
-                                "temperature_c": round(float(p["temperature_c"]), 2),
-                                "humidity": p.get("humidity"),
-                            }
-                            for p in hist
-                            if p.get("temperature_c") is not None
-                        ],
-                    }
 
             if addresses:
                 try:
@@ -892,6 +875,250 @@ def create_app(
 
         payload["solar"] = solar
         payload["outdoor"] = outdoor_summary
+
+        # Indoor history always (façade charts + network thermal coupling).
+        # hist_temp_* = window extremes; live temp_min/max are set below from
+        # current interior sensor readings.
+        for room in payload["rooms"]:
+            room.setdefault("room_history", None)
+            room.setdefault("room_projection", None)
+            room["hist_temp_max"] = None
+            room["hist_temp_min"] = None
+            addr = None
+            for s in room.get("sensors") or []:
+                zone = (s.get("zone") or "").strip().lower()
+                if zone == "exterior":
+                    continue
+                if s.get("address"):
+                    addr = str(s["address"]).upper()
+                    break
+            if not addr:
+                continue
+            try:
+                hist = await db.history(addr, hours)
+            except Exception:
+                hist = []
+            if not hist:
+                continue
+            points = [
+                {
+                    "ts": float(p["ts"]),
+                    "temperature_c": round(float(p["temperature_c"]), 2),
+                    "humidity": p.get("humidity"),
+                }
+                for p in hist
+                if p.get("temperature_c") is not None
+            ]
+            if not points:
+                continue
+            temps = [float(p["temperature_c"]) for p in points]
+            room["room_history"] = {"address": addr, "points": points}
+            room["hist_temp_max"] = round(max(temps), 2)
+            room["hist_temp_min"] = round(min(temps), 2)
+
+        # Network graph extras: contacts + opening state on edges / façades.
+        try:
+            door_sensors = await db.list_door_sensors()
+        except Exception as exc:
+            logger.warning("Apartment door list failed: %s", exc)
+            door_sensors = []
+        contacts_by_room: dict[str, list[dict[str, Any]]] = {
+            r["id"]: [] for r in payload["rooms"]
+        }
+        for contact in door_sensors:
+            rid = str(contact.get("room") or "").strip().lower()
+            if rid not in contacts_by_room:
+                continue
+            contacts_by_room[rid].append(
+                {
+                    "sensor_id": contact.get("sensor_id"),
+                    "name": contact.get("name") or contact.get("sensor_id"),
+                    "kind": contact.get("kind") or "door",
+                    "state": contact.get("state"),
+                    "ts": contact.get("ts"),
+                }
+            )
+        for room in payload["rooms"]:
+            rid = room["id"]
+            contacts = contacts_by_room.get(rid, [])
+            room["contacts"] = contacts
+            sensors = room.get("sensors") or []
+            interior = [
+                s
+                for s in sensors
+                if str(s.get("zone") or "").lower() != "exterior"
+            ]
+            exterior = [
+                s
+                for s in sensors
+                if str(s.get("zone") or "").lower() == "exterior"
+            ]
+            live_temps: list[float] = []
+            for s in interior:
+                try:
+                    if s.get("temperature_c") is not None:
+                        live_temps.append(float(s["temperature_c"]))
+                except (TypeError, ValueError):
+                    continue
+            if live_temps:
+                room["temp_min"] = round(min(live_temps), 2)
+                room["temp_max"] = round(max(live_temps), 2)
+                room["temp_c"] = round(sum(live_temps) / len(live_temps), 2)
+            else:
+                room["temp_min"] = None
+                room["temp_max"] = None
+                room["temp_c"] = None
+            facade_temps: list[float] = []
+            for s in exterior:
+                try:
+                    if s.get("temperature_c") is not None:
+                        facade_temps.append(float(s["temperature_c"]))
+                except (TypeError, ValueError):
+                    continue
+            if facade_temps:
+                room["facade_temp_min"] = round(min(facade_temps), 2)
+                room["facade_temp_max"] = round(max(facade_temps), 2)
+                room["facade_temp_c"] = round(
+                    sum(facade_temps) / len(facade_temps), 2
+                )
+            else:
+                proj = room.get("facade_projection") or {}
+                proj_now = proj.get("temp_now")
+                if proj_now is not None:
+                    try:
+                        t = round(float(proj_now), 2)
+                    except (TypeError, ValueError):
+                        t = None
+                    room["facade_temp_min"] = t
+                    room["facade_temp_max"] = t
+                    room["facade_temp_c"] = t
+                else:
+                    room["facade_temp_min"] = None
+                    room["facade_temp_max"] = None
+                    room["facade_temp_c"] = None
+            hums: list[float] = []
+            for s in interior:
+                try:
+                    if s.get("humidity") is not None:
+                        hums.append(float(s["humidity"]))
+                except (TypeError, ValueError):
+                    continue
+            room["humidity"] = round(sum(hums) / len(hums), 1) if hums else None
+            windows = [
+                c for c in contacts if str(c.get("kind") or "") == "window"
+            ]
+            if any(str(c.get("state") or "").lower() == "open" for c in windows):
+                room["window_state"] = "open"
+            elif windows and all(
+                str(c.get("state") or "").lower() == "closed" for c in windows
+            ):
+                room["window_state"] = "closed"
+            elif windows:
+                room["window_state"] = "unknown"
+            else:
+                room["window_state"] = None
+            # Coupling fallback when the history window has no samples.
+            if room.get("hist_temp_max") is None and room.get("temp_max") is not None:
+                room["hist_temp_max"] = room["temp_max"]
+            if room.get("hist_temp_min") is None and room.get("temp_min") is not None:
+                room["hist_temp_min"] = room["temp_min"]
+
+        degree: dict[str, int] = {r["id"]: 0 for r in payload["rooms"]}
+        for edge in payload.get("edges") or []:
+            a = str(edge.get("a") or "")
+            b = str(edge.get("b") or "")
+            if a in degree:
+                degree[a] += 1
+            if b in degree:
+                degree[b] += 1
+        hub_id = max(degree, key=degree.get) if degree else None
+
+        for edge in payload.get("edges") or []:
+            kind = str(edge.get("kind") or "door")
+            a = str(edge.get("a") or "")
+            b = str(edge.get("b") or "")
+            related: list[dict[str, Any]] = []
+            if kind in ("door", "wall_partial"):
+                allowed_kinds = (
+                    ("door",) if kind == "door" else ("door", "other")
+                )
+                for rid in (a, b):
+                    for c in contacts_by_room.get(rid, []):
+                        if str(c.get("kind") or "door") in allowed_kinds:
+                            related.append({**c, "room": rid})
+                # Hub rooms (e.g. corridor) often host shared contacts such as
+                # the entrance door. Only attribute a contact to a hub↔leaf
+                # edge when it belongs to the leaf room; otherwise leave empty
+                # so thermal coupling can infer the opening.
+                if hub_id and hub_id in (a, b) and kind == "door":
+                    leaf = b if a == hub_id else a
+                    related = [c for c in related if c.get("room") == leaf]
+            edge["contacts"] = related
+            edge["temp_delta_max_c"] = None
+            edge["opening_source"] = None
+            if kind == "wall":
+                edge["opening"] = "sealed"
+                edge["opening_source"] = "layout"
+                continue
+            if related:
+                if any(str(c.get("state") or "").lower() == "open" for c in related):
+                    edge["opening"] = "open"
+                elif all(
+                    str(c.get("state") or "").lower() == "closed" for c in related
+                ):
+                    edge["opening"] = "closed"
+                else:
+                    edge["opening"] = "unknown"
+                edge["opening_source"] = "contact"
+                continue
+            # No door contact: infer air sharing from close 24h maxima.
+            room_a = next(
+                (r for r in payload["rooms"] if r["id"] == a), None
+            )
+            room_b = next(
+                (r for r in payload["rooms"] if r["id"] == b), None
+            )
+            couple = infer_temp_coupling(
+                None if room_a is None else room_a.get("hist_temp_max"),
+                None if room_b is None else room_b.get("hist_temp_max"),
+            )
+            edge["opening"] = couple["opening"]
+            edge["opening_source"] = couple["source"]
+            edge["temp_delta_max_c"] = couple.get("delta_c")
+            edge["temp_couple"] = {
+                "open_threshold_c": couple.get("open_threshold_c"),
+                "closed_threshold_c": couple.get("closed_threshold_c"),
+            }
+
+        payload["temp_couple"] = {
+            "open_threshold_c": TEMP_COUPLE_OPEN_C,
+            "closed_threshold_c": TEMP_COUPLE_CLOSED_C,
+            "hours": hours,
+        }
+
+        outdoor = payload.get("outdoor") or {}
+        solar = payload.get("solar") or {}
+        outdoor_temp = outdoor.get("temp_now")
+        if outdoor_temp is None:
+            outdoor_temp = solar.get("temperature_c")
+        payload["airflow"] = suggest_cooling_airflow(
+            payload.get("rooms") or [],
+            payload.get("edges") or [],
+            outdoor_temp_c=(
+                float(outdoor_temp) if outdoor_temp is not None else None
+            ),
+            wind_speed_ms=(
+                outdoor.get("wind_speed_ms")
+                if outdoor.get("wind_speed_ms") is not None
+                else solar.get("wind_speed_ms")
+            ),
+            wind_direction_deg=(
+                outdoor.get("wind_direction_deg")
+                if outdoor.get("wind_direction_deg") is not None
+                else solar.get("wind_direction_deg")
+            ),
+        )
+
         return payload
 
     @app.patch("/api/apartment/rooms/{room_id}")
@@ -957,6 +1184,7 @@ def create_app(
         hours: float = Query(24.0, gt=0, le=26280),
         since: float | None = Query(default=None),
         until: float | None = Query(default=None),
+        max_points: int = Query(5000, ge=100, le=50000),
     ) -> dict[str, Any]:
         use_abs = since is not None and until is not None
         if use_abs:
@@ -970,7 +1198,9 @@ def create_app(
                     status_code=400,
                     detail="since/until window must be between 0 and 26280 hours",
                 )
-            points = await db.history(address, since=t0, until=t1)
+            points = await db.history(
+                address, since=t0, until=t1, max_points=max_points
+            )
             hours_out = span_h
         else:
             if since is not None or until is not None:
@@ -979,7 +1209,7 @@ def create_app(
                     detail="since and until must both be set, or neither",
                 )
             t0 = t1 = None
-            points = await db.history(address, hours)
+            points = await db.history(address, hours, max_points=max_points)
             hours_out = hours
         if not points:
             devices = await db.list_devices()
@@ -1046,15 +1276,60 @@ def create_app(
 
     @app.get("/api/hvac")
     async def api_hvac() -> dict[str, Any]:
-        """Latest climate state + latest power sample."""
+        """Latest climate state + latest power sample + energy/heat summary."""
         climate = await db.latest_hvac()
         power = await db.latest_power()
         active = is_hvac_active(str((climate or {}).get("state") or ""))
+        hvac_cfg: HvacConfig = app.state.hvac
+        energy = None
+        if hvac_cfg.enabled:
+            try:
+                energy = await build_energy_summary(
+                    db,
+                    energy_entity=hvac_cfg.energy_entity,
+                    water_heater_entity=hvac_cfg.water_heater_energy_entity,
+                    power_entity=hvac_cfg.power_entity,
+                    climate_entity=hvac_cfg.climate_entity,
+                    water_heater_indoor_fraction=hvac_cfg.water_heater_indoor_fraction,
+                    other_loads_indoor_fraction=hvac_cfg.other_loads_indoor_fraction,
+                    ac_cop=hvac_cfg.ac_cop,
+                    ac_idle_floor_w=hvac_cfg.ac_idle_floor_w,
+                    timezone=hvac_cfg.timezone,
+                    include_heat_gain=False,
+                )
+            except Exception as exc:
+                logger.warning("Energy summary failed: %s", exc)
+                energy = {"error": str(exc)}
         return {
             "climate": climate,
             "power": power,
             "active": active,
+            "energy": energy,
         }
+
+    @app.get("/api/energy/summary")
+    async def api_energy_summary(
+        hours: float | None = Query(default=None, gt=0, le=26280),
+    ) -> dict[str, Any]:
+        """Electrical + indoor-heat estimate (today, or last ``hours``)."""
+        hvac_cfg: HvacConfig = app.state.hvac
+        if not hvac_cfg.enabled:
+            return {"enabled": False}
+        summary = await build_energy_summary(
+            db,
+            energy_entity=hvac_cfg.energy_entity,
+            water_heater_entity=hvac_cfg.water_heater_energy_entity,
+            power_entity=hvac_cfg.power_entity,
+            climate_entity=hvac_cfg.climate_entity,
+            water_heater_indoor_fraction=hvac_cfg.water_heater_indoor_fraction,
+            other_loads_indoor_fraction=hvac_cfg.other_loads_indoor_fraction,
+            ac_cop=hvac_cfg.ac_cop,
+            ac_idle_floor_w=hvac_cfg.ac_idle_floor_w,
+            timezone=hvac_cfg.timezone,
+            hours=hours,
+        )
+        summary["enabled"] = True
+        return summary
 
     @app.get("/api/hvac/history")
     async def api_hvac_history(

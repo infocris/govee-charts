@@ -19,8 +19,27 @@
   const viewOverview = document.getElementById("view-overview");
   const viewCompare = document.getElementById("view-compare");
   const viewFacades = document.getElementById("view-facades");
+  const viewNetwork = document.getElementById("view-network");
   const viewBackfill = document.getElementById("view-backfill");
   const viewCoverage = document.getElementById("view-coverage");
+  const networkSvgEl = document.getElementById("network-svg");
+  const networkCanvasWrapEl = document.getElementById("network-canvas-wrap");
+  const networkMetaEl = document.getElementById("network-meta");
+  const networkStatusEl = document.getElementById("network-status");
+  const networkAirflowEl = document.getElementById("network-airflow");
+  const networkZoomInBtn = document.getElementById("network-zoom-in");
+  const networkZoomOutBtn = document.getElementById("network-zoom-out");
+  const networkZoomResetBtn = document.getElementById("network-zoom-reset");
+  const NETWORK_VB_W = 920;
+  const NETWORK_VB_H = 560;
+  const NETWORK_ZOOM_MIN = 0.6;
+  const NETWORK_ZOOM_MAX = 4;
+  /** @type {number} */
+  let networkZoom = 1.4;
+  /** @type {{x:number,y:number}} viewBox top-left offset at current zoom */
+  let networkPan = { x: 0, y: 0 };
+  /** @type {{x:number,y:number}|null} */
+  let networkPanDrag = null;
   const selectAllBtn = document.getElementById("select-all");
   const selectNoneBtn = document.getElementById("select-none");
   const rangeButtons = [
@@ -50,6 +69,7 @@
   const rangeSinceEl = document.getElementById("range-since");
   const rangeUntilEl = document.getElementById("range-until");
   const rangeApplyBtn = document.getElementById("range-apply");
+  const rangeResetZoomBtn = document.getElementById("range-reset-zoom");
   const viewButtons = [...document.querySelectorAll(".views [data-view]")];
   const sortButtons = [...document.querySelectorAll(".sort-btn")];
   const restartBtn = document.getElementById("restart-btn");
@@ -138,11 +158,15 @@
   const CHART_HEIGHT_MIN = 160;
   const CHART_HEIGHT_MAX = 520;
   const RANGE_MAX_HOURS = 26280;
-  const QUICK_RANGE_HOURS = new Set([1, 6, 24, 168, 336]);
+  const QUICK_RANGE_HOURS = new Set([1, 6, 12, 24, 72, 168, 336]);
   const SELECT_RANGE_HOURS = new Set([720, 2160, 4320, 8760, 17520, 26280]);
 
   /** @type {number} relative window in hours (ignored when customSince/Until set) */
   let hours = 24;
+  /** Last non-custom quick/select range — restored by reset zoom / double-click. */
+  let lastRelativeHours = 24;
+  let suppressChartRangeSync = false;
+  let chartRangeSyncTimer = null;
   /** @type {number|null} */
   let customSince = null;
   /** @type {number|null} */
@@ -152,10 +176,12 @@
   /** @type {Array<{sensor_id:string,name:string,state:string,ts:number,room?:string,kind?:string}>} */
   let doorSensors = [];
   let selected = new Set();
-  let modelFilter = localStorage.getItem(MODEL_KEY) || "all";
+  /** @type {string[]} empty = all models */
+  let activeModels = loadActiveModels();
+  /** @type {{zone:string[], height:string[], room:string[]}} empty array = all */
   let catFilters = loadCatFilters();
   let sortState = loadSortState();
-  let currentView = ["compare", "facades", "coverage", "backfill"].includes(
+  let currentView = ["compare", "facades", "network", "coverage", "backfill"].includes(
     localStorage.getItem(VIEW_KEY)
   )
     ? localStorage.getItem(VIEW_KEY)
@@ -199,6 +225,36 @@
   const compareHeightFiltersEl = document.getElementById("compare-height-filters");
   const compareRoomFiltersEl = document.getElementById("compare-room-filters");
 
+  function compareChartZoomOptions() {
+    return {
+      limits: {
+        x: { minRange: 60 * 1000 },
+      },
+      pan: {
+        enabled: true,
+        mode: "x",
+        modifierKey: "shift",
+        onPanComplete: ({ chart }) => scheduleSyncRangeFromChart(chart),
+      },
+      zoom: {
+        mode: "x",
+        drag: {
+          enabled: true,
+          backgroundColor: "rgba(120, 180, 140, 0.18)",
+          borderColor: "rgba(140, 200, 160, 0.85)",
+          borderWidth: 1,
+          threshold: 12,
+        },
+        wheel: {
+          enabled: true,
+          modifierKey: "ctrl",
+        },
+        pinch: { enabled: true },
+        onZoomComplete: ({ chart }) => scheduleSyncRangeFromChart(chart),
+      },
+    };
+  }
+
   const chartDefaults = {
     responsive: true,
     maintainAspectRatio: false,
@@ -238,6 +294,75 @@
       },
     },
   };
+
+  function scheduleSyncRangeFromChart(chart) {
+    if (suppressChartRangeSync || !chart) return;
+    if (chartRangeSyncTimer) clearTimeout(chartRangeSyncTimer);
+    chartRangeSyncTimer = setTimeout(() => {
+      chartRangeSyncTimer = null;
+      syncRangeFromChart(chart);
+    }, 80);
+  }
+
+  function syncRangeFromChart(chart) {
+    if (suppressChartRangeSync || !chart || !chart.scales || !chart.scales.x) {
+      return;
+    }
+    const scale = chart.scales.x;
+    const minMs = Number(scale.min);
+    const maxMs = Number(scale.max);
+    if (!Number.isFinite(minMs) || !Number.isFinite(maxMs) || maxMs <= minMs) {
+      return;
+    }
+    const t0 = minMs / 1000;
+    const t1 = maxMs / 1000;
+    if (!setCustomRange(t0, t1)) return;
+
+    suppressChartRangeSync = true;
+    try {
+      for (const other of [tempChart, humChart, dewChart]) {
+        if (!other || other === chart || !other.options.scales?.x) continue;
+        other.options.scales.x.min = minMs;
+        other.options.scales.x.max = maxMs;
+        other.update("none");
+      }
+    } finally {
+      suppressChartRangeSync = false;
+    }
+
+    loadHistory().catch((err) => {
+      statusEl.textContent = `Error: ${err.message}`;
+    });
+  }
+
+  function resetCompareZoom() {
+    if (chartRangeSyncTimer) {
+      clearTimeout(chartRangeSyncTimer);
+      chartRangeSyncTimer = null;
+    }
+    for (const chart of [tempChart, humChart, dewChart]) {
+      if (chart && typeof chart.resetZoom === "function") {
+        suppressChartRangeSync = true;
+        try {
+          chart.resetZoom();
+        } finally {
+          suppressChartRangeSync = false;
+        }
+      }
+    }
+    setRelativeRange(lastRelativeHours);
+    loadHistory().catch((err) => {
+      statusEl.textContent = `Error: ${err.message}`;
+    });
+  }
+
+  function bindCompareChartZoom(chart) {
+    if (!chart || !chart.canvas) return;
+    chart.canvas.addEventListener("dblclick", (ev) => {
+      ev.preventDefault();
+      resetCompareZoom();
+    });
+  }
 
   /** Persist legend visibility across 30s dataset rebuilds (keyed by dataset label). */
   const legendHidden = {
@@ -408,23 +533,58 @@
     });
   }
 
+  function normalizeFilterList(value) {
+    if (Array.isArray(value)) {
+      return [...new Set(value.map((v) => String(v || "").trim()).filter(Boolean))];
+    }
+    if (value == null || value === "" || value === "all") return [];
+    return [String(value)];
+  }
+
+  function loadActiveModels() {
+    try {
+      const raw = localStorage.getItem(MODEL_KEY);
+      if (!raw || raw === "all") return [];
+      if (raw.startsWith("[")) {
+        return normalizeFilterList(JSON.parse(raw));
+      }
+      return normalizeFilterList(raw);
+    } catch {
+      return [];
+    }
+  }
+
   function loadCatFilters() {
     try {
       const raw = localStorage.getItem(CAT_FILTER_KEY);
-      if (!raw) return { zone: "all", height: "all", room: "all" };
+      if (!raw) return { zone: [], height: [], room: [] };
       const parsed = JSON.parse(raw);
       return {
-        zone: parsed.zone || "all",
-        height: parsed.height || "all",
-        room: parsed.room || "all",
+        zone: normalizeFilterList(parsed.zone),
+        height: normalizeFilterList(parsed.height),
+        room: normalizeFilterList(parsed.room),
       };
     } catch {
-      return { zone: "all", height: "all", room: "all" };
+      return { zone: [], height: [], room: [] };
     }
   }
 
   function persistCatFilters() {
     localStorage.setItem(CAT_FILTER_KEY, JSON.stringify(catFilters));
+  }
+
+  function filterListAllows(selected, value) {
+    if (!selected || selected.length === 0) return true;
+    return selected.includes(String(value || ""));
+  }
+
+  function toggleFilterValue(selected, id) {
+    if (id === "all") return [];
+    const next = selected.slice();
+    const idx = next.indexOf(id);
+    if (idx >= 0) next.splice(idx, 1);
+    else next.push(id);
+    return next;
   }
 
   function loadChartHeight() {
@@ -494,7 +654,7 @@
   }
 
   function persistModelFilter() {
-    localStorage.setItem(MODEL_KEY, modelFilter);
+    localStorage.setItem(MODEL_KEY, JSON.stringify(activeModels));
   }
 
   function isCustomRange() {
@@ -608,6 +768,7 @@
       }
       if (parsed && typeof parsed.hours === "number" && parsed.hours > 0) {
         hours = Math.min(RANGE_MAX_HOURS, parsed.hours);
+        lastRelativeHours = hours;
         customSince = null;
         customUntil = null;
       }
@@ -655,6 +816,7 @@
 
   function setRelativeRange(h, { fromSelect = false } = {}) {
     hours = Math.min(RANGE_MAX_HOURS, Math.max(1 / 60, Number(h) || 24));
+    lastRelativeHours = hours;
     customSince = null;
     customUntil = null;
     if (rangeCustomEl) rangeCustomEl.hidden = true;
@@ -831,16 +993,16 @@
 
   function filteredDevices() {
     return devices.filter((d) => {
-      if (modelFilter !== "all" && (d.model || "").toLowerCase() !== modelFilter) {
+      if (!filterListAllows(activeModels, (d.model || "").toLowerCase())) {
         return false;
       }
-      if (catFilters.zone !== "all" && (d.zone || "") !== catFilters.zone) {
+      if (!filterListAllows(catFilters.zone, d.zone || "")) {
         return false;
       }
-      if (catFilters.height !== "all" && (d.height || "") !== catFilters.height) {
+      if (!filterListAllows(catFilters.height, d.height || "")) {
         return false;
       }
-      if (catFilters.room !== "all" && (d.room || "") !== catFilters.room) {
+      if (!filterListAllows(catFilters.room, d.room || "")) {
         return false;
       }
       return true;
@@ -1957,10 +2119,9 @@
   function renderModelFilters(container) {
     if (!container) return;
     const models = availableModels();
-    if (modelFilter !== "all" && !models.includes(modelFilter)) {
-      modelFilter = "all";
-      persistModelFilter();
-    }
+    const before = activeModels.length;
+    activeModels = activeModels.filter((m) => models.includes(m));
+    if (activeModels.length !== before) persistModelFilter();
     container.innerHTML = "";
     const options = [{ id: "all", label: "All models" }].concat(
       models.map((m) => ({ id: m, label: m.toUpperCase() }))
@@ -1970,10 +2131,12 @@
       btn.type = "button";
       btn.dataset.model = opt.id;
       btn.textContent = opt.label;
-      btn.classList.toggle("active", modelFilter === opt.id);
+      const on =
+        opt.id === "all" ? activeModels.length === 0 : activeModels.includes(opt.id);
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
       btn.addEventListener("click", () => {
-        if (modelFilter === opt.id) return;
-        modelFilter = opt.id;
+        activeModels = toggleFilterValue(activeModels, opt.id);
         persistModelFilter();
         syncModelFilterButtons();
         fillDeviceList();
@@ -2012,16 +2175,24 @@
     container.dataset.label =
       kind === "zone" ? "Zone" : kind === "height" ? "Height" : "Room";
     container.innerHTML = "";
+    const allowed = new Set((options || []).map((o) => o.id));
+    const before = catFilters[kind].length;
+    catFilters[kind] = catFilters[kind].filter((id) => allowed.has(id));
+    if (catFilters[kind].length !== before) persistCatFilters();
     const items = [{ id: "all", label: "All" }].concat(options || []);
     for (const opt of items) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.dataset.value = opt.id;
       btn.textContent = opt.label;
-      btn.classList.toggle("active", catFilters[kind] === opt.id);
+      const on =
+        opt.id === "all"
+          ? catFilters[kind].length === 0
+          : catFilters[kind].includes(opt.id);
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
       btn.addEventListener("click", () => {
-        if (catFilters[kind] === opt.id) return;
-        catFilters[kind] = opt.id;
+        catFilters[kind] = toggleFilterValue(catFilters[kind], opt.id);
         persistCatFilters();
         renderAllCategoryFilters();
         fillDeviceList();
@@ -2296,7 +2467,11 @@
   }
 
   function setView(view) {
-    if (!["overview", "compare", "facades", "coverage", "backfill"].includes(view)) {
+    if (
+      !["overview", "compare", "facades", "network", "coverage", "backfill"].includes(
+        view
+      )
+    ) {
       view = "overview";
     }
     currentView = view;
@@ -2304,6 +2479,7 @@
     if (viewOverview) viewOverview.hidden = view !== "overview";
     if (viewCompare) viewCompare.hidden = view !== "compare";
     if (viewFacades) viewFacades.hidden = view !== "facades";
+    if (viewNetwork) viewNetwork.hidden = view !== "network";
     if (viewCoverage) viewCoverage.hidden = view !== "coverage";
     if (viewBackfill) viewBackfill.hidden = view !== "backfill";
     viewButtons.forEach((btn) => {
@@ -2328,6 +2504,12 @@
       if (facadeChartInstances.length) {
         facadeChartInstances.forEach((c) => c.resize());
       }
+    } else if (view === "network") {
+      loadNetwork().catch((err) => {
+        if (networkStatusEl) {
+          networkStatusEl.textContent = `Error: ${err.message}`;
+        }
+      });
     } else if (view === "coverage") {
       loadCoverage().catch((err) => console.warn(err));
     } else if (view === "backfill") {
@@ -2349,6 +2531,561 @@
     if (!res.ok) throw new Error(`apartment HTTP ${res.status}`);
     const data = await res.json();
     renderFacades(data);
+  }
+
+  async function loadNetwork() {
+    if (!networkSvgEl) return;
+    if (networkStatusEl) networkStatusEl.textContent = "Loading…";
+    await requestBrowserGeo(false);
+    // 24 h window so ΔTmax coupling is meaningful without door contacts.
+    const params = new URLSearchParams({ hours: "24" });
+    if (browserGeo) {
+      params.set("latitude", String(browserGeo.latitude));
+      params.set("longitude", String(browserGeo.longitude));
+    }
+    const res = await fetch(`/api/apartment?${params}`);
+    if (!res.ok) throw new Error(`apartment HTTP ${res.status}`);
+    const data = await res.json();
+    renderNetwork(data);
+  }
+
+  function networkExteriorOffset(room, p) {
+    const exteriors = room.exterior || [];
+    const len = Math.hypot(p.x, p.y) || 1;
+    let dx = p.x / len;
+    let dy = p.y / len;
+    if (exteriors.includes("ne") || exteriors.includes("n") || exteriors.includes("e")) {
+      dx = Math.max(0.35, dx);
+      dy = Math.min(-0.35, dy);
+    } else if (
+      exteriors.includes("sw") ||
+      exteriors.includes("s") ||
+      exteriors.includes("w")
+    ) {
+      dx = Math.min(-0.35, dx);
+      dy = Math.max(0.35, dy);
+    }
+    return { x: p.x + dx * 0.55, y: p.y + dy * 0.55 };
+  }
+
+  /** Preferred relative positions for the default T3 layout (unit circle). */
+  const NETWORK_PREF = {
+    corridor: [0, 0],
+    bedroom: [0.15, -0.85],
+    bathroom: [0.75, -0.45],
+    living: [-0.55, 0.55],
+    kitchen: [-0.85, -0.05],
+    wc: [0.05, 0.85],
+  };
+
+  function networkLayout(rooms, edges) {
+    const ids = rooms.map((r) => r.id);
+    const degree = Object.fromEntries(ids.map((id) => [id, 0]));
+    for (const e of edges) {
+      if (degree[e.a] != null) degree[e.a] += 1;
+      if (degree[e.b] != null) degree[e.b] += 1;
+    }
+    const hub =
+      ids.find((id) => id === "corridor") ||
+      ids.slice().sort((a, b) => degree[b] - degree[a])[0];
+    const pos = {};
+    const known = ids.filter((id) => NETWORK_PREF[id]);
+    const unknown = ids.filter((id) => !NETWORK_PREF[id]);
+    if (known.length >= Math.min(3, ids.length)) {
+      for (const id of known) {
+        const [x, y] = NETWORK_PREF[id];
+        pos[id] = { x, y };
+      }
+      unknown.forEach((id, i) => {
+        const ang = (-Math.PI / 2) + ((i + 1) * (2 * Math.PI)) / (unknown.length + 1);
+        pos[id] = { x: Math.cos(ang) * 0.9, y: Math.sin(ang) * 0.9 };
+      });
+    } else {
+      if (hub) pos[hub] = { x: 0, y: 0 };
+      const others = ids.filter((id) => id !== hub);
+      others.forEach((id, i) => {
+        const ang = (-Math.PI / 2) + (i * 2 * Math.PI) / Math.max(others.length, 1);
+        pos[id] = { x: Math.cos(ang) * 0.85, y: Math.sin(ang) * 0.85 };
+      });
+    }
+    return { pos, hub };
+  }
+
+  function formatNetworkTemp(temp) {
+    if (temp == null || Number.isNaN(Number(temp))) return "—";
+    return `${Number(temp).toFixed(1)}°C`;
+  }
+
+  function clampNetworkPan() {
+    const vw = NETWORK_VB_W / networkZoom;
+    const vh = NETWORK_VB_H / networkZoom;
+    const maxX = Math.max(0, NETWORK_VB_W - vw);
+    const maxY = Math.max(0, NETWORK_VB_H - vh);
+    networkPan.x = Math.min(maxX, Math.max(0, networkPan.x));
+    networkPan.y = Math.min(maxY, Math.max(0, networkPan.y));
+  }
+
+  function applyNetworkViewBox() {
+    if (!networkSvgEl) return;
+    clampNetworkPan();
+    const vw = NETWORK_VB_W / networkZoom;
+    const vh = NETWORK_VB_H / networkZoom;
+    networkSvgEl.setAttribute(
+      "viewBox",
+      `${networkPan.x} ${networkPan.y} ${vw} ${vh}`
+    );
+    networkSvgEl.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    if (networkZoomResetBtn) {
+      networkZoomResetBtn.textContent = `${Math.round(networkZoom * 100)}%`;
+    }
+  }
+
+  function setNetworkZoom(next, anchorClientX, anchorClientY) {
+    const prev = networkZoom;
+    networkZoom = Math.min(
+      NETWORK_ZOOM_MAX,
+      Math.max(NETWORK_ZOOM_MIN, next)
+    );
+    if (networkZoom === prev) {
+      applyNetworkViewBox();
+      return;
+    }
+    // Keep the point under the cursor (or canvas center) stable.
+    const rect = networkCanvasWrapEl
+      ? networkCanvasWrapEl.getBoundingClientRect()
+      : null;
+    const ax =
+      anchorClientX != null && rect
+        ? (anchorClientX - rect.left) / Math.max(rect.width, 1)
+        : 0.5;
+    const ay =
+      anchorClientY != null && rect
+        ? (anchorClientY - rect.top) / Math.max(rect.height, 1)
+        : 0.5;
+    const prevW = NETWORK_VB_W / prev;
+    const prevH = NETWORK_VB_H / prev;
+    const focusX = networkPan.x + ax * prevW;
+    const focusY = networkPan.y + ay * prevH;
+    const nextW = NETWORK_VB_W / networkZoom;
+    const nextH = NETWORK_VB_H / networkZoom;
+    networkPan.x = focusX - ax * nextW;
+    networkPan.y = focusY - ay * nextH;
+    applyNetworkViewBox();
+  }
+
+  function renderNetwork(data) {
+    if (!networkSvgEl) return;
+    const NS = "http://www.w3.org/2000/svg";
+    networkSvgEl.replaceChildren();
+    if (!data || !data.enabled) {
+      if (networkMetaEl) {
+        networkMetaEl.textContent =
+          "Apartment network disabled — enable [apartment] in config.toml.";
+      }
+      if (networkStatusEl) networkStatusEl.textContent = "Disabled";
+      return;
+    }
+    const rooms = data.rooms || [];
+    const edges = data.edges || [];
+    if (!rooms.length) {
+      if (networkMetaEl) networkMetaEl.textContent = "No apartment rooms in config.";
+      if (networkStatusEl) networkStatusEl.textContent = "Empty";
+      return;
+    }
+
+    const { pos } = networkLayout(rooms, edges);
+    const W = NETWORK_VB_W;
+    const H = NETWORK_VB_H;
+    const cx = W / 2;
+    const cy = H / 2;
+    const scale = Math.min(W, H) * 0.38;
+    const toXY = (p) => ({ x: cx + p.x * scale, y: cy + p.y * scale });
+
+    applyNetworkViewBox();
+
+    const defs = document.createElementNS(NS, "defs");
+    for (const [id, color] of [
+      ["network-arrow", "#1f8a70"],
+      ["network-arrow-in", "#2b7bbf"],
+      ["network-arrow-out", "#c45c4a"],
+      ["network-arrow-need", "#c4782a"],
+    ]) {
+      const marker = document.createElementNS(NS, "marker");
+      marker.setAttribute("id", id);
+      marker.setAttribute("viewBox", "0 0 10 10");
+      marker.setAttribute("refX", "9");
+      marker.setAttribute("refY", "5");
+      marker.setAttribute("markerWidth", "7");
+      marker.setAttribute("markerHeight", "7");
+      marker.setAttribute("orient", "auto-start-reverse");
+      const path = document.createElementNS(NS, "path");
+      path.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+      path.setAttribute("fill", color);
+      marker.appendChild(path);
+      defs.appendChild(marker);
+    }
+    networkSvgEl.appendChild(defs);
+
+    const gEdges = document.createElementNS(NS, "g");
+    gEdges.setAttribute("class", "network-edges");
+    const gFlows = document.createElementNS(NS, "g");
+    gFlows.setAttribute("class", "network-flows");
+    const gNodes = document.createElementNS(NS, "g");
+    gNodes.setAttribute("class", "network-nodes");
+    const gLabels = document.createElementNS(NS, "g");
+    gLabels.setAttribute("class", "network-labels");
+
+    /** @type {Record<string, {x:number,y:number}>} */
+    const roomXY = {};
+    /** @type {Record<string, {x:number,y:number}>} */
+    const extXY = {};
+
+    for (const edge of edges) {
+      const pa = pos[edge.a];
+      const pb = pos[edge.b];
+      if (!pa || !pb) continue;
+      const a = toXY(pa);
+      const b = toXY(pb);
+      const line = document.createElementNS(NS, "line");
+      const kind = edge.kind || "door";
+      const opening = edge.opening || "unknown";
+      line.setAttribute("x1", String(a.x));
+      line.setAttribute("y1", String(a.y));
+      line.setAttribute("x2", String(b.x));
+      line.setAttribute("y2", String(b.y));
+      line.setAttribute(
+        "class",
+        `network-edge network-edge-${kind}${
+          kind === "door" || kind === "wall_partial" ? ` ${opening}` : ""
+        }`
+      );
+      const title = document.createElementNS(NS, "title");
+      const contactNames = (edge.contacts || [])
+        .map((c) => `${c.name || c.sensor_id}: ${c.state || "?"}`)
+        .join(", ");
+      const src = edge.opening_source || "";
+      const delta =
+        edge.temp_delta_max_c != null ? `ΔTmax ${edge.temp_delta_max_c}°C` : "";
+      title.textContent =
+        `${edge.a} ↔ ${edge.b} (${kind}` +
+        (kind === "wall" ? "" : `, ${opening}`) +
+        `)` +
+        (src ? ` · ${src}` : "") +
+        (delta ? ` · ${delta}` : "") +
+        (contactNames ? ` — ${contactNames}` : "");
+      line.appendChild(title);
+      gEdges.appendChild(line);
+
+      if (kind === "door" || kind === "wall_partial") {
+        const midX = (a.x + b.x) / 2;
+        const midY = (a.y + b.y) / 2;
+        const lab = document.createElementNS(NS, "text");
+        lab.setAttribute("x", String(midX));
+        lab.setAttribute("y", String(midY - 6));
+        lab.setAttribute("class", "network-edge-label");
+        let text;
+        if (src === "temp_coupling" && edge.temp_delta_max_c != null) {
+          const tag =
+            opening === "open"
+              ? "coupled"
+              : opening === "closed"
+                ? "isolated"
+                : "ΔT?";
+          text = `${tag} ${edge.temp_delta_max_c}°`;
+        } else if (kind === "wall_partial") {
+          text =
+            opening === "unknown" ? "partial" : `partial · ${opening}`;
+        } else {
+          text = opening;
+        }
+        lab.textContent = text;
+        gLabels.appendChild(lab);
+      }
+    }
+
+    // Exterior links for façade rooms
+    let openWindows = 0;
+    let openDoors = 0;
+    let coupledLinks = 0;
+    for (const edge of edges) {
+      if (edge.kind !== "door" && edge.kind !== "wall_partial") continue;
+      if (edge.opening !== "open") continue;
+      if (edge.opening_source === "temp_coupling") coupledLinks += 1;
+      else openDoors += 1;
+    }
+
+    for (const room of rooms) {
+      const p = pos[room.id];
+      if (!p) continue;
+      const xy = toXY(p);
+      roomXY[room.id] = xy;
+      const exteriors = room.exterior || [];
+      if (exteriors.length) {
+        const exy = toXY(networkExteriorOffset(room, p));
+        extXY[room.id] = exy;
+        const wState = room.window_state;
+        if (wState === "open") openWindows += 1;
+        const line = document.createElementNS(NS, "line");
+        line.setAttribute("x1", String(xy.x));
+        line.setAttribute("y1", String(xy.y));
+        line.setAttribute("x2", String(exy.x));
+        line.setAttribute("y2", String(exy.y));
+        line.setAttribute(
+          "class",
+          `network-edge network-edge-exterior ${wState || "unknown"}`
+        );
+        const title = document.createElementNS(NS, "title");
+        title.textContent =
+          `${room.label || room.id} → exterior (${(exteriors || []).join(", ").toUpperCase()})` +
+          (wState ? ` — window ${wState}` : "");
+        line.appendChild(title);
+        gEdges.appendChild(line);
+
+        const extNode = document.createElementNS(NS, "circle");
+        extNode.setAttribute("cx", String(exy.x));
+        extNode.setAttribute("cy", String(exy.y));
+        extNode.setAttribute("r", "28");
+        extNode.setAttribute("class", "network-node-exterior");
+        const extSensors = (room.sensors || []).filter(
+          (s) => String(s.zone || "").toLowerCase() === "exterior"
+        );
+        const extTitle = document.createElementNS(NS, "title");
+        const facadeLo = room.facade_temp_min;
+        const facadeHi = room.facade_temp_max;
+        const facadeBits = extSensors
+          .map((s) => `${s.name}: ${formatNetworkTemp(s.temperature_c)}`)
+          .join("; ");
+        extTitle.textContent =
+          `${room.label || room.id} façade ${(exteriors || []).join(", ").toUpperCase()}` +
+          (facadeLo != null && facadeHi != null
+            ? ` · ${Number(facadeLo).toFixed(1)}–${Number(facadeHi).toFixed(1)}°C`
+            : "") +
+          (facadeBits ? `\n${facadeBits}` : "");
+        extNode.appendChild(extTitle);
+        gNodes.appendChild(extNode);
+        const extLab = document.createElementNS(NS, "text");
+        extLab.setAttribute("x", String(exy.x));
+        extLab.setAttribute("y", String(exy.y - 2));
+        extLab.setAttribute("class", "network-label");
+        extLab.textContent = (exteriors[0] || "out").toUpperCase();
+        gLabels.appendChild(extLab);
+        const extSub = document.createElementNS(NS, "text");
+        extSub.setAttribute("x", String(exy.x));
+        extSub.setAttribute("y", String(exy.y + 13));
+        extSub.setAttribute("class", "network-sublabel");
+        if (facadeLo != null && facadeHi != null) {
+          const lo = Number(facadeLo).toFixed(1);
+          const hi = Number(facadeHi).toFixed(1);
+          extSub.textContent = lo === hi ? `${lo}°C` : `${lo}–${hi}°C`;
+        } else if (room.facade_temp_c != null) {
+          extSub.textContent = formatNetworkTemp(room.facade_temp_c);
+        } else {
+          extSub.textContent = "—";
+        }
+        gLabels.appendChild(extSub);
+      }
+
+      const hasOpen =
+        room.window_state === "open" ||
+        (room.contacts || []).some((c) => String(c.state || "").toLowerCase() === "open");
+      const node = document.createElementNS(NS, "circle");
+      node.setAttribute("cx", String(xy.x));
+      node.setAttribute("cy", String(xy.y));
+      node.setAttribute("r", "44");
+      node.setAttribute(
+        "class",
+        `network-node-room${hasOpen ? " has-open" : ""}`
+      );
+      node.setAttribute("fill", roomColor(room.id, 0) + "33");
+      const title = document.createElementNS(NS, "title");
+      const sensorBits = (room.sensors || [])
+        .map((s) => `${s.name}: ${formatNetworkTemp(s.temperature_c)}`)
+        .join("; ");
+      title.textContent =
+        `${room.label || room.id}` +
+        (room.temp_min != null && room.temp_max != null
+          ? ` · ${Number(room.temp_min).toFixed(1)}–${Number(room.temp_max).toFixed(1)}°C now`
+          : room.temp_c != null
+            ? ` · ${formatNetworkTemp(room.temp_c)}`
+            : "") +
+        (sensorBits ? `\n${sensorBits}` : "");
+      node.appendChild(title);
+      gNodes.appendChild(node);
+
+      const lab = document.createElementNS(NS, "text");
+      lab.setAttribute("x", String(xy.x));
+      lab.setAttribute("y", String(xy.y - 4));
+      lab.setAttribute("class", "network-label");
+      lab.textContent = room.label || room.id;
+      gLabels.appendChild(lab);
+
+      const sub = document.createElementNS(NS, "text");
+      sub.setAttribute("x", String(xy.x));
+      sub.setAttribute("y", String(xy.y + 12));
+      sub.setAttribute("class", "network-sublabel");
+      if (room.temp_min != null && room.temp_max != null) {
+        const lo = Number(room.temp_min).toFixed(1);
+        const hi = Number(room.temp_max).toFixed(1);
+        sub.textContent =
+          lo === hi ? `${lo}°C` : `${lo}–${hi}°C`;
+      } else {
+        sub.textContent = formatNetworkTemp(room.temp_c);
+      }
+      gLabels.appendChild(sub);
+    }
+
+    function resolveFlowPoint(id) {
+      if (!id) return null;
+      if (String(id).startsWith("ext:")) {
+        const rid = String(id).slice(4);
+        return extXY[rid] || roomXY[rid] || null;
+      }
+      return roomXY[id] || null;
+    }
+
+    function shortenSegment(a, b, pad) {
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const t0 = Math.min(pad / len, 0.4);
+      const t1 = 1 - t0;
+      return {
+        x1: a.x + dx * t0,
+        y1: a.y + dy * t0,
+        x2: a.x + dx * t1,
+        y2: a.y + dy * t1,
+      };
+    }
+
+    const airflow = data.airflow || null;
+    if (airflow && Array.isArray(airflow.flows)) {
+      for (const flow of airflow.flows) {
+        const from = resolveFlowPoint(flow.from);
+        const to = resolveFlowPoint(flow.to);
+        if (!from || !to) continue;
+        const seg = shortenSegment(from, to, 28);
+        const line = document.createElementNS(NS, "line");
+        line.setAttribute("x1", String(seg.x1));
+        line.setAttribute("y1", String(seg.y1));
+        line.setAttribute("x2", String(seg.x2));
+        line.setAttribute("y2", String(seg.y2));
+        const role = flow.role || "path";
+        const needs = !!flow.needs_open;
+        line.setAttribute(
+          "class",
+          `network-flow network-flow-${role}${needs ? " needs-open" : ""}`
+        );
+        const marker =
+          needs
+            ? "network-arrow-need"
+            : role === "inlet"
+              ? "network-arrow-in"
+              : role === "outlet"
+                ? "network-arrow-out"
+                : "network-arrow";
+        line.setAttribute("marker-end", `url(#${marker})`);
+        line.setAttribute(
+          "stroke-width",
+          String(2.5 + 2.5 * Number(flow.strength || 1))
+        );
+        const title = document.createElementNS(NS, "title");
+        title.textContent =
+          `${flow.from} → ${flow.to}` +
+          (role ? ` (${role})` : "") +
+          (needs ? " — open door to enable" : "");
+        line.appendChild(title);
+        gFlows.appendChild(line);
+      }
+      if (airflow.inlet && airflow.outlet && airflow.inlet.room !== airflow.outlet.room) {
+        const midRoom =
+          (airflow.path || [])[Math.floor((airflow.path || []).length / 2)];
+        const mid = roomXY[midRoom];
+        if (mid) {
+          const lab = document.createElementNS(NS, "text");
+          lab.setAttribute("x", String(mid.x));
+          lab.setAttribute("y", String(mid.y + 28));
+          lab.setAttribute("class", "network-flow-label");
+          lab.textContent = "draft →";
+          gLabels.appendChild(lab);
+        }
+      }
+    }
+
+    networkSvgEl.appendChild(gEdges);
+    networkSvgEl.appendChild(gFlows);
+    networkSvgEl.appendChild(gNodes);
+    networkSvgEl.appendChild(gLabels);
+
+    const outdoor = data.outdoor || {};
+    const outBit =
+      outdoor.available && outdoor.temp_now != null
+        ? ` · outdoor ${formatNetworkTemp(outdoor.temp_now)}`
+        : outdoor.available && outdoor.temp_c != null
+          ? ` · outdoor ${formatNetworkTemp(outdoor.temp_c)}`
+          : "";
+    const couple = data.temp_couple || {};
+    const coupleBit =
+      couple.open_threshold_c != null
+        ? ` · coupled if ΔTmax ≤ ${couple.open_threshold_c}°C` +
+          (couple.closed_threshold_c != null
+            ? `, isolated if ≥ ${couple.closed_threshold_c}°C`
+            : "")
+        : "";
+    if (networkMetaEl) {
+      networkMetaEl.textContent =
+        `${rooms.length} rooms · ${edges.length} links` +
+        (openDoors ? ` · ${openDoors} contact open` : "") +
+        (coupledLinks ? ` · ${coupledLinks} thermally coupled` : "") +
+        (openWindows ? ` · ${openWindows} window(s) open` : "") +
+        outBit +
+        coupleBit;
+    }
+    if (networkAirflowEl) {
+      if (!airflow || !airflow.mode) {
+        networkAirflowEl.textContent = "";
+      } else if (airflow.mode === "hold") {
+        networkAirflowEl.innerHTML = `<strong>Hold heat out</strong> — ${(
+          airflow.actions || []
+        )
+          .map((a) => escapeHtml(a))
+          .join(" ")}`;
+      } else {
+        const inlet = airflow.inlet || {};
+        const outlet = airflow.outlet || {};
+        const pathLabels = (airflow.path || [])
+          .map((id) => {
+            const r = rooms.find((x) => x.id === id);
+            return escapeHtml((r && r.label) || id);
+          })
+          .join(" → ");
+        const delta =
+          airflow.delta_c != null
+            ? ` · Δ outdoor ${Number(airflow.delta_c).toFixed(1)}°C`
+            : airflow.mode === "cooling_est"
+              ? " · outdoor unknown — estimate from façades / room heat"
+              : "";
+        const wind =
+          airflow.wind_compass != null
+            ? ` · wind ${escapeHtml(String(airflow.wind_compass))}` +
+              (airflow.wind_speed_ms != null
+                ? ` ${Number(airflow.wind_speed_ms).toFixed(1)} m/s`
+                : "")
+            : "";
+        const actions = (airflow.actions || [])
+          .map((a) => `<li>${escapeHtml(a)}</li>`)
+          .join("");
+        networkAirflowEl.innerHTML =
+          `<strong>Cooling draft</strong>: ${escapeHtml(
+            inlet.label || inlet.room || "?"
+          )} (in) → ${escapeHtml(outlet.label || outlet.room || "?")} (out)` +
+          (pathLabels ? ` · ${pathLabels}` : "") +
+          `${delta}${wind}` +
+          (actions ? `<ol>${actions}</ol>` : "");
+      }
+    }
+    if (networkStatusEl) {
+      networkStatusEl.textContent = `Updated ${new Date().toLocaleTimeString("en-GB")}`;
+    }
   }
 
   function destroyFacadeCharts() {
@@ -2704,6 +3441,8 @@
       const opts = structuredClone(chartDefaults);
       opts.plugins.windowBands = { bands };
       opts.plugins.legend.display = datasets.length > 1;
+      // Compare-only: no drag-zoom on façade overview charts.
+      if (opts.plugins.zoom) delete opts.plugins.zoom;
 
       const chart = new Chart(canvas, {
         type: "line",
@@ -3498,7 +4237,8 @@
         },
         ticks: { color: "#8aa8d8" },
         grid: { drawOnChartArea: false },
-        beginAtZero: true,
+        // Heat-gain series can go negative while AC extracts heat.
+        beginAtZero: false,
       };
     } else if (tempChart.options.scales.yPower) {
       delete tempChart.options.scales.yPower;
@@ -3513,7 +4253,8 @@
     if (!hvacStatusEl) return;
     const climate = snapshot && snapshot.climate;
     const power = snapshot && snapshot.power;
-    if (!climate && !power) {
+    const energy = snapshot && snapshot.energy;
+    if (!climate && !power && !energy) {
       hvacStatusEl.hidden = true;
       hvacStatusEl.innerHTML = "";
       return;
@@ -3536,6 +4277,34 @@
       : power && power.ts
         ? new Date(power.ts * 1000).toLocaleTimeString("en-GB")
         : "";
+    let energyHtml = "";
+    if (energy && !energy.error) {
+      const home =
+        energy.home_kwh != null ? `${Number(energy.home_kwh).toFixed(2)} kWh` : "—";
+      const wh =
+        energy.water_heater_kwh != null
+          ? `${Number(energy.water_heater_kwh).toFixed(2)} kWh`
+          : "—";
+      const ac =
+        energy.ac_kwh != null ? `≈ ${Number(energy.ac_kwh).toFixed(2)} kWh` : "—";
+      const heatMj =
+        energy.heat_indoor_mj != null
+          ? `${Number(energy.heat_indoor_mj).toFixed(1)} MJ`
+          : "—";
+      const heatKcal =
+        energy.heat_indoor_kcal != null
+          ? `≈ ${Math.round(Number(energy.heat_indoor_kcal))} kcal`
+          : "";
+      energyHtml = `
+        <span class="hvac-energy">
+          Today grid <strong>${escapeHtml(home)}</strong>
+          · tank <strong>${escapeHtml(wh)}</strong>
+          · AC <strong>${escapeHtml(ac)}</strong>
+          · indoor heat <strong>${escapeHtml(heatMj)}</strong>${
+            heatKcal ? ` <span class="muted">(${escapeHtml(heatKcal)})</span>` : ""
+          }
+        </span>`;
+    }
     hvacStatusEl.innerHTML = `
       <span><span class="hvac-pill ${active ? "hvac-pill-on" : "hvac-pill-off"}">${
         active ? "AC on" : "AC off"
@@ -3545,6 +4314,7 @@
       <span>AC temp <strong>${escapeHtml(current)}</strong></span>
       <span>Power <strong>${escapeHtml(watts)}</strong></span>
       ${when ? `<span>Updated ${escapeHtml(when)}</span>` : ""}
+      ${energyHtml}
     `;
   }
 
@@ -3573,6 +4343,12 @@
       data: { datasets: [] },
       options: structuredClone(chartDefaults),
     });
+    // Re-attach zoom callbacks (lost by structuredClone of function refs).
+    for (const chart of [tempChart, humChart, dewChart]) {
+      if (!chart.options.plugins) chart.options.plugins = {};
+      chart.options.plugins.zoom = compareChartZoomOptions();
+      bindCompareChartZoom(chart);
+    }
     bindChartLegend(tempChart);
     bindChartLegend(humChart);
     bindChartLegend(dewChart);
@@ -3668,7 +4444,12 @@
       const opened = scenarios.windows_open;
       if (closed && closed.summary && opened && opened.summary) {
         const cSrc = closed.source && closed.source !== "default" ? `/${closed.source}` : "";
-        const oSrc = opened.source && opened.source !== "default" ? `/${opened.source}` : "";
+        let oSrc = "";
+        if (opened.source === "facade") {
+          oSrc = "/façade";
+        } else if (opened.source && opened.source !== "default") {
+          oSrc = `/${opened.source}`;
+        }
         scenarioTxt =
           ` · closed${cSrc} ${Number(closed.summary.temp_min).toFixed(1)}–${Number(closed.summary.temp_max).toFixed(1)} °C` +
           ` · open${oSrc} ${Number(opened.summary.temp_min).toFixed(1)}–${Number(opened.summary.temp_max).toFixed(1)} °C`;
@@ -3876,11 +4657,9 @@
       totalSamples > 0
         ? ` · ~${formatSampleCount(totalSamples)} samples / ${formatBytes(totalBytes)}`
         : "";
-    const activeCats = ["zone", "height", "room"]
-      .filter((k) => catFilters[k] !== "all")
-      .map((k) => catFilters[k]);
+    const activeCats = ["zone", "height", "room"].flatMap((k) => catFilters[k]);
     const filterNote = [
-      modelFilter === "all" ? "" : modelFilter.toUpperCase(),
+      ...activeModels.map((m) => m.toUpperCase()),
       ...activeCats,
     ]
       .filter(Boolean)
@@ -4086,12 +4865,16 @@
           fetch(`/api/power/history?hours=${overlayHours}`).then(async (res) =>
             res.ok ? res.json() : { points: [] }
           ),
+          fetch(`/api/energy/summary?hours=${overlayHours}`).then(async (res) =>
+            res.ok ? res.json() : { enabled: false, heat_gain_w: [] }
+          ),
         ]).catch((err) => {
           console.warn(err);
           return [
             { climate: null, power: null, active: false },
             { events: [], bands: [] },
             { points: [] },
+            { enabled: false, heat_gain_w: [] },
           ];
         })
       : Promise.resolve(null);
@@ -4233,9 +5016,13 @@
             );
           }
           if (openPts.length) {
+            const openSrc =
+              scenarios.windows_open && scenarios.windows_open.source === "facade"
+                ? "windows open · façade"
+                : "windows open";
             tempDatasets.push(
               makeDataset(
-                `${deviceLabel(device)} (windows open)`,
+                `${deviceLabel(device)} (${openSrc})`,
                 color,
                 openPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
                 false,
@@ -4249,33 +5036,52 @@
 
     let hvacExtra = "";
     if (showHvac && hvacBundle) {
-      const [snapshot, hvacHist, powerHist] = hvacBundle;
+      const [snapshot, hvacHist, powerHist, energyHist] = hvacBundle;
       renderHvacStatus(snapshot);
       const bands = (hvacHist && hvacHist.bands) || [];
       setTempHvacBands(bands);
       const powerPoints = (powerHist && powerHist.points) || [];
-      if (powerPoints.length) {
+      const heatGain = (energyHist && energyHist.heat_gain_w) || [];
+      if (powerPoints.length || heatGain.length) {
         setTempPowerScale(true);
-        tempDatasets.push(
-          makeDataset(
-            "Power (Ecojoko)",
-            "#8aa8d8",
-            powerPoints.map((p) => ({ x: p.ts * 1000, y: p.watts })),
-            false,
-            {
-              yAxisID: "yPower",
-              borderWidth: 1.5,
-              borderDash: [4, 3],
-            }
-          )
-        );
+        if (powerPoints.length) {
+          tempDatasets.push(
+            makeDataset(
+              "Power (Ecojoko)",
+              "#8aa8d8",
+              powerPoints.map((p) => ({ x: p.ts * 1000, y: p.watts })),
+              false,
+              {
+                yAxisID: "yPower",
+                borderWidth: 1.5,
+                borderDash: [4, 3],
+              }
+            )
+          );
+        }
+        if (heatGain.length) {
+          tempDatasets.push(
+            makeDataset(
+              "Heat gain (indoor)",
+              "#c4782a",
+              heatGain.map((p) => ({ x: p.ts * 1000, y: p.watts })),
+              false,
+              {
+                yAxisID: "yPower",
+                borderWidth: 1.75,
+                borderDash: [2, 2],
+              }
+            )
+          );
+        }
       } else {
         setTempPowerScale(false);
       }
-      if (bands.length || powerPoints.length) {
+      if (bands.length || powerPoints.length || heatGain.length) {
         hvacExtra =
           ` · AC bands×${bands.length}` +
-          (powerPoints.length ? `, power ${powerPoints.length} pt` : "");
+          (powerPoints.length ? `, power ${powerPoints.length} pt` : "") +
+          (heatGain.length ? `, heat ${heatGain.length} pt` : "");
       }
     } else {
       renderHvacStatus(null);
@@ -4301,10 +5107,15 @@
         }
       }
     }
-    for (const chart of [tempChart, humChart, dewChart]) {
-      if (!chart || !chart.options.scales || !chart.options.scales.x) continue;
-      chart.options.scales.x.min = xMin;
-      chart.options.scales.x.max = xMax;
+    suppressChartRangeSync = true;
+    try {
+      for (const chart of [tempChart, humChart, dewChart]) {
+        if (!chart || !chart.options.scales || !chart.options.scales.x) continue;
+        chart.options.scales.x.min = xMin;
+        chart.options.scales.x.max = xMax;
+      }
+    } finally {
+      suppressChartRangeSync = false;
     }
 
     bindChartLegend(tempChart);
@@ -4397,6 +5208,8 @@
       } else if (currentView === "facades") {
         await loadFacades();
         await updateWindowBanner(null);
+      } else if (currentView === "network") {
+        await loadNetwork();
       } else if (currentView === "coverage") {
         await loadCoverage();
       } else if (currentView === "backfill") {
@@ -4432,6 +5245,66 @@
   viewButtons.forEach((btn) => {
     btn.addEventListener("click", () => setView(btn.dataset.view));
   });
+
+  if (networkZoomInBtn) {
+    networkZoomInBtn.addEventListener("click", () => {
+      setNetworkZoom(networkZoom * 1.25);
+    });
+  }
+  if (networkZoomOutBtn) {
+    networkZoomOutBtn.addEventListener("click", () => {
+      setNetworkZoom(networkZoom / 1.25);
+    });
+  }
+  if (networkZoomResetBtn) {
+    networkZoomResetBtn.addEventListener("click", () => {
+      networkZoom = 1;
+      networkPan = { x: 0, y: 0 };
+      applyNetworkViewBox();
+    });
+  }
+  if (networkCanvasWrapEl && networkSvgEl) {
+    networkCanvasWrapEl.addEventListener(
+      "wheel",
+      (ev) => {
+        if (currentView !== "network") return;
+        ev.preventDefault();
+        const factor = ev.deltaY < 0 ? 1.12 : 1 / 1.12;
+        setNetworkZoom(networkZoom * factor, ev.clientX, ev.clientY);
+      },
+      { passive: false }
+    );
+    networkCanvasWrapEl.addEventListener("pointerdown", (ev) => {
+      if (currentView !== "network" || ev.button !== 0) return;
+      networkPanDrag = { x: ev.clientX, y: ev.clientY };
+      networkCanvasWrapEl.classList.add("is-panning");
+      networkCanvasWrapEl.setPointerCapture(ev.pointerId);
+    });
+    networkCanvasWrapEl.addEventListener("pointermove", (ev) => {
+      if (!networkPanDrag) return;
+      const rect = networkCanvasWrapEl.getBoundingClientRect();
+      const dx = ev.clientX - networkPanDrag.x;
+      const dy = ev.clientY - networkPanDrag.y;
+      networkPanDrag = { x: ev.clientX, y: ev.clientY };
+      const vw = NETWORK_VB_W / networkZoom;
+      const vh = NETWORK_VB_H / networkZoom;
+      networkPan.x -= (dx / Math.max(rect.width, 1)) * vw;
+      networkPan.y -= (dy / Math.max(rect.height, 1)) * vh;
+      applyNetworkViewBox();
+    });
+    const endPan = (ev) => {
+      if (!networkPanDrag) return;
+      networkPanDrag = null;
+      networkCanvasWrapEl.classList.remove("is-panning");
+      try {
+        networkCanvasWrapEl.releasePointerCapture(ev.pointerId);
+      } catch {
+        /* ignore */
+      }
+    };
+    networkCanvasWrapEl.addEventListener("pointerup", endPan);
+    networkCanvasWrapEl.addEventListener("pointercancel", endPan);
+  }
 
   deviceList.addEventListener("change", onSelectionChange);
 
@@ -4529,6 +5402,12 @@
       loadHistory().catch((err) => {
         statusEl.textContent = `Error: ${err.message}`;
       });
+    });
+  }
+
+  if (rangeResetZoomBtn) {
+    rangeResetZoomBtn.addEventListener("click", () => {
+      resetCompareZoom();
     });
   }
 

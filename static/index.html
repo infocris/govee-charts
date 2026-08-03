@@ -7,6 +7,8 @@
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
 </head>
 <body>
   <aside id="window-banner" class="window-banner" hidden aria-live="polite">
@@ -27,6 +29,7 @@
       <button type="button" role="tab" data-view="overview" class="active" aria-selected="true">Overview</button>
       <button type="button" role="tab" data-view="compare" aria-selected="false">Compare</button>
       <button type="button" role="tab" data-view="facades" aria-selected="false">Facades</button>
+      <button type="button" role="tab" data-view="network" aria-selected="false">Network</button>
       <button type="button" role="tab" data-view="coverage" aria-selected="false">Coverage</button>
       <button type="button" role="tab" data-view="backfill" aria-selected="false">Backfill</button>
       <button type="button" id="restart-btn" class="restart-btn" title="Restart service">Restart</button>
@@ -160,7 +163,9 @@
         <div class="ranges" role="group" aria-label="Time range">
           <button type="button" data-hours="1">1 h</button>
           <button type="button" data-hours="6">6 h</button>
+          <button type="button" data-hours="12">12 h</button>
           <button type="button" data-hours="24" class="active">24 h</button>
+          <button type="button" data-hours="72">3 d</button>
           <button type="button" data-hours="168">7 d</button>
           <button type="button" data-hours="336">14 d</button>
           <label class="range-more">
@@ -187,6 +192,8 @@
             </label>
             <button type="button" id="range-apply">Apply</button>
           </div>
+          <button type="button" id="range-reset-zoom" class="range-reset-zoom" title="Reset chart zoom">Reset zoom</button>
+          <p class="range-zoom-hint">Drag on a chart to zoom · Shift-drag to pan · double-click to reset</p>
         </div>
         <label class="forecast-toggle">
           <input type="checkbox" id="show-forecast" checked>
@@ -295,6 +302,39 @@
         </div>
       </details>
       <p class="status" id="facade-status">Loading…</p>
+    </section>
+
+    <section id="view-network" class="view" role="tabpanel" aria-label="Network" hidden>
+      <div class="overview-head">
+        <h2>Apartment network</h2>
+        <p class="overview-hint">
+          Rooms as nodes, walls and doors as edges. Node temps are live min–max across
+          interior sensors. Door state uses contacts when available; otherwise close
+          24h maxima (ΔTmax) imply air coupling between rooms.
+        </p>
+      </div>
+      <p class="network-meta" id="network-meta" aria-live="polite">Loading…</p>
+      <div class="network-toolbar">
+        <div class="network-legend" aria-hidden="true">
+          <span class="net-leg net-leg-open">Open / coupled</span>
+          <span class="net-leg net-leg-closed">Closed / isolated</span>
+          <span class="net-leg net-leg-unknown">Uncertain</span>
+          <span class="net-leg net-leg-wall">Wall</span>
+          <span class="net-leg net-leg-partial">Partial wall</span>
+          <span class="net-leg net-leg-exterior">Exterior</span>
+          <span class="net-leg net-leg-flow">Cooling draft</span>
+        </div>
+        <div class="ranges network-zoom" role="group" aria-label="Zoom">
+          <button type="button" id="network-zoom-out" title="Zoom out">−</button>
+          <button type="button" id="network-zoom-reset" title="Reset zoom">100%</button>
+          <button type="button" id="network-zoom-in" title="Zoom in">+</button>
+        </div>
+      </div>
+      <p class="network-airflow" id="network-airflow" aria-live="polite"></p>
+      <div class="network-canvas-wrap" id="network-canvas-wrap">
+        <svg id="network-svg" class="network-svg" role="img" aria-label="Apartment room network"></svg>
+      </div>
+      <p class="status" id="network-status">Loading…</p>
     </section>
 
     <section id="view-coverage" class="view" role="tabpanel" aria-label="Coverage" hidden>
