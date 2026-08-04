@@ -47,6 +47,12 @@ class DoorsConfig:
     ha_device_registry: str = ""
     # Manual overrides: sensor_id → display name
     names: dict[str, str] = field(default_factory=dict)
+    # Optional Home Assistant REST poll for contacts not on MQTT (Tuya, …).
+    ha_url: str = "http://127.0.0.1:8123"
+    ha_token: str = ""
+    ha_token_file: str = ""
+    ha_poll_seconds: float = 10.0
+    ha_entities: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> DoorsConfig:
@@ -59,12 +65,26 @@ class DoorsConfig:
                 password = path.read_text(encoding="utf-8").strip()
             except OSError as exc:
                 logger.warning("Door MQTT password file unreadable (%s): %s", path, exc)
+        token = str(raw.get("ha_token") or "")
+        token_file = str(raw.get("ha_token_file") or "").strip()
+        if not token and token_file:
+            path = Path(token_file).expanduser()
+            try:
+                token = path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                logger.warning("Door HA token file unreadable (%s): %s", path, exc)
         names_raw = raw.get("names") or {}
         names = {
             str(k).strip(): str(v).strip()
             for k, v in names_raw.items()
             if str(k).strip() and str(v).strip()
         }
+        entities_raw = raw.get("ha_entities") or []
+        if isinstance(entities_raw, str):
+            entities_raw = [entities_raw]
+        ha_entities = tuple(
+            str(e).strip() for e in entities_raw if str(e).strip()
+        )
         return cls(
             enabled=bool(raw.get("enabled", False)),
             mqtt_host=str(raw.get("mqtt_host") or "127.0.0.1").strip() or "127.0.0.1",
@@ -79,6 +99,12 @@ class DoorsConfig:
             ha_db_path=str(raw.get("ha_db_path") or "").strip(),
             ha_device_registry=str(raw.get("ha_device_registry") or "").strip(),
             names=names,
+            ha_url=str(raw.get("ha_url") or "http://127.0.0.1:8123").strip().rstrip("/")
+            or "http://127.0.0.1:8123",
+            ha_token=token,
+            ha_token_file=token_file,
+            ha_poll_seconds=max(5.0, float(raw.get("ha_poll_seconds") or 10.0)),
+            ha_entities=ha_entities,
         )
 
 
@@ -283,7 +309,11 @@ class DoorMqttListener:
             logger.info("Door %s → %s (%s)", name, state, sensor_id)
 
 
-async def import_ha_door_history(db: Database, ha_db_path: str | Path) -> int:
+async def import_ha_door_history(
+    db: Database,
+    ha_db_path: str | Path,
+    names: dict[str, str] | None = None,
+) -> int:
     """
     Import open/close transitions from a Home Assistant recorder SQLite DB.
     Returns number of newly inserted events.
@@ -294,6 +324,12 @@ async def import_ha_door_history(db: Database, ha_db_path: str | Path) -> int:
     if not path.is_file():
         logger.warning("HA recorder DB not found: %s", path)
         return 0
+
+    name_overrides = {
+        str(k).strip(): str(v).strip()
+        for k, v in (names or {}).items()
+        if str(k).strip() and str(v).strip()
+    }
 
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
@@ -325,9 +361,13 @@ async def import_ha_door_history(db: Database, ha_db_path: str | Path) -> int:
                 """,
                 (metadata_id,),
             ).fetchall()
-            # Friendly name from entity_id
-            slug = str(entity_id).removeprefix("binary_sensor.")
-            name = slug.replace("_", " ").strip().title()
+            # Friendly name from override or entity_id
+            entity_id_s = str(entity_id)
+            if entity_id_s in name_overrides:
+                name = name_overrides[entity_id_s]
+            else:
+                slug = entity_id_s.removeprefix("binary_sensor.")
+                name = slug.replace("_", " ").strip().title()
             prev: str | None = None
             for raw_state, ts in rows:
                 state = _normalize_contact_state(raw_state)
@@ -335,7 +375,7 @@ async def import_ha_door_history(db: Database, ha_db_path: str | Path) -> int:
                     continue
                 prev = state
                 if await db.insert_door_event(
-                    sensor_id=str(entity_id),
+                    sensor_id=entity_id_s,
                     name=name,
                     state=state,
                     ts=float(ts),
@@ -345,6 +385,137 @@ async def import_ha_door_history(db: Database, ha_db_path: str | Path) -> int:
         return inserted
     finally:
         con.close()
+
+
+def door_name_from_ha(
+    entity_id: str,
+    payload: dict[str, Any],
+    *,
+    overrides: dict[str, str] | None = None,
+) -> str:
+    """Pick a display name for a HA contact entity."""
+    overrides = overrides or {}
+    if entity_id in overrides:
+        return overrides[entity_id]
+    attrs = payload.get("attributes") or {}
+    name = str(attrs.get("friendly_name") or "").strip()
+    # Tuya door entities often look like "Porte cuisine Porte"
+    if name.endswith(" Porte") and len(name) > 6:
+        name = name[: -len(" Porte")].strip()
+    if name:
+        return name
+    slug = str(entity_id).removeprefix("binary_sensor.")
+    return slug.replace("_", " ").strip().title() or entity_id
+
+
+class DoorHaPoller:
+    """Poll Home Assistant REST for contact sensors not available on MQTT."""
+
+    def __init__(self, db: Database, cfg: DoorsConfig) -> None:
+        self.db = db
+        self.cfg = cfg
+        self._last_state: dict[str, str] = {}
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.cfg.ha_token}",
+            "Content-Type": "application/json",
+        }
+
+    async def _get_state(
+        self, client: Any, entity_id: str
+    ) -> dict[str, Any] | None:
+        url = f"{self.cfg.ha_url}/api/states/{quote(entity_id, safe='')}"
+        try:
+            response = await client.get(url, headers=self._headers())
+        except Exception as exc:
+            logger.warning("HA door request failed for %s: %s", entity_id, exc)
+            return None
+        if response.status_code == 401:
+            logger.error("HA rejected token (401) for door entity %s", entity_id)
+            return None
+        if response.status_code == 404:
+            logger.warning("HA door entity not found: %s", entity_id)
+            return None
+        if response.status_code >= 400:
+            logger.warning(
+                "HA door error for %s: HTTP %s %s",
+                entity_id,
+                response.status_code,
+                response.text[:200],
+            )
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            logger.warning("HA non-JSON response for door entity %s", entity_id)
+            return None
+
+    async def _poll_once(self, client: Any) -> None:
+        now = time.time()
+        for entity_id in self.cfg.ha_entities:
+            payload = await self._get_state(client, entity_id)
+            if not payload:
+                continue
+            state = _normalize_contact_state(payload.get("state"))
+            if state is None:
+                continue
+            name = door_name_from_ha(
+                entity_id, payload, overrides=self.cfg.names
+            )
+            prev = self._last_state.get(entity_id)
+            if prev == state:
+                # Still refresh metadata / ensure row exists on first poll.
+                if prev is not None:
+                    continue
+            inserted = await self.db.insert_door_event(
+                sensor_id=entity_id,
+                name=name,
+                state=state,
+                ts=now,
+                source="ha",
+            )
+            self._last_state[entity_id] = state
+            if inserted and prev is not None:
+                logger.info("Door %s → %s (%s)", name, state, entity_id)
+            elif prev is None:
+                logger.info("Door %s initial %s (%s)", name, state, entity_id)
+
+    async def run(self, stop_event: asyncio.Event) -> None:
+        if not self.cfg.ha_entities:
+            return
+        if not self.cfg.ha_token:
+            logger.error(
+                "Door HA poll enabled but no token "
+                "(set doors.ha_token or doors.ha_token_file)"
+            )
+            return
+        try:
+            import httpx
+        except ImportError:
+            logger.error("Door HA poll requires httpx — pip install httpx")
+            await stop_event.wait()
+            return
+
+        timeout = httpx.Timeout(10.0, connect=5.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            logger.info(
+                "Door HA poller started (%d entit%s every %.0fs)",
+                len(self.cfg.ha_entities),
+                "y" if len(self.cfg.ha_entities) == 1 else "ies",
+                self.cfg.ha_poll_seconds,
+            )
+            while not stop_event.is_set():
+                try:
+                    await self._poll_once(client)
+                except Exception:
+                    logger.exception("Door HA poll failed")
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(), timeout=self.cfg.ha_poll_seconds
+                    )
+                except asyncio.TimeoutError:
+                    pass
 
 
 def mqtt_url(cfg: DoorsConfig) -> str:

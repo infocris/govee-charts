@@ -341,147 +341,258 @@
       <div class="overview-head">
         <h2>Sensor coverage</h2>
         <p class="overview-hint">
-          Coverage for all sensors; select one for details. Import Govee CSV or ZIP to fill gaps.
+          Coverage for all sensors; select one for details. Drop Govee CSV/ZIP exports to fill gaps (matched by filename).
         </p>
       </div>
 
       <div class="coverage-controls">
         <div class="ranges coverage-ranges" role="group" aria-label="Coverage window">
+          <button type="button" data-cov-hours="1">1 h</button>
+          <button type="button" data-cov-hours="6">6 h</button>
+          <button type="button" data-cov-hours="12">12 h</button>
+          <button type="button" data-cov-hours="24">1 d</button>
+          <button type="button" data-cov-hours="72">3 d</button>
+          <button type="button" data-cov-hours="168">7 d</button>
           <button type="button" data-cov-hours="336">14 d</button>
           <button type="button" data-cov-hours="720">30 d</button>
           <button type="button" data-cov-hours="2160" class="active">90 d</button>
           <button type="button" data-cov-hours="8760">1 y</button>
           <button type="button" data-cov-hours="all">All</button>
         </div>
+        <div class="coverage-legend" aria-hidden="true">
+          <span class="cov-leg cov-leg-full">Full</span>
+          <span class="cov-leg cov-leg-partial">Partial</span>
+          <span class="cov-leg cov-leg-missing">Missing</span>
+        </div>
       </div>
 
-      <div class="coverage-legend" aria-hidden="true">
-        <span class="cov-leg cov-leg-full">Full</span>
-        <span class="cov-leg cov-leg-partial">Partial</span>
-        <span class="cov-leg cov-leg-missing">Missing</span>
-      </div>
-      <div class="coverage-all" id="coverage-all" aria-label="All sensors coverage">
-        <p class="coverage-summary" id="coverage-all-summary">Loading…</p>
-        <ul class="coverage-all-list" id="coverage-all-list"></ul>
-      </div>
-
-      <div class="overview-head overview-head-secondary">
-        <h2>Sensor detail</h2>
-        <p class="overview-hint">Segments and sources for the selected sensor</p>
-      </div>
-      <div class="coverage-controls">
-        <label class="coverage-field">
-          <span>Sensor</span>
-          <select id="coverage-device">
-            <option value="">Select a sensor…</option>
-          </select>
-        </label>
-      </div>
-
-      <p class="coverage-summary" id="coverage-summary" aria-live="polite">Select a sensor…</p>
-      <div class="coverage-bar" id="coverage-bar" role="img" aria-label="Coverage timeline"></div>
-      <ul class="coverage-segments" id="coverage-segments"></ul>
-      <p class="status" id="coverage-status"></p>
-
-      <div class="coverage-agg" id="coverage-agg" hidden>
-        <div class="coverage-agg-head">
-          <h3>Aggregates</h3>
-          <div class="ranges coverage-agg-ranges" role="group" aria-label="Aggregate period">
-            <button type="button" data-agg-bucket="day" class="active">Day</button>
-            <button type="button" data-agg-bucket="week">Week</button>
-            <button type="button" data-agg-bucket="month">Month</button>
+      <div class="coverage-layout">
+        <aside class="coverage-sidebar" aria-label="All sensors coverage">
+          <div class="coverage-all" id="coverage-all">
+            <p class="coverage-summary" id="coverage-all-summary">Loading…</p>
+            <ul class="coverage-all-list" id="coverage-all-list"></ul>
           </div>
-        </div>
-        <p class="coverage-agg-hint" id="coverage-agg-hint"></p>
-        <div class="overview-table-wrap">
-          <table class="overview-table coverage-agg-table" id="coverage-agg-table">
-            <thead>
-              <tr>
-                <th scope="col">Period</th>
-                <th scope="col" class="num">Temp avg</th>
-                <th scope="col" class="num">Temp min</th>
-                <th scope="col" class="num">Temp max</th>
-                <th scope="col" class="num">Hum avg</th>
-                <th scope="col" class="num">Hum min</th>
-                <th scope="col" class="num">Hum max</th>
-                <th scope="col" class="num">Samples</th>
-              </tr>
-            </thead>
-            <tbody id="coverage-agg-body">
-              <tr><td colspan="8" class="overview-empty">Select a sensor…</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
+        </aside>
 
-      <div class="overview-head overview-head-secondary">
-        <h2>Import CSV</h2>
-        <p class="overview-hint">Govee Home app export (.csv or .zip) — analyze, compare coverage, then import</p>
-      </div>
-      <div class="backfill-import" id="coverage-import">
-        <div class="backfill-import-form">
-          <label class="backfill-import-field">
-            <span>Sensor</span>
-            <select id="coverage-import-device">
-              <option value="">Select a sensor…</option>
-            </select>
-          </label>
-          <label class="backfill-import-field">
-            <span>File</span>
-            <input type="file" id="coverage-import-file" accept=".csv,.zip,text/csv,application/zip" />
-          </label>
-          <button type="button" class="backfill-btn" id="coverage-import-analyze">Analyze</button>
-        </div>
-        <p class="backfill-import-status" id="coverage-import-status" aria-live="polite"></p>
-        <div class="backfill-import-recap" id="coverage-import-recap" hidden>
-          <div class="coverage-import-bars" id="coverage-import-bars" hidden>
-            <div class="coverage-import-bar-block">
-              <h3>File coverage</h3>
-              <div class="coverage-bar coverage-bar-thin" id="coverage-file-bar"></div>
+        <div class="coverage-main">
+          <div class="backfill-import" id="coverage-import">
+            <div class="overview-head overview-head-secondary coverage-import-head">
+              <h2>Import CSV</h2>
+              <p class="overview-hint">
+                Drop several Govee exports — each file is matched to a sensor by name, then imported together
+              </p>
             </div>
-            <div class="coverage-import-bar-block">
-              <h3>Existing in DB</h3>
-              <div class="coverage-bar coverage-bar-thin" id="coverage-db-bar"></div>
+            <div
+              class="coverage-dropzone"
+              id="coverage-dropzone"
+              tabindex="0"
+              role="button"
+              aria-label="Drop CSV or ZIP files here"
+            >
+              <p class="coverage-dropzone-title">Drop CSV / ZIP files here</p>
+              <p class="coverage-dropzone-hint">or click to browse — multiple files allowed</p>
+              <input
+                type="file"
+                id="coverage-import-file"
+                accept=".csv,.zip,text/csv,application/zip"
+                multiple
+                hidden
+              />
+            </div>
+            <p class="backfill-import-status" id="coverage-import-status" aria-live="polite"></p>
+            <div class="coverage-batch" id="coverage-batch" hidden>
+              <div class="coverage-batch-toolbar">
+                <div class="coverage-batch-toolbar-left">
+                  <label class="coverage-batch-select-all">
+                    <input type="checkbox" id="coverage-batch-select-all" checked />
+                    <span>Include all</span>
+                  </label>
+                  <label class="coverage-batch-overwrite">
+                    <input type="checkbox" id="coverage-import-overwrite" />
+                    <span>Overwrite existing minutes</span>
+                  </label>
+                </div>
+                <div class="backfill-import-actions coverage-batch-actions">
+                  <button type="button" class="backfill-btn" id="coverage-import-clear">Clear</button>
+                  <button type="button" class="backfill-btn" id="coverage-import-analyze">Re-analyze</button>
+                  <button type="button" class="backfill-btn" id="coverage-import-confirm" disabled>
+                    Import selected
+                  </button>
+                </div>
+              </div>
+              <div class="overview-table-wrap">
+                <table class="overview-table coverage-batch-table" id="coverage-batch-table">
+                  <thead>
+                    <tr>
+                      <th scope="col" class="cov-batch-check">In</th>
+                      <th scope="col">File</th>
+                      <th scope="col">Sensor</th>
+                      <th scope="col" class="num">Samples</th>
+                      <th scope="col" class="num">New</th>
+                      <th scope="col" class="num">Overwrite</th>
+                      <th scope="col">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="coverage-batch-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="backfill-import-recap" id="coverage-import-recap" hidden>
+              <div class="coverage-import-bars" id="coverage-import-bars" hidden>
+                <div class="coverage-import-bar-block">
+                  <h3>File coverage</h3>
+                  <div class="coverage-bar coverage-bar-thin" id="coverage-file-bar"></div>
+                </div>
+                <div class="coverage-import-bar-block">
+                  <h3>Existing in DB</h3>
+                  <div class="coverage-bar coverage-bar-thin" id="coverage-db-bar"></div>
+                </div>
+              </div>
+              <div class="backfill-import-grid">
+                <section class="backfill-import-block">
+                  <h3>File</h3>
+                  <dl class="backfill-import-dl" id="coverage-import-file-stats"></dl>
+                </section>
+                <section class="backfill-import-block">
+                  <h3>Existing in range</h3>
+                  <dl class="backfill-import-dl" id="coverage-import-existing-stats"></dl>
+                </section>
+              </div>
+              <section class="backfill-import-block">
+                <h3>Compare</h3>
+                <dl class="backfill-import-dl" id="coverage-import-compare-stats"></dl>
+              </section>
+              <section class="backfill-import-block" id="coverage-import-overwrite-wrap" hidden>
+                <h3>Would overwrite (sample)</h3>
+                <div class="overview-table-wrap">
+                  <table class="overview-table coverage-overwrite-table" id="coverage-import-overwrite-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">Time</th>
+                        <th scope="col" class="num">Temp old</th>
+                        <th scope="col" class="num">Temp new</th>
+                        <th scope="col" class="num">Hum old</th>
+                        <th scope="col" class="num">Hum new</th>
+                      </tr>
+                    </thead>
+                    <tbody id="coverage-import-overwrite-body"></tbody>
+                  </table>
+                </div>
+              </section>
+              <section class="backfill-import-block" id="coverage-import-zigzag-wrap" hidden>
+                <h3>Zigzag risk (nearby DB readings)</h3>
+                <p class="coverage-zigzag-hint" id="coverage-import-zigzag-hint"></p>
+                <div class="overview-table-wrap">
+                  <table class="overview-table coverage-overwrite-table" id="coverage-import-zigzag-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">CSV time</th>
+                        <th scope="col">DB time</th>
+                        <th scope="col">Source</th>
+                        <th scope="col" class="num">CSV °C</th>
+                        <th scope="col" class="num">DB °C</th>
+                        <th scope="col" class="num">CSV %</th>
+                        <th scope="col" class="num">DB %</th>
+                      </tr>
+                    </thead>
+                    <tbody id="coverage-import-zigzag-body"></tbody>
+                  </table>
+                </div>
+              </section>
+              <section class="backfill-import-block" id="coverage-import-members-wrap" hidden>
+                <h3>ZIP members</h3>
+                <ul class="backfill-import-members" id="coverage-import-members"></ul>
+              </section>
             </div>
           </div>
-          <div class="backfill-import-grid">
-            <section class="backfill-import-block">
-              <h3>File</h3>
-              <dl class="backfill-import-dl" id="coverage-import-file-stats"></dl>
-            </section>
-            <section class="backfill-import-block">
-              <h3>Existing in range</h3>
-              <dl class="backfill-import-dl" id="coverage-import-existing-stats"></dl>
-            </section>
-          </div>
-          <section class="backfill-import-block">
-            <h3>Compare</h3>
-            <dl class="backfill-import-dl" id="coverage-import-compare-stats"></dl>
-          </section>
-          <section class="backfill-import-block" id="coverage-import-members-wrap" hidden>
-            <h3>ZIP members</h3>
-            <ul class="backfill-import-members" id="coverage-import-members"></ul>
-          </section>
-          <div class="backfill-import-actions">
-            <button type="button" class="backfill-btn" id="coverage-import-cancel">Cancel</button>
-            <button type="button" class="backfill-btn" id="coverage-import-confirm">Import</button>
+
+          <div class="coverage-detail" id="coverage-detail">
+            <div class="overview-head overview-head-secondary">
+              <h2>Sensor detail</h2>
+              <p class="overview-hint">Segments and sources for the selected sensor</p>
+            </div>
+            <div class="coverage-controls">
+              <label class="coverage-field">
+                <span>Sensor</span>
+                <select id="coverage-device">
+                  <option value="">Select a sensor…</option>
+                </select>
+              </label>
+            </div>
+
+            <p class="coverage-summary" id="coverage-summary" aria-live="polite">Select a sensor…</p>
+            <div class="coverage-bar" id="coverage-bar" role="img" aria-label="Coverage timeline"></div>
+            <ul class="coverage-segments" id="coverage-segments"></ul>
+            <p class="status" id="coverage-status"></p>
+
+            <div class="coverage-charts" id="coverage-charts" hidden>
+              <div class="coverage-chart-block">
+                <h3>Temperature</h3>
+                <div class="coverage-chart-wrap">
+                  <canvas id="coverage-temp-chart" aria-label="Coverage temperature chart"></canvas>
+                </div>
+              </div>
+              <div class="coverage-chart-block">
+                <h3>Humidity</h3>
+                <div class="coverage-chart-wrap">
+                  <canvas id="coverage-hum-chart" aria-label="Coverage humidity chart"></canvas>
+                </div>
+              </div>
+            </div>
+
+            <div class="coverage-agg" id="coverage-agg" hidden>
+              <div class="coverage-agg-head">
+                <h3>Aggregates</h3>
+                <div class="ranges coverage-agg-ranges" role="group" aria-label="Aggregate period">
+                  <button type="button" data-agg-bucket="day" class="active">Day</button>
+                  <button type="button" data-agg-bucket="week">Week</button>
+                  <button type="button" data-agg-bucket="month">Month</button>
+                </div>
+              </div>
+              <p class="coverage-agg-hint" id="coverage-agg-hint"></p>
+              <div class="overview-table-wrap">
+                <table class="overview-table coverage-agg-table" id="coverage-agg-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Period</th>
+                      <th scope="col" class="num">Temp avg</th>
+                      <th scope="col" class="num">Temp min</th>
+                      <th scope="col" class="num">Temp max</th>
+                      <th scope="col" class="num">Hum avg</th>
+                      <th scope="col" class="num">Hum min</th>
+                      <th scope="col" class="num">Hum max</th>
+                      <th scope="col" class="num">Samples</th>
+                    </tr>
+                  </thead>
+                  <tbody id="coverage-agg-body">
+                    <tr><td colspan="8" class="overview-empty">Select a sensor…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
       </div>
+      <!-- Kept for populateCoverageDevices compat; hidden, synced from batch rows -->
+      <select id="coverage-import-device" hidden aria-hidden="true">
+        <option value="">Select a sensor…</option>
+      </select>
     </section>
 
     <section id="view-backfill" class="view" role="tabpanel" aria-label="Backfill" hidden>
       <div class="overview-head">
         <h2>History backfill</h2>
         <p class="overview-hint">
-          GATT recovery queue — newest gaps first; shared over federation as node_id/gatt.
-          Select sensors below to opt in (none by default).
+          Gap recovery — peers first, then optional GATT; shared over federation as node_id/gatt.
+          Select sensors below to opt in (none by default). Uncheck GATT for federation-only fill.
         </p>
       </div>
 
       <div class="overview-head overview-head-secondary">
         <h2>Sensors</h2>
-        <p class="overview-hint">Enable individual sensors for GATT history recovery</p>
+        <p class="overview-hint">
+          Opt in per sensor; GATT allows local BLE history when peers cannot fill the gap
+        </p>
       </div>
       <div class="backfill-sensors" id="backfill-sensors">
         <div class="backfill-sensors-actions">

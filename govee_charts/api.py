@@ -135,9 +135,70 @@ class FacadePatch(BaseModel):
 
 class BackfillDevicePatch(BaseModel):
     address: str = Field(min_length=1)
-    enabled: bool
+    enabled: bool | None = None
+    gatt_enabled: bool | None = None
 
     model_config = {"extra": "forbid"}
+
+
+_BACKFILL_MODELS = ("h5075", "h5072", "h5179")
+
+
+async def _backfill_devices_from_db(
+    db: Database,
+    labels: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Eligible sensors + persisted flags (works without a live worker)."""
+    flags_map = await db.list_backfill_flags()
+    rows: list[dict[str, Any]] = []
+    for device in await db.list_devices(include_stats=False):
+        addr = str(device.get("address") or "").upper()
+        if not addr:
+            continue
+        model = str(device.get("model") or "").lower()
+        if model and model not in _BACKFILL_MODELS:
+            continue
+        flags = flags_map.get(addr) or {}
+        rows.append(
+            {
+                "address": addr,
+                "name": labels.get(addr) or str(device.get("name") or addr),
+                "model": model or None,
+                "enabled": bool(flags.get("enabled")),
+                "gatt_enabled": bool(flags.get("gatt_enabled", True)),
+                "rssi": None,
+                "local_best": False,
+                "queued_jobs": 0,
+                "phase": None,
+            }
+        )
+    rows.sort(key=lambda e: (str(e["name"]).lower(), e["address"]))
+    return rows
+
+
+def _backfill_disabled_snapshot(
+    devices: list[dict[str, Any]],
+    *,
+    recent: list[Any],
+    recent_jobs: list[Any],
+) -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "paused": False,
+        "worker": "disabled",
+        "current": None,
+        "queue": [],
+        "devices": devices,
+        "totals": {
+            "pending": 0,
+            "running": 0,
+            "done": 0,
+            "failed": 0,
+        },
+        "config": None,
+        "recent": recent,
+        "recent_jobs": recent_jobs,
+    }
 
 
 def create_app(
@@ -185,28 +246,15 @@ def create_app(
         recent_limit: int = Query(100, ge=1, le=500),
         job_limit: int = Query(50, ge=1, le=200),
     ) -> dict[str, Any]:
-        """Live GATT history backfill queue snapshot + recent recovered readings."""
+        """Live history backfill queue snapshot + recent recovered readings."""
         recent = await db.recent_gatt_readings(limit=recent_limit)
         recent_jobs = await db.recent_backfill_jobs(limit=job_limit)
         service: BackfillService | None = app.state.backfill
         if service is None:
-            return {
-                "enabled": False,
-                "paused": False,
-                "worker": "disabled",
-                "current": None,
-                "queue": [],
-                "devices": [],
-                "totals": {
-                    "pending": 0,
-                    "running": 0,
-                    "done": 0,
-                    "failed": 0,
-                },
-                "config": None,
-                "recent": recent,
-                "recent_jobs": recent_jobs,
-            }
+            devices = await _backfill_devices_from_db(db, app.state.labels)
+            return _backfill_disabled_snapshot(
+                devices, recent=recent, recent_jobs=recent_jobs
+            )
         snap = await service.snapshot()
         snap["recent"] = recent
         snap["recent_jobs"] = recent_jobs
@@ -261,22 +309,65 @@ def create_app(
         recent_limit: int = Query(100, ge=1, le=500),
         job_limit: int = Query(50, ge=1, le=200),
     ) -> dict[str, Any]:
-        """Enable or disable GATT backfill for one sensor (opt-in)."""
-        service: BackfillService | None = app.state.backfill
-        if service is None:
-            raise HTTPException(status_code=503, detail="Backfill not available")
-        try:
-            result = await service.set_device_enabled(
-                payload.address, payload.enabled
+        """Enable/disable backfill and/or GATT for one sensor (always persisted)."""
+        if payload.enabled is None and payload.gatt_enabled is None:
+            raise HTTPException(
+                status_code=400,
+                detail="enabled or gatt_enabled required",
             )
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        address = payload.address.strip().upper()
+        service: BackfillService | None = app.state.backfill
+        if service is not None:
+            try:
+                result = await service.set_device_flags(
+                    address,
+                    enabled=payload.enabled,
+                    gatt_enabled=payload.gatt_enabled,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            snap = await service.snapshot()
+            snap["device_update"] = result
+            snap["recent"] = await db.recent_gatt_readings(limit=recent_limit)
+            snap["recent_jobs"] = await db.recent_backfill_jobs(limit=job_limit)
+            return snap
+
+        device = await db.get_device(address)
+        if device is None:
+            raise HTTPException(status_code=404, detail=f"Unknown device {address}")
+        model = str(device.get("model") or "").lower()
+        if model and model not in _BACKFILL_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model or '?'} does not support GATT history",
+            )
+        try:
+            flags = await db.set_backfill_flags(
+                address,
+                enabled=payload.enabled,
+                gatt_enabled=payload.gatt_enabled,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        snap = await service.snapshot()
-        snap["device_update"] = result
-        snap["recent"] = await db.recent_gatt_readings(limit=recent_limit)
-        snap["recent_jobs"] = await db.recent_backfill_jobs(limit=job_limit)
+        if payload.enabled is False:
+            await db.cancel_open_backfill_jobs(address)
+        devices = await _backfill_devices_from_db(db, app.state.labels)
+        snap = _backfill_disabled_snapshot(
+            devices,
+            recent=await db.recent_gatt_readings(limit=recent_limit),
+            recent_jobs=await db.recent_backfill_jobs(limit=job_limit),
+        )
+        snap["device_update"] = {
+            "address": address,
+            "name": app.state.labels.get(address)
+            or str(device.get("name") or address),
+            "enabled": flags["enabled"],
+            "gatt_enabled": flags["gatt_enabled"],
+            "cancelled": 0,
+            "enqueued": 0,
+        }
         return snap
 
     async def _read_import_upload(file: UploadFile) -> tuple[str, bytes]:
@@ -300,12 +391,153 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"Unknown device {addr}")
         return device
 
+    def _form_bool(raw: str | None, default: bool = False) -> bool:
+        if raw is None:
+            return default
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+    _OVERWRITE_EPS_TEMP = 0.05
+    _OVERWRITE_EPS_HUM = 0.05
+    _OVERWRITE_SAMPLE_CAP = 20
+    # Nearby different-ts readings that would sawtooth the chart if both kept.
+    _ZIGZAG_WINDOW_S = 60.0
+    _ZIGZAG_EPS_TEMP = 1.0
+    _ZIGZAG_EPS_HUM = 5.0
+    _ZIGZAG_SAMPLE_CAP = 20
+
+    def _compare_overwrite_diffs(
+        samples: list[tuple[float, float, float]],
+        existing_values: dict[int, tuple[float, float, float]],
+    ) -> dict[str, Any]:
+        """Diff file samples vs DB for minutes that already exist."""
+        by_minute: dict[int, tuple[float, float, float]] = {}
+        for ts, temp, hum in samples:
+            minute = int(float(ts) // 60)
+            by_minute[minute] = (float(ts), float(temp), float(hum))
+
+        would_overwrite = 0
+        temp_max = 0.0
+        hum_max = 0.0
+        sample_rows: list[dict[str, Any]] = []
+        for minute, (ts, temp, hum) in sorted(by_minute.items()):
+            old = existing_values.get(minute)
+            if old is None:
+                continue
+            _old_ts, old_temp, old_hum = old
+            d_temp = abs(old_temp - temp)
+            d_hum = abs(old_hum - hum)
+            if d_temp <= _OVERWRITE_EPS_TEMP and d_hum <= _OVERWRITE_EPS_HUM:
+                continue
+            would_overwrite += 1
+            if d_temp > temp_max:
+                temp_max = d_temp
+            if d_hum > hum_max:
+                hum_max = d_hum
+            if len(sample_rows) < _OVERWRITE_SAMPLE_CAP:
+                sample_rows.append(
+                    {
+                        "ts": ts,
+                        "old_temp": round(old_temp, 2),
+                        "new_temp": round(temp, 2),
+                        "old_hum": round(old_hum, 2),
+                        "new_hum": round(hum, 2),
+                    }
+                )
+        return {
+            "would_overwrite": would_overwrite,
+            "overwrite_temp_max": round(temp_max, 2),
+            "overwrite_hum_max": round(hum_max, 2),
+            "overwrite_samples": sample_rows,
+        }
+
+    def _compare_zigzag(
+        samples: list[tuple[float, float, float]],
+        existing_rows: list[tuple[float, float, float, str | None]],
+        *,
+        overwrite: bool,
+    ) -> dict[str, Any]:
+        """
+        Detect CSV vs nearby DB readings at a *different* timestamp (same minute).
+
+        Insert-only keeps both → chart zigzag. Overwrite updates the DB minute
+        in place, so those conflicts are marked resolved.
+        """
+        by_minute_db: dict[int, list[tuple[float, float, float, str | None]]] = {}
+        for ts, temp, hum, source in existing_rows:
+            by_minute_db.setdefault(int(ts // 60), []).append(
+                (ts, temp, hum, source)
+            )
+
+        by_csv: dict[int, tuple[float, float, float]] = {}
+        for ts, temp, hum in samples:
+            minute = int(float(ts) // 60)
+            by_csv[minute] = (float(ts), float(temp), float(hum))
+
+        zigzag = 0
+        temp_max = 0.0
+        hum_max = 0.0
+        sample_rows: list[dict[str, Any]] = []
+        for minute, (ts, temp, hum) in sorted(by_csv.items()):
+            neighbors: list[tuple[float, float, float, str | None]] = []
+            for m in (minute - 1, minute, minute + 1):
+                neighbors.extend(by_minute_db.get(m) or [])
+            best: tuple[float, float, float, float, float, float, str | None] | None = None
+            # (score, d_temp, d_hum, db_ts, db_temp, db_hum, source)
+            for db_ts, db_temp, db_hum, source in neighbors:
+                gap = abs(db_ts - ts)
+                if gap <= 0.5:
+                    continue  # same timestamp → overwrite path
+                if gap > _ZIGZAG_WINDOW_S:
+                    continue
+                d_temp = abs(db_temp - temp)
+                d_hum = abs(db_hum - hum)
+                if d_temp < _ZIGZAG_EPS_TEMP and d_hum < _ZIGZAG_EPS_HUM:
+                    continue
+                score = d_temp + d_hum / 10.0
+                if best is None or score > best[0]:
+                    best = (score, d_temp, d_hum, db_ts, db_temp, db_hum, source)
+            if best is None:
+                continue
+            _score, d_temp, d_hum, db_ts, db_temp, db_hum, source = best
+            zigzag += 1
+            if d_temp > temp_max:
+                temp_max = d_temp
+            if d_hum > hum_max:
+                hum_max = d_hum
+            if len(sample_rows) < _ZIGZAG_SAMPLE_CAP:
+                sample_rows.append(
+                    {
+                        "ts": ts,
+                        "db_ts": db_ts,
+                        "csv_temp": round(temp, 2),
+                        "db_temp": round(db_temp, 2),
+                        "csv_hum": round(hum, 2),
+                        "db_hum": round(db_hum, 2),
+                        "source": source or "—",
+                    }
+                )
+
+        remaining = 0 if overwrite else zigzag
+        return {
+            "zigzag_count": zigzag,
+            "zigzag_remaining": remaining,
+            "zigzag_resolved_by_overwrite": zigzag if overwrite else 0,
+            "zigzag_temp_max": round(temp_max, 2),
+            "zigzag_hum_max": round(hum_max, 2),
+            "zigzag_samples": sample_rows,
+            "zigzag_window_s": _ZIGZAG_WINDOW_S,
+            "zigzag_eps_temp": _ZIGZAG_EPS_TEMP,
+            "zigzag_eps_hum": _ZIGZAG_EPS_HUM,
+        }
+
     @app.post("/api/backfill/import/preview")
     async def api_backfill_import_preview(
         address: str = Form(...),
         file: UploadFile = File(...),
+        overwrite: str = Form("false"),
     ) -> dict[str, Any]:
         """Parse a Govee CSV/ZIP and compare against existing readings (no write)."""
+        overwrite_flag = _form_bool(overwrite)
         device = await _resolve_import_device(address)
         addr = str(device["address"]).upper()
         labels: dict[str, str] = app.state.labels
@@ -323,11 +555,29 @@ def create_app(
             "coverage_pct": 0.0,
             "counts": {"full": 0, "partial": 0, "missing": 0},
         }
+        empty_overwrite = {
+            "would_overwrite": 0,
+            "overwrite_temp_max": 0.0,
+            "overwrite_hum_max": 0.0,
+            "overwrite_samples": [],
+        }
+        empty_zigzag = {
+            "zigzag_count": 0,
+            "zigzag_remaining": 0,
+            "zigzag_resolved_by_overwrite": 0,
+            "zigzag_temp_max": 0.0,
+            "zigzag_hum_max": 0.0,
+            "zigzag_samples": [],
+            "zigzag_window_s": _ZIGZAG_WINDOW_S,
+            "zigzag_eps_temp": _ZIGZAG_EPS_TEMP,
+            "zigzag_eps_hum": _ZIGZAG_EPS_HUM,
+        }
 
         if not samples:
             return {
                 "address": addr,
                 "name": name,
+                "overwrite": overwrite_flag,
                 "files": files,
                 "file_stats": file_stats,
                 "file": file_summary,
@@ -344,6 +594,8 @@ def create_app(
                     "file_only_minutes": 0,
                     "db_only_minutes": 0,
                     "overlap_pct": 0.0,
+                    **empty_overwrite,
+                    **empty_zigzag,
                 },
                 "file_segments": [],
                 "db_segments": [],
@@ -367,6 +619,15 @@ def create_app(
             round(100.0 * already / len(file_minutes), 1) if file_minutes else 0.0
         )
         existing = await db.reading_range_stats(addr, start, end_excl)
+        existing_values = await db.reading_values_by_minute(addr, start, end_excl)
+        overwrite_meta = _compare_overwrite_diffs(samples, existing_values)
+        # Pad window so neighbors just outside the file range are visible.
+        existing_rows = await db.reading_rows_in_range(
+            addr, start - _ZIGZAG_WINDOW_S, end_excl + _ZIGZAG_WINDOW_S
+        )
+        zigzag_meta = _compare_zigzag(
+            samples, existing_rows, overwrite=overwrite_flag
+        )
 
         file_cov = coverage_from_minute_set(file_minutes, start, end_excl)
         db_cov = coverage_from_minute_set(existing_minutes, start, end_excl)
@@ -374,6 +635,7 @@ def create_app(
         return {
             "address": addr,
             "name": name,
+            "overwrite": overwrite_flag,
             "files": files,
             "file_stats": file_stats,
             "file": file_summary,
@@ -384,6 +646,8 @@ def create_app(
                 "file_only_minutes": would_insert,
                 "db_only_minutes": db_only,
                 "overlap_pct": overlap_pct,
+                **overwrite_meta,
+                **zigzag_meta,
             },
             "file_segments": file_cov.get("segments") or [],
             "db_segments": db_cov.get("segments") or [],
@@ -404,8 +668,10 @@ def create_app(
     async def api_backfill_import(
         address: str = Form(...),
         file: UploadFile = File(...),
+        overwrite: str = Form("false"),
     ) -> dict[str, Any]:
         """Ingest a previously previewed Govee CSV/ZIP into readings."""
+        overwrite_flag = _form_bool(overwrite)
         device = await _resolve_import_device(address)
         addr = str(device["address"]).upper()
         labels: dict[str, str] = app.state.labels
@@ -423,7 +689,7 @@ def create_app(
         if battery is None:
             battery = 0
         source = csv_source(str(app.state.node_id))
-        inserted = await db.insert_gatt_readings(
+        result = await db.insert_gatt_readings(
             address=addr,
             display_name=name,
             model=model,
@@ -431,16 +697,25 @@ def create_app(
             battery=int(battery),
             rssi=None,
             source=source,
+            overwrite=overwrite_flag,
+            eps_temp=_OVERWRITE_EPS_TEMP,
+            eps_hum=_OVERWRITE_EPS_HUM,
         )
+        inserted = int(result.get("inserted") or 0)
+        overwritten = int(result.get("overwritten") or 0)
         summary = summarize_samples(samples)
-        skipped = max(0, len(samples) - inserted)
+        unique_minutes = len({int(float(ts) // 60) for ts, _, _ in samples})
+        skipped = max(0, unique_minutes - inserted - (overwritten if overwrite_flag else 0))
         logger.info(
-            "CSV import %s → %s: inserted=%d skipped=%d bad_rows=%d files=%s",
+            "CSV import %s → %s: inserted=%d overwritten=%d skipped=%d "
+            "bad_rows=%d overwrite=%s files=%s",
             source,
             name,
             inserted,
+            overwritten,
             skipped,
             bad_rows,
+            overwrite_flag,
             files,
         )
         return {
@@ -451,7 +726,9 @@ def create_app(
             "parsed": len(samples),
             "bad_rows": bad_rows,
             "inserted": inserted,
+            "overwritten": overwritten,
             "skipped": skipped,
+            "overwrite": overwrite_flag,
             "range": summary["range"],
         }
 
@@ -662,12 +939,29 @@ def create_app(
                     "address": d.get("address"),
                     "name": d.get("name") or d.get("address"),
                     "zone": d.get("zone"),
+                    "height": d.get("height"),
                     "temperature_c": d.get("temperature_c"),
                     "humidity": d.get("humidity"),
                 }
             )
         for room in payload["rooms"]:
             room["sensors"] = by_room.get(room["id"], [])
+
+        def _exterior_comparative(
+            sensors: list[dict[str, Any]],
+        ) -> list[dict[str, Any]]:
+            """Exterior sensors for façade comparison — prefer height=high."""
+            exterior = [
+                s
+                for s in sensors
+                if str(s.get("zone") or "").lower() == "exterior"
+            ]
+            high = [
+                s
+                for s in exterior
+                if str(s.get("height") or "").lower() == "high"
+            ]
+            return high or exterior
 
         solar: dict[str, Any] = {"available": False}
         outdoor_summary: dict[str, Any] = {"available": False}
@@ -879,9 +1173,11 @@ def create_app(
         # Indoor history always (façade charts + network thermal coupling).
         # hist_temp_* = window extremes; live temp_min/max are set below from
         # current interior sensor readings.
+        # façade comparative history uses exterior height=high when available.
         for room in payload["rooms"]:
             room.setdefault("room_history", None)
             room.setdefault("room_projection", None)
+            room.setdefault("facade_history", None)
             room["hist_temp_max"] = None
             room["hist_temp_min"] = None
             addr = None
@@ -892,29 +1188,68 @@ def create_app(
                 if s.get("address"):
                     addr = str(s["address"]).upper()
                     break
-            if not addr:
-                continue
-            try:
-                hist = await db.history(addr, hours)
-            except Exception:
-                hist = []
-            if not hist:
-                continue
-            points = [
-                {
-                    "ts": float(p["ts"]),
-                    "temperature_c": round(float(p["temperature_c"]), 2),
-                    "humidity": p.get("humidity"),
-                }
-                for p in hist
-                if p.get("temperature_c") is not None
-            ]
-            if not points:
-                continue
-            temps = [float(p["temperature_c"]) for p in points]
-            room["room_history"] = {"address": addr, "points": points}
-            room["hist_temp_max"] = round(max(temps), 2)
-            room["hist_temp_min"] = round(min(temps), 2)
+            if addr:
+                try:
+                    hist = await db.history(addr, hours)
+                except Exception:
+                    hist = []
+                if hist:
+                    points = [
+                        {
+                            "ts": float(p["ts"]),
+                            "temperature_c": round(float(p["temperature_c"]), 2),
+                            "humidity": p.get("humidity"),
+                        }
+                        for p in hist
+                        if p.get("temperature_c") is not None
+                    ]
+                    if points:
+                        temps = [float(p["temperature_c"]) for p in points]
+                        room["room_history"] = {"address": addr, "points": points}
+                        room["hist_temp_max"] = round(max(temps), 2)
+                        room["hist_temp_min"] = round(min(temps), 2)
+
+            facade_sensors = _exterior_comparative(room.get("sensors") or [])
+            facade_addr = None
+            for s in facade_sensors:
+                if s.get("address"):
+                    facade_addr = str(s["address"]).upper()
+                    break
+            if facade_addr:
+                try:
+                    fhist = await db.history(facade_addr, hours)
+                except Exception:
+                    fhist = []
+                if fhist:
+                    fpoints = [
+                        {
+                            "ts": float(p["ts"]),
+                            "temperature_c": round(float(p["temperature_c"]), 2),
+                            "humidity": p.get("humidity"),
+                        }
+                        for p in fhist
+                        if p.get("temperature_c") is not None
+                    ]
+                    if fpoints:
+                        room["facade_history"] = {
+                            "address": facade_addr,
+                            "name": next(
+                                (
+                                    str(s.get("name") or facade_addr)
+                                    for s in facade_sensors
+                                    if str(s.get("address") or "").upper()
+                                    == facade_addr
+                                ),
+                                facade_addr,
+                            ),
+                            "height": "high"
+                            if any(
+                                str(s.get("height") or "").lower() == "high"
+                                for s in facade_sensors
+                            )
+                            else None,
+                            "points": fpoints,
+                        }
 
         # Network graph extras: contacts + opening state on edges / façades.
         try:
@@ -948,11 +1283,7 @@ def create_app(
                 for s in sensors
                 if str(s.get("zone") or "").lower() != "exterior"
             ]
-            exterior = [
-                s
-                for s in sensors
-                if str(s.get("zone") or "").lower() == "exterior"
-            ]
+            exterior = _exterior_comparative(sensors)
             live_temps: list[float] = []
             for s in interior:
                 try:
@@ -981,7 +1312,13 @@ def create_app(
                 room["facade_temp_c"] = round(
                     sum(facade_temps) / len(facade_temps), 2
                 )
+                room["facade_sensor_names"] = [
+                    str(s.get("name") or s.get("address") or "")
+                    for s in exterior
+                    if s.get("temperature_c") is not None
+                ]
             else:
+                room["facade_sensor_names"] = []
                 proj = room.get("facade_projection") or {}
                 proj_now = proj.get("temp_now")
                 if proj_now is not None:

@@ -96,9 +96,13 @@
   const backfillClearAllBtn = document.getElementById("backfill-clear-all");
   const coverageImportDeviceEl = document.getElementById("coverage-import-device");
   const coverageImportFileEl = document.getElementById("coverage-import-file");
+  const coverageDropzoneEl = document.getElementById("coverage-dropzone");
+  const coverageBatchEl = document.getElementById("coverage-batch");
+  const coverageBatchBodyEl = document.getElementById("coverage-batch-body");
+  const coverageBatchSelectAllEl = document.getElementById("coverage-batch-select-all");
   const coverageImportAnalyzeBtn = document.getElementById("coverage-import-analyze");
   const coverageImportConfirmBtn = document.getElementById("coverage-import-confirm");
-  const coverageImportCancelBtn = document.getElementById("coverage-import-cancel");
+  const coverageImportClearBtn = document.getElementById("coverage-import-clear");
   const coverageImportStatusEl = document.getElementById("coverage-import-status");
   const coverageImportRecapEl = document.getElementById("coverage-import-recap");
   const coverageImportFileStatsEl = document.getElementById("coverage-import-file-stats");
@@ -112,11 +116,36 @@
     "coverage-import-members-wrap"
   );
   const coverageImportMembersEl = document.getElementById("coverage-import-members");
+  const coverageImportOverwriteEl = document.getElementById("coverage-import-overwrite");
+  const coverageImportOverwriteWrapEl = document.getElementById(
+    "coverage-import-overwrite-wrap"
+  );
+  const coverageImportOverwriteBodyEl = document.getElementById(
+    "coverage-import-overwrite-body"
+  );
+  const coverageImportZigzagWrapEl = document.getElementById(
+    "coverage-import-zigzag-wrap"
+  );
+  const coverageImportZigzagHintEl = document.getElementById(
+    "coverage-import-zigzag-hint"
+  );
+  const coverageImportZigzagBodyEl = document.getElementById(
+    "coverage-import-zigzag-body"
+  );
+  const coverageChartsEl = document.getElementById("coverage-charts");
   let backfillTimer = null;
   let backfillSnapshot = null;
-  let backfillDeviceBusy = false;
-  let coverageImportFile = null;
-  let coverageImportPreview = null;
+  let backfillDeviceBusyAddrs = new Set();
+  let backfillBulkBusy = false;
+  let backfillLoadInFlight = false;
+  /** @type {{id:string,file:File,included:boolean,address:string,match:string,preview:any,error:string|null,status:string,result:any}[]} */
+  let coverageBatch = [];
+  let coverageBatchActiveId = "";
+  let coverageBatchBusy = false;
+  /** @type {import('chart.js').Chart | null} */
+  let coverageTempChart = null;
+  /** @type {import('chart.js').Chart | null} */
+  let coverageHumChart = null;
   /** @type {string} */
   let coverageHours = "2160";
   /** @type {string} */
@@ -599,6 +628,7 @@
     if (humChart) humChart.resize();
     if (dewChart) dewChart.resize();
     facadeChartInstances.forEach((c) => c.resize());
+    if (typeof resizeCoverageCharts === "function") resizeCoverageCharts();
   }
 
   function applyChartHeight(px, { persist = true } = {}) {
@@ -1163,31 +1193,40 @@
       .join("");
   }
 
-  function renderBackfillSensors(devices, serviceEnabled) {
+  function patchBackfillDeviceLocal(address, patch) {
+    if (!backfillSnapshot || !Array.isArray(backfillSnapshot.devices)) return;
+    const key = String(address || "").toUpperCase();
+    backfillSnapshot.devices = backfillSnapshot.devices.map((d) => {
+      if (String(d.address || "").toUpperCase() !== key) return d;
+      return Object.assign({}, d, patch);
+    });
+  }
+
+  function renderBackfillSensors(devices) {
     if (!backfillSensorListEl) return;
     const rows = Array.isArray(devices) ? devices : [];
     const anyOn = rows.some((d) => d.enabled);
     if (backfillSensorsHintEl) {
-      if (!serviceEnabled) {
-        backfillSensorsHintEl.hidden = true;
-      } else if (!rows.length) {
+      if (!rows.length) {
         backfillSensorsHintEl.hidden = false;
         backfillSensorsHintEl.textContent = "No eligible Govee sensors found.";
       } else if (!anyOn) {
         backfillSensorsHintEl.hidden = false;
         backfillSensorsHintEl.textContent =
-          "No sensors selected — enable at least one to enqueue GATT recovery.";
+          "No sensors selected — enable at least one to enqueue recovery. Uncheck GATT for peers only.";
       } else {
-        backfillSensorsHintEl.hidden = true;
+        backfillSensorsHintEl.hidden = false;
+        backfillSensorsHintEl.textContent =
+          "Uncheck GATT to fill gaps from federation peers only (no local BLE download).";
       }
     }
     if (backfillSelectAllBtn) {
       backfillSelectAllBtn.disabled =
-        !serviceEnabled || !rows.length || backfillDeviceBusy;
+        !rows.length || backfillBulkBusy || backfillDeviceBusyAddrs.size > 0;
     }
     if (backfillClearAllBtn) {
       backfillClearAllBtn.disabled =
-        !serviceEnabled || !rows.length || backfillDeviceBusy;
+        !rows.length || backfillBulkBusy || backfillDeviceBusyAddrs.size > 0;
     }
     if (!rows.length) {
       backfillSensorListEl.innerHTML =
@@ -1198,6 +1237,10 @@
       .map((d) => {
         const safe = String(d.address || "").replace(/:/g, "");
         const id = `bf-dev-${escapeHtml(safe)}`;
+        const gattId = `bf-gatt-${escapeHtml(safe)}`;
+        const rowBusy = backfillDeviceBusyAddrs.has(
+          String(d.address || "").toUpperCase()
+        );
         const meta = [
           d.local_best ? "★" : null,
           d.rssi != null ? `${Number(d.rssi)} dBm` : null,
@@ -1205,29 +1248,46 @@
         ]
           .filter(Boolean)
           .join(" · ");
+        // Do not use label[for] wrapping the same input — it double-toggles in browsers.
         return (
-          `<li><label for="${id}">` +
+          `<li class="backfill-sensor-row">` +
+          `<span class="backfill-sensor-flags">` +
+          `<label class="backfill-sensor-opt" title="Opt in to backfill">` +
           `<input type="checkbox" id="${id}" data-address="${escapeHtml(d.address)}" ` +
+          `data-flag="enabled" ` +
           (d.enabled ? "checked " : "") +
-          (!serviceEnabled || backfillDeviceBusy ? "disabled " : "") +
-          `/>` +
-          `<span>${escapeHtml(d.name || d.address)}</span>` +
+          (rowBusy ? "disabled " : "") +
+          `/></label>` +
+          `<label class="backfill-sensor-gatt" title="Allow GATT after peer fill">` +
+          `<input type="checkbox" id="${gattId}" data-address="${escapeHtml(d.address)}" ` +
+          `data-flag="gatt_enabled" ` +
+          (d.gatt_enabled !== false ? "checked " : "") +
+          (rowBusy ? "disabled " : "") +
+          `/><span>GATT</span></label>` +
+          `</span>` +
+          `<span class="backfill-sensor-name">${escapeHtml(d.name || d.address)}</span>` +
           (meta
             ? ` <span class="backfill-sensor-meta">${escapeHtml(meta)}</span>`
             : "") +
-          `</label></li>`
+          `</li>`
         );
       })
       .join("");
   }
 
-  async function setBackfillDevice(address, enabled) {
-    backfillDeviceBusy = true;
+  async function setBackfillDeviceFlags(address, patch) {
+    const key = String(address || "").toUpperCase();
+    if (backfillDeviceBusyAddrs.has(key)) return;
+    patchBackfillDeviceLocal(address, patch);
+    backfillDeviceBusyAddrs.add(key);
+    if (backfillSnapshot) {
+      renderBackfillSensors(backfillSnapshot.devices);
+    }
     try {
       const res = await fetch("/api/backfill/devices", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address, enabled: Boolean(enabled) }),
+        body: JSON.stringify({ address, ...patch }),
       });
       if (!res.ok) {
         let detail = res.statusText;
@@ -1239,42 +1299,82 @@
         }
         throw new Error(detail || `HTTP ${res.status}`);
       }
-      renderBackfill(await res.json());
-      syncBackfillPolling();
-    } finally {
-      backfillDeviceBusy = false;
-      if (backfillSnapshot) {
-        renderBackfillSensors(
-          backfillSnapshot.devices,
-          !(
-            !backfillSnapshot ||
-            backfillSnapshot.worker === "disabled" ||
-            backfillSnapshot.enabled === false
-          )
+      const data = await res.json();
+      // Keep in-flight optimistic flags for other busy rows (incl. bulk).
+      if (
+        backfillDeviceBusyAddrs.size > 0 &&
+        backfillSnapshot &&
+        Array.isArray(backfillSnapshot.devices) &&
+        Array.isArray(data.devices)
+      ) {
+        const local = new Map(
+          backfillSnapshot.devices.map((d) => [
+            String(d.address || "").toUpperCase(),
+            d,
+          ])
         );
+        data.devices = data.devices.map((d) => {
+          const addr = String(d.address || "").toUpperCase();
+          if (addr === key || !backfillDeviceBusyAddrs.has(addr)) return d;
+          const prev = local.get(addr);
+          if (!prev) return d;
+          return Object.assign({}, d, {
+            enabled: prev.enabled,
+            gatt_enabled: prev.gatt_enabled,
+          });
+        });
+      }
+      renderBackfill(data);
+      syncBackfillPolling();
+    } catch (err) {
+      const revert = {};
+      if (Object.prototype.hasOwnProperty.call(patch, "enabled")) {
+        revert.enabled = !patch.enabled;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, "gatt_enabled")) {
+        revert.gatt_enabled = !patch.gatt_enabled;
+      }
+      patchBackfillDeviceLocal(address, revert);
+      throw err;
+    } finally {
+      backfillDeviceBusyAddrs.delete(key);
+      if (backfillSnapshot) {
+        renderBackfillSensors(backfillSnapshot.devices);
       }
     }
   }
 
+  async function setBackfillDevice(address, enabled) {
+    return setBackfillDeviceFlags(address, { enabled: Boolean(enabled) });
+  }
+
   async function setBackfillDevicesBulk(enabled) {
+    if (backfillBulkBusy || backfillDeviceBusyAddrs.size) return;
     const devices = (backfillSnapshot && backfillSnapshot.devices) || [];
     const targets = devices.filter((d) => Boolean(d.enabled) !== Boolean(enabled));
     if (!targets.length) return;
-    backfillDeviceBusy = true;
-    renderBackfillSensors(
-      devices,
-      Boolean(backfillSnapshot && backfillSnapshot.enabled !== false)
-    );
+
+    const flag = Boolean(enabled);
+    backfillBulkBusy = true;
+    for (const d of targets) {
+      const key = String(d.address || "").toUpperCase();
+      patchBackfillDeviceLocal(d.address, { enabled: flag });
+      backfillDeviceBusyAddrs.add(key);
+    }
+    if (backfillSnapshot) {
+      renderBackfillSensors(backfillSnapshot.devices);
+    }
+    if (backfillSelectAllBtn) backfillSelectAllBtn.disabled = true;
+    if (backfillClearAllBtn) backfillClearAllBtn.disabled = true;
+
     try {
       let last = null;
       for (const d of targets) {
+        const key = String(d.address || "").toUpperCase();
         const res = await fetch("/api/backfill/devices", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            address: d.address,
-            enabled: Boolean(enabled),
-          }),
+          body: JSON.stringify({ address: d.address, enabled: flag }),
         });
         if (!res.ok) {
           let detail = res.statusText;
@@ -1287,22 +1387,45 @@
           throw new Error(detail || `HTTP ${res.status}`);
         }
         last = await res.json();
+        backfillDeviceBusyAddrs.delete(key);
+        if (last && Array.isArray(last.devices) && backfillSnapshot) {
+          const local = new Map(
+            backfillSnapshot.devices.map((row) => [
+              String(row.address || "").toUpperCase(),
+              row,
+            ])
+          );
+          last.devices = last.devices.map((row) => {
+            const addr = String(row.address || "").toUpperCase();
+            if (!backfillDeviceBusyAddrs.has(addr)) return row;
+            const prev = local.get(addr);
+            if (!prev) return row;
+            return Object.assign({}, row, {
+              enabled: prev.enabled,
+              gatt_enabled: prev.gatt_enabled,
+            });
+          });
+          backfillSnapshot = last;
+          renderBackfillSensors(last.devices);
+        }
       }
       if (last) {
         renderBackfill(last);
         syncBackfillPolling();
       }
+    } catch (err) {
+      backfillDeviceBusyAddrs.clear();
+      try {
+        await loadBackfill();
+      } catch (_) {
+        /* ignore */
+      }
+      throw err;
     } finally {
-      backfillDeviceBusy = false;
+      backfillBulkBusy = false;
+      backfillDeviceBusyAddrs.clear();
       if (backfillSnapshot) {
-        renderBackfillSensors(
-          backfillSnapshot.devices,
-          !(
-            !backfillSnapshot ||
-            backfillSnapshot.worker === "disabled" ||
-            backfillSnapshot.enabled === false
-          )
-        );
+        renderBackfillSensors(backfillSnapshot.devices);
       }
     }
   }
@@ -1311,26 +1434,27 @@
     backfillSnapshot = data;
     if (!backfillPanelEl || !backfillCurrentEl) return;
 
-    const disabled = !data || data.worker === "disabled" || data.enabled === false;
+    const workerOffline =
+      !data || data.worker === "disabled" || data.enabled === false;
     if (backfillPauseBtn) {
-      backfillPauseBtn.disabled = disabled;
+      backfillPauseBtn.disabled = workerOffline;
       backfillPauseBtn.textContent =
         data && data.paused ? "Resume" : "Pause";
     }
     if (backfillRefreshBtn) {
-      backfillRefreshBtn.disabled = disabled;
+      backfillRefreshBtn.disabled = workerOffline;
     }
 
-    renderBackfillSensors(data && data.devices, !disabled);
+    renderBackfillSensors(data && data.devices);
 
     const current = data && data.current;
     const queue = (data && data.queue) || [];
     const totals = (data && data.totals) || {};
     const anyOn = ((data && data.devices) || []).some((d) => d.enabled);
 
-    if (disabled) {
+    if (workerOffline) {
       backfillCurrentEl.innerHTML =
-        `<p class="backfill-idle">Backfill disabled or needs local BLE scanner</p>`;
+        `<p class="backfill-idle">Worker offline — waiting for scanner or federation peers</p>`;
     } else if (!current) {
       backfillCurrentEl.innerHTML =
         `<p class="backfill-idle">` +
@@ -1470,12 +1594,657 @@
   }
 
   function clearCoverageImportRecap() {
-    coverageImportPreview = null;
     if (coverageImportRecapEl) coverageImportRecapEl.hidden = true;
-    if (coverageImportConfirmBtn) coverageImportConfirmBtn.disabled = true;
     if (coverageImportBarsEl) coverageImportBarsEl.hidden = true;
     if (coverageFileBarEl) coverageFileBarEl.innerHTML = "";
     if (coverageDbBarEl) coverageDbBarEl.innerHTML = "";
+    if (coverageImportOverwriteWrapEl) coverageImportOverwriteWrapEl.hidden = true;
+    if (coverageImportOverwriteBodyEl) coverageImportOverwriteBodyEl.innerHTML = "";
+    if (coverageImportZigzagWrapEl) coverageImportZigzagWrapEl.hidden = true;
+    if (coverageImportZigzagBodyEl) coverageImportZigzagBodyEl.innerHTML = "";
+    if (coverageImportZigzagHintEl) coverageImportZigzagHintEl.textContent = "";
+  }
+
+  function newBatchItemId() {
+    return `b-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function isImportableFilename(name) {
+    const lower = String(name || "").toLowerCase();
+    return lower.endsWith(".csv") || lower.endsWith(".zip");
+  }
+
+  function matchScoreForFilename(filename, sensorName) {
+    const nameFold = foldImportLabel(sensorName);
+    const fileFold = foldImportLabel(filename);
+    if (!nameFold || nameFold.length < 2 || !fileFold) return 0;
+    if (fileFold.includes(nameFold)) return nameFold.length * 100;
+    const tokens = String(sensorName || "")
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 3);
+    if (!tokens.length) return 0;
+    const hit = tokens.filter((t) => fileFold.includes(t));
+    if (hit.length === tokens.length && tokens.length >= 2) {
+      return hit.join("").length * 40;
+    }
+    if (hit.length >= 2) return hit.join("").length * 15;
+    if (hit.length === 1 && hit[0].length >= 5) return hit[0].length * 8;
+    return 0;
+  }
+
+  function matchDeviceForFilename(filename) {
+    let best = null;
+    let bestScore = 0;
+    for (const d of devices || []) {
+      const score = matchScoreForFilename(filename, d.name || "");
+      if (score > bestScore) {
+        bestScore = score;
+        best = d;
+      }
+    }
+    if (!best || bestScore <= 0) {
+      return { address: "", match: "none", score: 0 };
+    }
+    const exact = filenameMentionsSensor(filename, best.name || "");
+    return {
+      address: best.address,
+      match: exact ? "exact" : "partial",
+      score: bestScore,
+    };
+  }
+
+  function deviceOptionsHtml(selectedAddress) {
+    const opts = ['<option value="">— select —</option>'];
+    for (const d of devices || []) {
+      const sel = d.address === selectedAddress ? " selected" : "";
+      opts.push(
+        `<option value="${escapeHtml(d.address)}"${sel}>${escapeHtml(d.name)}</option>`
+      );
+    }
+    return opts.join("");
+  }
+
+  function batchItemById(id) {
+    return coverageBatch.find((it) => it.id === id) || null;
+  }
+
+  function syncBatchSelectAll() {
+    if (!coverageBatchSelectAllEl) return;
+    const rows = coverageBatch.filter((it) => it.status !== "done");
+    if (!rows.length) {
+      coverageBatchSelectAllEl.checked = false;
+      coverageBatchSelectAllEl.indeterminate = false;
+      return;
+    }
+    const n = rows.filter((it) => it.included).length;
+    coverageBatchSelectAllEl.checked = n === rows.length;
+    coverageBatchSelectAllEl.indeterminate = n > 0 && n < rows.length;
+  }
+
+  function coverageOverwriteEnabled() {
+    return Boolean(coverageImportOverwriteEl && coverageImportOverwriteEl.checked);
+  }
+
+  function batchItemImportable(it) {
+    if (!it.included || !it.address || !it.preview) return false;
+    if (it.status === "done" || it.status === "importing") return false;
+    const compare = it.preview.compare || {};
+    const zigzagLeft = Number(compare.zigzag_remaining) || 0;
+    // Block insert-only when nearby BLE/other points would sawtooth the chart.
+    if (zigzagLeft > 0 && !coverageOverwriteEnabled()) return false;
+    const wouldInsert = Number(compare.would_insert) || 0;
+    const wouldOverwrite = Number(compare.would_overwrite) || 0;
+    if (wouldInsert > 0) return true;
+    return coverageOverwriteEnabled() && wouldOverwrite > 0;
+  }
+
+  function updateBatchImportButton() {
+    if (!coverageImportConfirmBtn) return;
+    const ready = coverageBatch.filter(batchItemImportable);
+    const zigzagBlocked = coverageBatch.some(
+      (it) =>
+        it.included &&
+        it.preview &&
+        (Number((it.preview.compare || {}).zigzag_remaining) || 0) > 0 &&
+        !coverageOverwriteEnabled()
+    );
+    coverageImportConfirmBtn.disabled = coverageBatchBusy || ready.length === 0;
+    if (zigzagBlocked && ready.length === 0) {
+      coverageImportConfirmBtn.textContent = "Enable overwrite (zigzag)";
+    } else {
+      coverageImportConfirmBtn.textContent =
+        ready.length > 1
+          ? `Import selected (${ready.length})`
+          : "Import selected";
+    }
+  }
+
+  function updateBatchStatusLine() {
+    if (!coverageImportStatusEl) return;
+    if (!coverageBatch.length) {
+      coverageImportStatusEl.textContent = "";
+      coverageImportStatusEl.classList.remove("import-name-warn");
+      return;
+    }
+    if (coverageBatchBusy) return;
+    const matched = coverageBatch.filter((it) => it.address).length;
+    const unmatched = coverageBatch.length - matched;
+    const would = coverageBatch
+      .filter((it) => it.included && it.preview)
+      .reduce(
+        (n, it) => n + (Number((it.preview.compare || {}).would_insert) || 0),
+        0
+      );
+    const wouldOw = coverageBatch
+      .filter((it) => it.included && it.preview)
+      .reduce(
+        (n, it) => n + (Number((it.preview.compare || {}).would_overwrite) || 0),
+        0
+      );
+    const zigzag = coverageBatch
+      .filter((it) => it.included && it.preview)
+      .reduce(
+        (n, it) => n + (Number((it.preview.compare || {}).zigzag_count) || 0),
+        0
+      );
+    const zigzagLeft = coverageBatch
+      .filter((it) => it.included && it.preview)
+      .reduce(
+        (n, it) => n + (Number((it.preview.compare || {}).zigzag_remaining) || 0),
+        0
+      );
+    const errs = coverageBatch.filter((it) => it.error).length;
+    const owOn = coverageOverwriteEnabled();
+    let msg =
+      `${coverageBatch.length} file(s)` +
+      ` · ${matched} matched` +
+      (unmatched ? ` · ${unmatched} unmatched` : "") +
+      ` · ${would} new minute(s)`;
+    if (owOn) msg += ` · ${wouldOw} overwrite`;
+    else if (wouldOw) msg += ` · ${wouldOw} differing (enable overwrite)`;
+    if (zigzag) {
+      msg += owOn
+        ? ` · ${zigzag} zigzag (resolved by overwrite)`
+        : ` · ${zigzagLeft} zigzag — enable overwrite`;
+    }
+    if (errs) msg += ` · ${errs} error(s)`;
+    coverageImportStatusEl.textContent = msg;
+    coverageImportStatusEl.classList.toggle(
+      "import-name-warn",
+      unmatched > 0 || errs > 0 || (owOn && wouldOw > 0) || zigzagLeft > 0
+    );
+  }
+
+  function showBatchItemRecap(item) {
+    if (!item || !item.preview) {
+      clearCoverageImportRecap();
+      return;
+    }
+    renderBackfillImportPreview(item.preview);
+  }
+
+  function renderCoverageBatch() {
+    if (!coverageBatchEl || !coverageBatchBodyEl) return;
+    coverageBatchEl.hidden = coverageBatch.length === 0;
+    if (!coverageBatch.length) {
+      coverageBatchBodyEl.innerHTML = "";
+      clearCoverageImportRecap();
+      updateBatchImportButton();
+      updateBatchStatusLine();
+      return;
+    }
+    const owOn = coverageOverwriteEnabled();
+    coverageBatchBodyEl.innerHTML = coverageBatch
+      .map((it) => {
+        const compare = (it.preview && it.preview.compare) || {};
+        const would =
+          it.preview ? Number(compare.would_insert) || 0 : "—";
+        const wouldOw =
+          it.preview ? Number(compare.would_overwrite) || 0 : "—";
+        const samples =
+          it.preview && it.preview.file
+            ? Number(it.preview.file.parsed) || 0
+            : "—";
+        let statusTxt = it.status;
+        let statusCls = "cov-batch-status";
+        if (it.error) {
+          statusTxt = it.error;
+          statusCls += " is-error";
+        } else if (it.status === "ready") {
+          const parts = [];
+          if (Number(would) > 0) parts.push(`${would} new`);
+          if (Number(wouldOw) > 0) {
+            parts.push(owOn ? `${wouldOw} overwrite` : `${wouldOw} differ`);
+          }
+          const zz = Number(compare.zigzag_count) || 0;
+          const zzLeft = Number(compare.zigzag_remaining) || 0;
+          if (zzLeft > 0) parts.push(`${zzLeft} zigzag`);
+          else if (zz > 0 && owOn) parts.push(`${zz} zigzag ok`);
+          statusTxt = parts.length ? parts.join(" · ") : "Nothing new";
+          statusCls +=
+            Number(would) > 0 || (owOn && Number(wouldOw) > 0) ? " is-ok" : "";
+          if (zzLeft > 0) statusCls += " is-error";
+        } else if (it.status === "done" && it.result) {
+          statusTxt =
+            `Imported ${it.result.inserted || 0}` +
+            (it.result.overwritten
+              ? ` · ow ${it.result.overwritten}`
+              : "");
+          statusCls += " is-ok";
+        } else if (it.status === "analyzing") {
+          statusTxt = "Analyzing…";
+        } else if (it.status === "importing") {
+          statusTxt = "Importing…";
+        } else if (it.match === "none" && !it.address) {
+          statusTxt = "No sensor match";
+          statusCls += " is-error";
+        }
+        const active = it.id === coverageBatchActiveId ? " is-active" : "";
+        const unmatched = !it.address ? " is-unmatched" : "";
+        return (
+          `<tr class="${active}${unmatched}" data-batch-id="${escapeHtml(it.id)}">` +
+          `<td class="cov-batch-check"><input type="checkbox" data-batch-include` +
+          `${it.included ? " checked" : ""}` +
+          `${it.status === "done" ? " disabled" : ""} /></td>` +
+          `<td class="cov-batch-file" title="${escapeHtml(it.file.name)}">${escapeHtml(
+            it.file.name
+          )}</td>` +
+          `<td class="cov-batch-sensor"><select data-batch-sensor>${deviceOptionsHtml(
+            it.address
+          )}</select></td>` +
+          `<td class="num">${samples}</td>` +
+          `<td class="num">${would}</td>` +
+          `<td class="num">${wouldOw}</td>` +
+          `<td class="${statusCls}">${escapeHtml(String(statusTxt))}</td>` +
+          `</tr>`
+        );
+      })
+      .join("");
+    syncBatchSelectAll();
+    updateBatchImportButton();
+    updateBatchStatusLine();
+    const active = batchItemById(coverageBatchActiveId);
+    if (active && active.preview) showBatchItemRecap(active);
+    else if (coverageBatch.length === 1 && coverageBatch[0].preview) {
+      coverageBatchActiveId = coverageBatch[0].id;
+      showBatchItemRecap(coverageBatch[0]);
+    }
+  }
+
+  function addFilesToBatch(fileList) {
+    const incoming = [...(fileList || [])].filter((f) => isImportableFilename(f.name));
+    if (!incoming.length) {
+      if (coverageImportStatusEl) {
+        coverageImportStatusEl.textContent = "No CSV or ZIP files found.";
+      }
+      return;
+    }
+    for (const file of incoming) {
+      const dup = coverageBatch.some(
+        (it) => it.file.name === file.name && it.file.size === file.size
+      );
+      if (dup) continue;
+      const matched = matchDeviceForFilename(file.name);
+      coverageBatch.push({
+        id: newBatchItemId(),
+        file,
+        included: Boolean(matched.address),
+        address: matched.address || "",
+        match: matched.match,
+        preview: null,
+        error: null,
+        status: matched.address ? "pending" : "pending",
+        result: null,
+      });
+    }
+    if (!coverageBatchActiveId && coverageBatch.length) {
+      coverageBatchActiveId = coverageBatch[0].id;
+    }
+    renderCoverageBatch();
+    analyzeCoverageBatch().catch((err) => console.warn(err));
+  }
+
+  function clearCoverageBatch() {
+    coverageBatch = [];
+    coverageBatchActiveId = "";
+    coverageBatchBusy = false;
+    if (coverageImportFileEl) coverageImportFileEl.value = "";
+    clearCoverageImportRecap();
+    renderCoverageBatch();
+    if (coverageImportAnalyzeBtn) coverageImportAnalyzeBtn.disabled = false;
+    if (coverageImportStatusEl) {
+      coverageImportStatusEl.textContent = "";
+      coverageImportStatusEl.classList.remove("import-name-warn");
+    }
+  }
+
+  async function previewImportFile(file, address) {
+    const body = new FormData();
+    body.append("address", address);
+    body.append("file", file, file.name);
+    body.append("overwrite", coverageOverwriteEnabled() ? "true" : "false");
+    const res = await fetch("/api/backfill/import/preview", { method: "POST", body });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const err = await res.json();
+        if (err && err.detail) detail = err.detail;
+      } catch (_) {
+        /* ignore */
+      }
+      throw new Error(typeof detail === "string" ? detail : `HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  async function importOneFile(file, address) {
+    const body = new FormData();
+    body.append("address", address);
+    body.append("file", file, file.name);
+    body.append("overwrite", coverageOverwriteEnabled() ? "true" : "false");
+    const res = await fetch("/api/backfill/import", { method: "POST", body });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const err = await res.json();
+        if (err && err.detail) detail = err.detail;
+      } catch (_) {
+        /* ignore */
+      }
+      throw new Error(typeof detail === "string" ? detail : `HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  async function analyzeCoverageBatchItem(item) {
+    item.error = null;
+    if (!item.address) {
+      item.preview = null;
+      item.status = "pending";
+      return;
+    }
+    item.status = "analyzing";
+    renderCoverageBatch();
+    try {
+      const preview = await previewImportFile(item.file, item.address);
+      item.preview = preview;
+      item.status = "ready";
+      item.error = null;
+    } catch (err) {
+      item.preview = null;
+      item.status = "error";
+      item.error = err.message || String(err);
+    }
+  }
+
+  async function analyzeCoverageBatch() {
+    if (coverageBatchBusy) return;
+    coverageBatchBusy = true;
+    if (coverageImportAnalyzeBtn) coverageImportAnalyzeBtn.disabled = true;
+    if (coverageImportConfirmBtn) coverageImportConfirmBtn.disabled = true;
+    if (coverageImportStatusEl) {
+      coverageImportStatusEl.textContent = "Analyzing…";
+      coverageImportStatusEl.classList.remove("import-name-warn");
+    }
+    try {
+      for (const item of coverageBatch) {
+        if (item.status === "done") continue;
+        await analyzeCoverageBatchItem(item);
+        renderCoverageBatch();
+      }
+    } finally {
+      coverageBatchBusy = false;
+      if (coverageImportAnalyzeBtn) coverageImportAnalyzeBtn.disabled = false;
+      renderCoverageBatch();
+    }
+  }
+
+  async function confirmCoverageBatch() {
+    const todo = coverageBatch.filter(batchItemImportable);
+    if (!todo.length || coverageBatchBusy) return;
+    coverageBatchBusy = true;
+    if (coverageImportAnalyzeBtn) coverageImportAnalyzeBtn.disabled = true;
+    if (coverageImportConfirmBtn) coverageImportConfirmBtn.disabled = true;
+    let insertedTotal = 0;
+    let overwrittenTotal = 0;
+    let skippedTotal = 0;
+    let badTotal = 0;
+    let okCount = 0;
+    let failCount = 0;
+    try {
+      for (const item of todo) {
+        item.status = "importing";
+        item.error = null;
+        renderCoverageBatch();
+        if (coverageImportStatusEl) {
+          coverageImportStatusEl.textContent = `Importing ${item.file.name}…`;
+        }
+        try {
+          const result = await importOneFile(item.file, item.address);
+          item.result = result;
+          item.status = "done";
+          item.included = false;
+          insertedTotal += Number(result.inserted) || 0;
+          overwrittenTotal += Number(result.overwritten) || 0;
+          skippedTotal += Number(result.skipped) || 0;
+          badTotal += Number(result.bad_rows) || 0;
+          okCount += 1;
+        } catch (err) {
+          item.status = "error";
+          item.error = err.message || String(err);
+          failCount += 1;
+        }
+        renderCoverageBatch();
+      }
+      await loadDevices();
+      if (currentView === "coverage") {
+        await loadCoverage();
+      }
+      if (coverageImportStatusEl) {
+        coverageImportStatusEl.textContent =
+          `Imported ${okCount} file(s)` +
+          ` · ${insertedTotal} sample(s)` +
+          (overwrittenTotal ? ` · overwritten ${overwrittenTotal}` : "") +
+          (skippedTotal ? ` · skipped ${skippedTotal}` : "") +
+          (badTotal ? ` · ${badTotal} bad row(s)` : "") +
+          (failCount ? ` · ${failCount} failed` : "") +
+          `.`;
+        coverageImportStatusEl.classList.toggle("import-name-warn", failCount > 0);
+      }
+    } finally {
+      coverageBatchBusy = false;
+      if (coverageImportAnalyzeBtn) coverageImportAnalyzeBtn.disabled = false;
+      renderCoverageBatch();
+    }
+  }
+
+  function renderBackfillImportPreview(preview) {
+    if (!coverageImportRecapEl) return;
+    const file = preview.file || {};
+    const existing = preview.existing || {};
+    const compare = preview.compare || {};
+    const fileNames = (preview.files || []).join(", ") || "—";
+    const fileCount = Number((file && file.file_count) || (preview.files || []).length || 0);
+    if (coverageImportFileStatsEl) {
+      coverageImportFileStatsEl.innerHTML = dlRows([
+        ["Sensor", preview.name || preview.address || "—"],
+        ["CSV files", String(fileCount || 1)],
+        ["Files", fileNames],
+        ["Samples (merged)", String(file.parsed ?? 0)],
+        ["Bad rows", String(file.bad_rows ?? 0)],
+        ["Time span", formatImportRange(file.range)],
+        ["Temperature", formatImportMinMax(file.temp, 1, " °C")],
+        ["Humidity", formatImportMinMax(file.humidity, 1, " %")],
+      ]);
+    }
+    const sources = existing.sources || {};
+    const sourceText = Object.keys(sources).length
+      ? Object.entries(sources)
+          .map(([k, n]) => `${k}: ${n}`)
+          .join(", ")
+      : "—";
+    if (coverageImportExistingStatsEl) {
+      coverageImportExistingStatsEl.innerHTML = dlRows([
+        ["Samples in range", String(existing.samples_in_range ?? 0)],
+        ["Time span", formatImportRange(existing.range)],
+        ["Temperature", formatImportMinMax(existing.temp, 1, " °C")],
+        ["Humidity", formatImportMinMax(existing.humidity, 1, " %")],
+        ["Sources", sourceText],
+      ]);
+    }
+    if (coverageImportCompareStatsEl) {
+      coverageImportCompareStatsEl.innerHTML = dlRows([
+        ["Already present", String(compare.already_present ?? 0)],
+        ["Would insert", String(compare.would_insert ?? 0)],
+        ["Would overwrite", String(compare.would_overwrite ?? 0)],
+        ["Zigzag nearby", String(compare.zigzag_count ?? 0)],
+        ["Zigzag remaining", String(compare.zigzag_remaining ?? 0)],
+        ["Max |ΔT| overwrite", `${Number(compare.overwrite_temp_max ?? 0).toFixed(2)} °C`],
+        ["Max |ΔT| zigzag", `${Number(compare.zigzag_temp_max ?? 0).toFixed(2)} °C`],
+        ["DB-only minutes", String(compare.db_only_minutes ?? 0)],
+        ["Overlap", `${Number(compare.overlap_pct ?? 0)} %`],
+      ]);
+    }
+    const owSamples = Array.isArray(compare.overwrite_samples)
+      ? compare.overwrite_samples
+      : [];
+    if (coverageImportOverwriteWrapEl && coverageImportOverwriteBodyEl) {
+      if (owSamples.length) {
+        coverageImportOverwriteWrapEl.hidden = false;
+        coverageImportOverwriteBodyEl.innerHTML = owSamples
+          .map(
+            (row) =>
+              `<tr>` +
+              `<td>${escapeHtml(formatImportTs(row.ts))}</td>` +
+              `<td class="num">${Number(row.old_temp).toFixed(1)}</td>` +
+              `<td class="num">${Number(row.new_temp).toFixed(1)}</td>` +
+              `<td class="num">${Number(row.old_hum).toFixed(1)}</td>` +
+              `<td class="num">${Number(row.new_hum).toFixed(1)}</td>` +
+              `</tr>`
+          )
+          .join("");
+      } else {
+        coverageImportOverwriteWrapEl.hidden = true;
+        coverageImportOverwriteBodyEl.innerHTML = "";
+      }
+    }
+    const zzSamples = Array.isArray(compare.zigzag_samples)
+      ? compare.zigzag_samples
+      : [];
+    if (coverageImportZigzagWrapEl && coverageImportZigzagBodyEl) {
+      const zzCount = Number(compare.zigzag_count) || 0;
+      if (zzCount > 0) {
+        coverageImportZigzagWrapEl.hidden = false;
+        const rem = Number(compare.zigzag_remaining) || 0;
+        const epsT = Number(compare.zigzag_eps_temp) || 1;
+        const win = Number(compare.zigzag_window_s) || 60;
+        if (coverageImportZigzagHintEl) {
+          coverageImportZigzagHintEl.textContent = rem
+            ? `${zzCount} CSV minute(s) disagree with nearby DB readings within ±${win}s (|ΔT|≥${epsT}°C). Insert-only would zigzag — enable Overwrite existing minutes.`
+            : `${zzCount} nearby conflict(s) detected; overwrite will replace the DB minute in place (no zigzag).`;
+        }
+        coverageImportZigzagBodyEl.innerHTML = zzSamples
+          .map(
+            (row) =>
+              `<tr>` +
+              `<td>${escapeHtml(formatImportTs(row.ts))}</td>` +
+              `<td>${escapeHtml(formatImportTs(row.db_ts))}</td>` +
+              `<td>${escapeHtml(row.source || "—")}</td>` +
+              `<td class="num">${Number(row.csv_temp).toFixed(1)}</td>` +
+              `<td class="num">${Number(row.db_temp).toFixed(1)}</td>` +
+              `<td class="num">${Number(row.csv_hum).toFixed(1)}</td>` +
+              `<td class="num">${Number(row.db_hum).toFixed(1)}</td>` +
+              `</tr>`
+          )
+          .join("");
+      } else {
+        coverageImportZigzagWrapEl.hidden = true;
+        coverageImportZigzagBodyEl.innerHTML = "";
+        if (coverageImportZigzagHintEl) coverageImportZigzagHintEl.textContent = "";
+      }
+    }
+    const memberStats = Array.isArray(preview.file_stats) ? preview.file_stats : [];
+    if (coverageImportMembersWrapEl && coverageImportMembersEl) {
+      if (memberStats.length > 1) {
+        coverageImportMembersWrapEl.hidden = false;
+        coverageImportMembersEl.innerHTML = memberStats
+          .map((m) => {
+            const err = m.error ? ` · error: ${m.error}` : "";
+            const span =
+              m.range && m.range.start != null
+                ? ` · ${formatImportRange(m.range)}`
+                : "";
+            return (
+              `<li><span class="m-name">${escapeHtml(m.name || "—")}</span>` +
+              `<span>${Number(m.parsed) || 0} samples` +
+              (m.bad_rows ? ` · ${Number(m.bad_rows)} bad` : "") +
+              `${escapeHtml(span)}${escapeHtml(err)}</span></li>`
+            );
+          })
+          .join("");
+      } else {
+        coverageImportMembersWrapEl.hidden = true;
+        coverageImportMembersEl.innerHTML = "";
+      }
+    }
+
+    const fileSegs = preview.file_segments || [];
+    const dbSegs = preview.db_segments || [];
+    const fileRange = (preview.file && preview.file.range) || {};
+    const covRange =
+      fileRange.start != null
+        ? { start: fileRange.start, end: Number(fileRange.end) + 60 }
+        : null;
+    if (coverageImportBarsEl && covRange) {
+      coverageImportBarsEl.hidden = false;
+      renderCoverageBar(coverageFileBarEl, fileSegs, covRange);
+      renderCoverageBar(coverageDbBarEl, dbSegs, covRange);
+      const covMeta = preview.coverage || {};
+      const filePct = (covMeta.file && covMeta.file.coverage_pct) || 0;
+      const dbPct = (covMeta.db && covMeta.db.coverage_pct) || 0;
+      if (coverageImportCompareStatsEl) {
+        coverageImportCompareStatsEl.innerHTML += dlRows([
+          ["File coverage", `${filePct} %`],
+          ["DB coverage (exact)", `${dbPct} %`],
+        ]);
+      }
+    } else if (coverageImportBarsEl) {
+      coverageImportBarsEl.hidden = true;
+    }
+
+    coverageImportRecapEl.hidden = false;
+  }
+
+  function foldImportLabel(text) {
+    return String(text || "")
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "");
+  }
+
+  /** True if filename / ZIP member seems to refer to the sensor label. */
+  function filenameMentionsSensor(filename, sensorName) {
+    const nameFold = foldImportLabel(sensorName);
+    if (!nameFold || nameFold.length < 3) return true;
+    const fileFold = foldImportLabel(filename);
+    if (!fileFold) return true;
+    if (fileFold.includes(nameFold)) return true;
+    const tokens = String(sensorName || "")
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 3);
+    if (tokens.length >= 2) {
+      return tokens.every((t) => fileFold.includes(t));
+    }
+    return false;
   }
 
   function renderCoverageBar(container, segments, range) {
@@ -1594,34 +2363,51 @@
 
   async function loadCoverageOverview() {
     syncCoverageRangeButtons();
-    if (coverageAllSummaryEl) coverageAllSummaryEl.textContent = "Loading…";
-    if (coverageAllListEl) {
+    const hasList =
+      coverageAllListEl &&
+      coverageAllListEl.querySelector(".coverage-all-row") != null;
+    if (coverageAllSummaryEl) {
+      coverageAllSummaryEl.textContent = hasList
+        ? "Refreshing…"
+        : "Loading…";
+    }
+    // Keep the previous list visible while refreshing so the view does not flash empty.
+    if (coverageAllListEl && !hasList) {
       coverageAllListEl.innerHTML =
         '<li class="coverage-all-empty">Loading…</li>';
     }
-    const params = new URLSearchParams();
-    if (coverageHours === "all") {
-      params.set("since_first", "true");
-    } else {
-      params.set("hours", String(coverageHours));
+    if (coverageAllListEl && hasList) {
+      coverageAllListEl.classList.add("is-refreshing");
     }
-    const res = await fetch(`/api/coverage/overview?${params}`);
-    if (!res.ok) throw new Error(`coverage overview HTTP ${res.status}`);
-    const data = await res.json();
-    const sensors = data.sensors || [];
-    const avg =
-      sensors.length > 0
-        ? sensors.reduce((n, s) => n + Number(s.coverage_pct || 0), 0) /
-          sensors.length
-        : 0;
-    if (coverageAllSummaryEl) {
-      coverageAllSummaryEl.textContent =
-        `${sensors.length} sensor(s) · avg ${avg.toFixed(0)}% covered` +
-        ` · window ${formatImportRange(data.range)}` +
-        ` · buckets: ${data.bucket || "day"}`;
+    try {
+      const params = new URLSearchParams();
+      if (coverageHours === "all") {
+        params.set("since_first", "true");
+      } else {
+        params.set("hours", String(coverageHours));
+      }
+      const res = await fetch(`/api/coverage/overview?${params}`);
+      if (!res.ok) throw new Error(`coverage overview HTTP ${res.status}`);
+      const data = await res.json();
+      const sensors = data.sensors || [];
+      const avg =
+        sensors.length > 0
+          ? sensors.reduce((n, s) => n + Number(s.coverage_pct || 0), 0) /
+            sensors.length
+          : 0;
+      if (coverageAllSummaryEl) {
+        coverageAllSummaryEl.textContent =
+          `${sensors.length} sensor(s) · avg ${avg.toFixed(0)}% covered` +
+          ` · window ${formatImportRange(data.range)}` +
+          ` · buckets: ${data.bucket || "day"}`;
+      }
+      renderCoverageAllList(sensors, data.range);
+      return data;
+    } finally {
+      if (coverageAllListEl) {
+        coverageAllListEl.classList.remove("is-refreshing");
+      }
     }
-    renderCoverageAllList(sensors, data.range);
-    return data;
   }
 
   async function loadCoverageDetail() {
@@ -1632,6 +2418,7 @@
       if (coverageSegmentsEl) coverageSegmentsEl.innerHTML = "";
       if (coverageStatusEl) coverageStatusEl.textContent = "";
       if (coverageAggEl) coverageAggEl.hidden = true;
+      clearCoverageCharts();
       return;
     }
     if (coverageStatusEl) coverageStatusEl.textContent = "Loading coverage…";
@@ -1666,7 +2453,120 @@
         : "—";
       coverageStatusEl.textContent = `Sources · ${srcTxt}`;
     }
-    await loadCoverageAggregates();
+    await Promise.all([
+      loadCoverageAggregates(),
+      loadCoverageCharts(data.range || null),
+    ]);
+  }
+
+  function ensureCoverageCharts() {
+    if (coverageTempChart && coverageHumChart) return;
+    const tempCanvas = document.getElementById("coverage-temp-chart");
+    const humCanvas = document.getElementById("coverage-hum-chart");
+    if (!tempCanvas || !humCanvas || typeof Chart === "undefined") return;
+    const opts = structuredClone(chartDefaults);
+    if (opts.plugins && opts.plugins.legend) {
+      opts.plugins.legend.display = false;
+    }
+    // Avoid Compare zoom plugins on coverage canvases.
+    if (opts.plugins && opts.plugins.zoom) delete opts.plugins.zoom;
+    if (opts.plugins && opts.plugins.windowBands) delete opts.plugins.windowBands;
+    if (opts.plugins && opts.plugins.hvacBands) delete opts.plugins.hvacBands;
+    coverageTempChart = new Chart(tempCanvas, {
+      type: "line",
+      data: { datasets: [] },
+      options: structuredClone(opts),
+    });
+    coverageHumChart = new Chart(humCanvas, {
+      type: "line",
+      data: { datasets: [] },
+      options: structuredClone(opts),
+    });
+  }
+
+  function resizeCoverageCharts() {
+    if (coverageTempChart) coverageTempChart.resize();
+    if (coverageHumChart) coverageHumChart.resize();
+  }
+
+  function clearCoverageCharts() {
+    if (coverageChartsEl) coverageChartsEl.hidden = true;
+    if (coverageTempChart) {
+      coverageTempChart.data.datasets = [];
+      coverageTempChart.update("none");
+    }
+    if (coverageHumChart) {
+      coverageHumChart.data.datasets = [];
+      coverageHumChart.update("none");
+    }
+  }
+
+  async function loadCoverageCharts(range) {
+    if (!coverageAddress) {
+      clearCoverageCharts();
+      return;
+    }
+    // Unhide before Chart.js measures the canvas (hidden → 0×0 layout).
+    if (coverageChartsEl) coverageChartsEl.hidden = false;
+    ensureCoverageCharts();
+    if (!coverageTempChart || !coverageHumChart) return;
+    resizeCoverageCharts();
+    const histParams = new URLSearchParams({
+      address: coverageAddress,
+      max_points: "2000",
+    });
+    if (
+      coverageHours === "all" &&
+      range &&
+      range.start != null &&
+      range.end != null
+    ) {
+      histParams.set("since", String(range.start));
+      histParams.set("until", String(range.end));
+    } else if (coverageHours === "all") {
+      histParams.set("hours", "8760");
+    } else {
+      histParams.set("hours", String(coverageHours));
+    }
+    try {
+      const res = await fetch(`/api/history?${histParams}`);
+      if (!res.ok) throw new Error(`history HTTP ${res.status}`);
+      const payload = await res.json();
+      const points = payload.points || [];
+      const color = colorFor(coverageAddress);
+      const tempData = points
+        .filter((p) => p && p.ts != null && p.temperature_c != null)
+        .map((p) => ({
+          x: Number(p.ts) * 1000,
+          y: Number(p.temperature_c),
+        }));
+      const humData = points
+        .filter((p) => p && p.ts != null && p.humidity != null)
+        .map((p) => ({
+          x: Number(p.ts) * 1000,
+          y: Number(p.humidity),
+        }));
+      coverageTempChart.data.datasets = [
+        makeDataset("Temperature", color, tempData, true),
+      ];
+      coverageHumChart.data.datasets = [
+        makeDataset("Humidity", color, humData, true),
+      ];
+      coverageTempChart.update();
+      coverageHumChart.update();
+      // Second resize after data+layout settle (tab/column may still be settling).
+      requestAnimationFrame(() => resizeCoverageCharts());
+    } catch (err) {
+      console.warn("coverage charts:", err);
+      if (coverageTempChart) {
+        coverageTempChart.data.datasets = [];
+        coverageTempChart.update("none");
+      }
+      if (coverageHumChart) {
+        coverageHumChart.data.datasets = [];
+        coverageHumChart.update("none");
+      }
+    }
   }
 
   function syncCoverageAggButtons() {
@@ -1777,289 +2677,60 @@
     localStorage.setItem("govee-charts.coverageAggBucket", String(coverageAggBucket));
   }
 
-  function renderBackfillImportPreview(preview) {
-    coverageImportPreview = preview;
-    if (!coverageImportRecapEl) return;
-    const file = preview.file || {};
-    const existing = preview.existing || {};
-    const compare = preview.compare || {};
-    const fileNames = (preview.files || []).join(", ") || "—";
-    const fileCount = Number((file && file.file_count) || (preview.files || []).length || 0);
-    if (coverageImportFileStatsEl) {
-      coverageImportFileStatsEl.innerHTML = dlRows([
-        ["Sensor", preview.name || preview.address || "—"],
-        ["CSV files", String(fileCount || 1)],
-        ["Files", fileNames],
-        ["Samples (merged)", String(file.parsed ?? 0)],
-        ["Bad rows", String(file.bad_rows ?? 0)],
-        ["Time span", formatImportRange(file.range)],
-        ["Temperature", formatImportMinMax(file.temp, 1, " °C")],
-        ["Humidity", formatImportMinMax(file.humidity, 1, " %")],
-      ]);
-    }
-    const sources = existing.sources || {};
-    const sourceText = Object.keys(sources).length
-      ? Object.entries(sources)
-          .map(([k, n]) => `${k}: ${n}`)
-          .join(", ")
-      : "—";
-    if (coverageImportExistingStatsEl) {
-      coverageImportExistingStatsEl.innerHTML = dlRows([
-        ["Samples in range", String(existing.samples_in_range ?? 0)],
-        ["Time span", formatImportRange(existing.range)],
-        ["Temperature", formatImportMinMax(existing.temp, 1, " °C")],
-        ["Humidity", formatImportMinMax(existing.humidity, 1, " %")],
-        ["Sources", sourceText],
-      ]);
-    }
-    if (coverageImportCompareStatsEl) {
-      coverageImportCompareStatsEl.innerHTML = dlRows([
-        ["Already present", String(compare.already_present ?? 0)],
-        ["Would insert", String(compare.would_insert ?? 0)],
-        ["DB-only minutes", String(compare.db_only_minutes ?? 0)],
-        ["Overlap", `${Number(compare.overlap_pct ?? 0)} %`],
-      ]);
-    }
-    const memberStats = Array.isArray(preview.file_stats) ? preview.file_stats : [];
-    if (coverageImportMembersWrapEl && coverageImportMembersEl) {
-      if (memberStats.length > 1) {
-        coverageImportMembersWrapEl.hidden = false;
-        coverageImportMembersEl.innerHTML = memberStats
-          .map((m) => {
-            const err = m.error ? ` · error: ${m.error}` : "";
-            const span =
-              m.range && m.range.start != null
-                ? ` · ${formatImportRange(m.range)}`
-                : "";
-            return (
-              `<li><span class="m-name">${escapeHtml(m.name || "—")}</span>` +
-              `<span>${Number(m.parsed) || 0} samples` +
-              (m.bad_rows ? ` · ${Number(m.bad_rows)} bad` : "") +
-              `${escapeHtml(span)}${escapeHtml(err)}</span></li>`
-            );
-          })
-          .join("");
-      } else {
-        coverageImportMembersWrapEl.hidden = true;
-        coverageImportMembersEl.innerHTML = "";
-      }
-    }
-
-    const fileSegs = preview.file_segments || [];
-    const dbSegs = preview.db_segments || [];
-    const fileRange = (preview.file && preview.file.range) || {};
-    const covRange =
-      fileRange.start != null
-        ? { start: fileRange.start, end: Number(fileRange.end) + 60 }
-        : null;
-    if (coverageImportBarsEl && covRange) {
-      coverageImportBarsEl.hidden = false;
-      renderCoverageBar(coverageFileBarEl, fileSegs, covRange);
-      renderCoverageBar(coverageDbBarEl, dbSegs, covRange);
-      const covMeta = preview.coverage || {};
-      const filePct = (covMeta.file && covMeta.file.coverage_pct) || 0;
-      const dbPct = (covMeta.db && covMeta.db.coverage_pct) || 0;
-      if (coverageImportCompareStatsEl) {
-        coverageImportCompareStatsEl.innerHTML += dlRows([
-          ["File coverage", `${filePct} %`],
-          ["DB coverage (exact)", `${dbPct} %`],
-        ]);
-      }
-    } else if (coverageImportBarsEl) {
-      coverageImportBarsEl.hidden = true;
-    }
-
-    coverageImportRecapEl.hidden = false;
-    if (coverageImportConfirmBtn) {
-      coverageImportConfirmBtn.disabled = !(Number(compare.would_insert) > 0);
-    }
-  }
-
-  function foldImportLabel(text) {
-    return String(text || "")
-      .normalize("NFKD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "");
-  }
-
-  /** True if filename / ZIP member seems to refer to the sensor label. */
-  function filenameMentionsSensor(filename, sensorName) {
-    const nameFold = foldImportLabel(sensorName);
-    if (!nameFold || nameFold.length < 3) return true;
-    const fileFold = foldImportLabel(filename);
-    if (!fileFold) return true;
-    if (fileFold.includes(nameFold)) return true;
-    const tokens = String(sensorName || "")
-      .normalize("NFKD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .map((t) => t.trim())
-      .filter((t) => t.length >= 3);
-    if (tokens.length >= 2) {
-      return tokens.every((t) => fileFold.includes(t));
-    }
-    return false;
-  }
-
-  function importFilenameWarning(file, sensorName, memberNames) {
-    const names = [];
-    if (file && file.name) names.push(file.name);
-    for (const n of memberNames || []) {
-      if (n) names.push(String(n));
-    }
-    if (!names.length || !sensorName) return "";
-    if (names.some((n) => filenameMentionsSensor(n, sensorName))) return "";
-    return (
-      `Warning: file name does not mention “${sensorName}” — confirm the selected sensor.`
-    );
-  }
-
-  async function analyzeCoverageImport() {
-    if (!coverageImportDeviceEl || !coverageImportFileEl) return;
-    const address = coverageImportDeviceEl.value;
-    const file =
-      coverageImportFile ||
-      (coverageImportFileEl.files && coverageImportFileEl.files[0]);
-    if (!address) {
-      if (coverageImportStatusEl) {
-        coverageImportStatusEl.textContent = "Select a sensor first.";
-      }
-      return;
-    }
-    if (!file) {
-      if (coverageImportStatusEl) {
-        coverageImportStatusEl.textContent = "Choose a CSV or ZIP file.";
-      }
-      return;
-    }
-    coverageImportFile = file;
-    clearCoverageImportRecap();
-    if (coverageImportStatusEl) coverageImportStatusEl.textContent = "Analyzing…";
-    if (coverageImportAnalyzeBtn) coverageImportAnalyzeBtn.disabled = true;
-    try {
-      const body = new FormData();
-      body.append("address", address);
-      body.append("file", file, file.name);
-      const res = await fetch("/api/backfill/import/preview", {
-        method: "POST",
-        body,
-      });
-      if (!res.ok) {
-        let detail = res.statusText;
-        try {
-          const err = await res.json();
-          if (err && err.detail) detail = err.detail;
-        } catch (_) {
-          /* ignore */
-        }
-        throw new Error(detail || `HTTP ${res.status}`);
-      }
-      const preview = await res.json();
-      renderBackfillImportPreview(preview);
-      const would = Number((preview.compare || {}).would_insert) || 0;
-      const sensorName =
-        preview.name ||
-        (coverageImportDeviceEl.selectedOptions[0] &&
-          coverageImportDeviceEl.selectedOptions[0].textContent) ||
-        "";
-      const warn = importFilenameWarning(
-        file,
-        sensorName,
-        preview.files || (preview.file_stats || []).map((m) => m.name)
-      );
-      if (coverageImportStatusEl) {
-        const base = would
-          ? `Ready to import ${would} new minute(s).`
-          : "Nothing new to import (full overlap or empty file).";
-        coverageImportStatusEl.textContent = warn ? `${warn} ${base}` : base;
-        coverageImportStatusEl.classList.toggle("import-name-warn", Boolean(warn));
-      }
-    } catch (err) {
-      console.warn(err);
-      if (coverageImportStatusEl) {
-        coverageImportStatusEl.textContent = `Analyze failed: ${err.message}`;
-        coverageImportStatusEl.classList.remove("import-name-warn");
-      }
-    } finally {
-      if (coverageImportAnalyzeBtn) coverageImportAnalyzeBtn.disabled = false;
-    }
-  }
-
-  async function confirmCoverageImport() {
-    if (!coverageImportPreview || !coverageImportFile) return;
-    const address =
-      (coverageImportDeviceEl && coverageImportDeviceEl.value) ||
-      coverageImportPreview.address;
-    if (!address) return;
-    if (coverageImportConfirmBtn) coverageImportConfirmBtn.disabled = true;
-    if (coverageImportStatusEl) coverageImportStatusEl.textContent = "Importing…";
-    try {
-      const body = new FormData();
-      body.append("address", address);
-      body.append("file", coverageImportFile, coverageImportFile.name);
-      const res = await fetch("/api/backfill/import", { method: "POST", body });
-      if (!res.ok) {
-        let detail = res.statusText;
-        try {
-          const err = await res.json();
-          if (err && err.detail) detail = err.detail;
-        } catch (_) {
-          /* ignore */
-        }
-        throw new Error(detail || `HTTP ${res.status}`);
-      }
-      const result = await res.json();
-      clearCoverageImportRecap();
-      coverageImportFile = null;
-      if (coverageImportFileEl) coverageImportFileEl.value = "";
-      if (coverageImportStatusEl) {
-        coverageImportStatusEl.textContent =
-          `Imported ${result.inserted || 0} sample(s)` +
-          (result.skipped ? ` · skipped ${result.skipped} duplicate(s)` : "") +
-          (result.bad_rows ? ` · ${result.bad_rows} bad row(s)` : "") +
-          `.`;
-      }
-      await loadDevices();
-      if (currentView === "coverage") {
-        await loadCoverage();
-      }
-    } catch (err) {
-      console.warn(err);
-      if (coverageImportStatusEl) {
-        coverageImportStatusEl.textContent = `Import failed: ${err.message}`;
-      }
-      if (coverageImportConfirmBtn && coverageImportPreview) {
-        const would = Number((coverageImportPreview.compare || {}).would_insert) || 0;
-        coverageImportConfirmBtn.disabled = !(would > 0);
-      }
-    }
-  }
-
   async function loadBackfill() {
+    if (backfillLoadInFlight) return;
+    backfillLoadInFlight = true;
     try {
       const res = await fetch("/api/backfill?recent_limit=100&job_limit=50");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      // Avoid overwriting checkboxes mid-PATCH (poll races).
+      if (
+        backfillDeviceBusyAddrs.size &&
+        backfillSnapshot &&
+        Array.isArray(backfillSnapshot.devices)
+      ) {
+        data.devices = backfillSnapshot.devices;
+      }
       renderBackfill(data);
-      syncBackfillPolling();
     } catch (err) {
       console.warn("backfill status:", err);
       if (backfillCurrentEl) {
         backfillCurrentEl.innerHTML =
           `<p class="backfill-idle">Backfill status unavailable: ${escapeHtml(err.message)}</p>`;
       }
+    } finally {
+      backfillLoadInFlight = false;
+      if (currentView === "backfill" && !backfillTimer) {
+        scheduleBackfillPoll();
+      }
     }
   }
 
-  function syncBackfillPolling() {
-    const shouldPoll = currentView === "backfill";
-    if (shouldPoll && !backfillTimer) {
-      backfillTimer = setInterval(loadBackfill, 2500);
-    } else if (!shouldPoll && backfillTimer) {
-      clearInterval(backfillTimer);
+  function stopBackfillPolling() {
+    if (backfillTimer) {
+      clearTimeout(backfillTimer);
       backfillTimer = null;
+    }
+  }
+
+  function scheduleBackfillPoll() {
+    stopBackfillPolling();
+    if (currentView !== "backfill") return;
+    backfillTimer = setTimeout(() => {
+      backfillTimer = null;
+      loadBackfill().catch((err) => console.warn(err));
+    }, 2500);
+  }
+
+  function syncBackfillPolling() {
+    if (currentView !== "backfill") {
+      stopBackfillPolling();
+      return;
+    }
+    // Keep a single chain: next poll is scheduled after each load finishes.
+    if (!backfillLoadInFlight && !backfillTimer) {
+      scheduleBackfillPoll();
     }
   }
 
@@ -2511,7 +3182,11 @@
         }
       });
     } else if (view === "coverage") {
-      loadCoverage().catch((err) => console.warn(err));
+      loadCoverage()
+        .then(() => {
+          requestAnimationFrame(() => resizeCoverageCharts());
+        })
+        .catch((err) => console.warn(err));
     } else if (view === "backfill") {
       loadBackfill().catch((err) => console.warn(err));
     }
@@ -2846,20 +3521,27 @@
         extNode.setAttribute("cy", String(exy.y));
         extNode.setAttribute("r", "28");
         extNode.setAttribute("class", "network-node-exterior");
-        const extSensors = (room.sensors || []).filter(
+        const extSensorsAll = (room.sensors || []).filter(
           (s) => String(s.zone || "").toLowerCase() === "exterior"
         );
+        const extSensorsHigh = extSensorsAll.filter(
+          (s) => String(s.height || "").toLowerCase() === "high"
+        );
+        const extSensors =
+          extSensorsHigh.length > 0 ? extSensorsHigh : extSensorsAll;
         const extTitle = document.createElementNS(NS, "title");
         const facadeLo = room.facade_temp_min;
         const facadeHi = room.facade_temp_max;
         const facadeBits = extSensors
           .map((s) => `${s.name}: ${formatNetworkTemp(s.temperature_c)}`)
           .join("; ");
+        const names = (room.facade_sensor_names || []).join(", ");
         extTitle.textContent =
           `${room.label || room.id} façade ${(exteriors || []).join(", ").toUpperCase()}` +
           (facadeLo != null && facadeHi != null
             ? ` · ${Number(facadeLo).toFixed(1)}–${Number(facadeHi).toFixed(1)}°C`
             : "") +
+          (names ? ` · ${names}` : "") +
           (facadeBits ? `\n${facadeBits}` : "");
         extNode.appendChild(extTitle);
         gNodes.appendChild(extNode);
@@ -3386,6 +4068,28 @@
           )
         );
       }
+
+      // Comparative façade temp: exterior high sensors (fallback any exterior).
+      const seenFacadeAddr = new Set();
+      group.rooms.forEach((room, idx) => {
+        const fh = room.facade_history;
+        if (!fh || !(fh.points || []).length) return;
+        const addr = String(fh.address || "").toUpperCase();
+        if (addr && seenFacadeAddr.has(addr)) return;
+        if (addr) seenFacadeAddr.add(addr);
+        const label =
+          (fh.name || room.label || room.id) +
+          (fh.height === "high" ? " (high)" : " (ext)");
+        datasets.push(
+          makeDataset(
+            label,
+            roomColor(`${room.id}-facade`, gIdx * 3 + idx + 8),
+            fh.points.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+            false,
+            { borderWidth: 2, borderDash: [8, 3] }
+          )
+        );
+      });
 
       group.rooms.forEach((room, idx) => {
         const hist = room.room_history;
@@ -5618,10 +6322,14 @@
         return;
       }
       const address = input.dataset.address;
+      const flag = input.dataset.flag || "enabled";
       if (!address) return;
-      setBackfillDevice(address, input.checked).catch((err) => {
+      const patch =
+        flag === "gatt_enabled"
+          ? { gatt_enabled: input.checked }
+          : { enabled: input.checked };
+      setBackfillDeviceFlags(address, patch).catch((err) => {
         console.warn(err);
-        input.checked = !input.checked;
       });
     });
   }
@@ -5636,58 +6344,126 @@
     });
   }
 
-  if (coverageImportFileEl) {
-    coverageImportFileEl.addEventListener("change", () => {
-      coverageImportFile =
-        coverageImportFileEl.files && coverageImportFileEl.files[0]
-          ? coverageImportFileEl.files[0]
-          : null;
-      clearCoverageImportRecap();
-      if (coverageImportStatusEl) {
-        coverageImportStatusEl.textContent = "";
-        coverageImportStatusEl.classList.remove("import-name-warn");
+  if (coverageDropzoneEl && coverageImportFileEl) {
+    const openFilePicker = () => coverageImportFileEl.click();
+    coverageDropzoneEl.addEventListener("click", openFilePicker);
+    coverageDropzoneEl.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        openFilePicker();
       }
-      if (coverageImportFile) {
-        analyzeCoverageImport().catch((err) => console.warn(err));
+    });
+    ["dragenter", "dragover"].forEach((type) => {
+      coverageDropzoneEl.addEventListener(type, (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        coverageDropzoneEl.classList.add("is-dragover");
+      });
+    });
+    ["dragleave", "drop"].forEach((type) => {
+      coverageDropzoneEl.addEventListener(type, (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (type === "dragleave") coverageDropzoneEl.classList.remove("is-dragover");
+      });
+    });
+    coverageDropzoneEl.addEventListener("drop", (ev) => {
+      coverageDropzoneEl.classList.remove("is-dragover");
+      const files = ev.dataTransfer && ev.dataTransfer.files;
+      if (files && files.length) addFilesToBatch(files);
+    });
+    coverageImportFileEl.addEventListener("change", () => {
+      if (coverageImportFileEl.files && coverageImportFileEl.files.length) {
+        addFilesToBatch(coverageImportFileEl.files);
+        coverageImportFileEl.value = "";
       }
     });
   }
-  if (coverageImportDeviceEl) {
-    coverageImportDeviceEl.addEventListener("change", () => {
-      clearCoverageImportRecap();
-      if (coverageImportStatusEl) {
-        coverageImportStatusEl.textContent = "";
-        coverageImportStatusEl.classList.remove("import-name-warn");
+  if (coverageBatchBodyEl) {
+    coverageBatchBodyEl.addEventListener("change", (ev) => {
+      const t = ev.target;
+      if (!(t instanceof HTMLElement)) return;
+      const row = t.closest("tr[data-batch-id]");
+      if (!row) return;
+      const item = batchItemById(row.dataset.batchId || "");
+      if (!item) return;
+      if (t.matches("input[data-batch-include]")) {
+        item.included = /** @type {HTMLInputElement} */ (t).checked;
+        syncBatchSelectAll();
+        updateBatchImportButton();
+        updateBatchStatusLine();
+        return;
       }
-      const addr = coverageImportDeviceEl.value;
-      if (addr && coverageDeviceEl) {
-        coverageAddress = addr;
-        coverageDeviceEl.value = addr;
+      if (t.matches("select[data-batch-sensor]")) {
+        const addr = /** @type {HTMLSelectElement} */ (t).value;
+        item.address = addr;
+        item.match = addr ? "exact" : "none";
+        item.included = Boolean(addr);
+        item.preview = null;
+        item.error = null;
+        item.status = "pending";
+        coverageBatchActiveId = item.id;
+        renderCoverageBatch();
+        if (addr) {
+          analyzeCoverageBatchItem(item)
+            .then(() => renderCoverageBatch())
+            .catch((err) => console.warn(err));
+        }
+      }
+    });
+    coverageBatchBodyEl.addEventListener("click", (ev) => {
+      const t = ev.target;
+      if (!(t instanceof HTMLElement)) return;
+      if (t.matches("input, select, option, label")) return;
+      const row = t.closest("tr[data-batch-id]");
+      if (!row) return;
+      const item = batchItemById(row.dataset.batchId || "");
+      if (!item) return;
+      coverageBatchActiveId = item.id;
+      coverageBatchBodyEl.querySelectorAll("tr[data-batch-id]").forEach((el) => {
+        el.classList.toggle("is-active", el.dataset.batchId === item.id);
+      });
+      showBatchItemRecap(item);
+      if (item.address && coverageDeviceEl) {
+        coverageAddress = item.address;
+        coverageDeviceEl.value = item.address;
         persistCoverageState();
-        loadCoverage().catch((err) => console.warn(err));
+        loadCoverageDetail().catch((err) => console.warn(err));
       }
-      if (addr && coverageImportFile) {
-        analyzeCoverageImport().catch((err) => console.warn(err));
-      }
+    });
+  }
+  if (coverageBatchSelectAllEl) {
+    coverageBatchSelectAllEl.addEventListener("change", () => {
+      const on = coverageBatchSelectAllEl.checked;
+      coverageBatch.forEach((it) => {
+        if (it.status !== "done") it.included = on && Boolean(it.address);
+      });
+      renderCoverageBatch();
     });
   }
   if (coverageImportAnalyzeBtn) {
     coverageImportAnalyzeBtn.addEventListener("click", () => {
-      analyzeCoverageImport().catch((err) => console.warn(err));
+      analyzeCoverageBatch().catch((err) => console.warn(err));
     });
   }
-  if (coverageImportCancelBtn) {
-    coverageImportCancelBtn.addEventListener("click", () => {
-      clearCoverageImportRecap();
-      if (coverageImportStatusEl) {
-        coverageImportStatusEl.textContent = "";
-        coverageImportStatusEl.classList.remove("import-name-warn");
+  if (coverageImportOverwriteEl) {
+    coverageImportOverwriteEl.addEventListener("change", () => {
+      updateBatchImportButton();
+      updateBatchStatusLine();
+      renderCoverageBatch();
+      if (coverageBatch.some((it) => it.address && it.status !== "done")) {
+        analyzeCoverageBatch().catch((err) => console.warn(err));
       }
+    });
+  }
+  if (coverageImportClearBtn) {
+    coverageImportClearBtn.addEventListener("click", () => {
+      clearCoverageBatch();
     });
   }
   if (coverageImportConfirmBtn) {
     coverageImportConfirmBtn.addEventListener("click", () => {
-      confirmCoverageImport().catch((err) => console.warn(err));
+      confirmCoverageBatch().catch((err) => console.warn(err));
     });
   }
 

@@ -21,7 +21,7 @@ from govee_charts.address import build_suffix_map
 from govee_charts.api import create_app
 from govee_charts.backfill import BackfillConfig, BackfillService
 from govee_charts.db import Database
-from govee_charts.doors import DoorMqttListener, DoorsConfig, import_ha_door_history
+from govee_charts.doors import DoorHaPoller, DoorMqttListener, DoorsConfig, import_ha_door_history
 from govee_charts.federation import PeerPublisher
 from govee_charts.hvac import HvacConfig, HvacHaPoller, import_ha_hvac_history
 from govee_charts.scanner import GoveeScanner, discover_once
@@ -89,6 +89,11 @@ DEFAULTS: dict[str, Any] = {
         "ha_db_path": "",
         "ha_device_registry": "",
         "names": {},
+        "ha_url": "http://127.0.0.1:8123",
+        "ha_token": "",
+        "ha_token_file": "",
+        "ha_poll_seconds": 10,
+        "ha_entities": [],
     },
     "hvac": {
         "enabled": False,
@@ -227,6 +232,7 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     stop_event = asyncio.Event()
     scan_task: asyncio.Task[None] | None = None
     door_task: asyncio.Task[None] | None = None
+    door_ha_task: asyncio.Task[None] | None = None
     hvac_task: asyncio.Task[None] | None = None
     backfill_task: asyncio.Task[None] | None = None
     scanner_enabled = enable_scanner and bool(cfg["scanner"].get("enabled", True))
@@ -249,7 +255,11 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
 
     backfill_cfg = BackfillConfig.from_dict(cfg.get("backfill"))
     backfill: BackfillService | None = None
-    if backfill_cfg.enabled and scanner_enabled:
+    peers_for_pull = [p for p in (fed.get("peers") or []) if str(p).strip()]
+    federation_backfill_ok = bool(
+        backfill_cfg.federation_pull and peers_for_pull
+    )
+    if backfill_cfg.enabled and (scanner_enabled or federation_backfill_ok):
         backfill = BackfillService(
             db,
             backfill_cfg,
@@ -261,9 +271,14 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         backfill_task = asyncio.create_task(
             backfill.run(stop_event), name="gatt-backfill"
         )
-    elif backfill_cfg.enabled and not scanner_enabled:
+        if not scanner_enabled:
+            logging.info(
+                "History backfill started (federation-only; no local BLE scanner)"
+            )
+    elif backfill_cfg.enabled:
         logging.info(
-            "GATT history backfill skipped (needs local BLE scanner)"
+            "History backfill skipped (needs local BLE scanner or "
+            "federation peers with federation_pull)"
         )
     else:
         logging.info("GATT history backfill disabled (set backfill.enabled=true)")
@@ -272,7 +287,9 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     if doors_cfg.enabled:
         if doors_cfg.ha_db_path:
             try:
-                n_imp = await import_ha_door_history(db, doors_cfg.ha_db_path)
+                n_imp = await import_ha_door_history(
+                    db, doors_cfg.ha_db_path, names=doors_cfg.names
+                )
                 if n_imp:
                     logging.info("Imported %d door event(s) from Home Assistant", n_imp)
             except Exception:
@@ -287,6 +304,17 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
             doors_cfg.mqtt_host,
             doors_cfg.mqtt_port,
         )
+        if doors_cfg.ha_entities:
+            ha_poller = DoorHaPoller(db, doors_cfg)
+            door_ha_task = asyncio.create_task(
+                ha_poller.run(stop_event), name="door-ha-poll"
+            )
+            logging.info(
+                "Door HA poll enabled (%d entit%s via %s)",
+                len(doors_cfg.ha_entities),
+                "y" if len(doors_cfg.ha_entities) == 1 else "ies",
+                doors_cfg.ha_url,
+            )
     else:
         logging.info("Door historization disabled (set doors.enabled=true)")
 
@@ -434,6 +462,7 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         for task, label in (
             (scan_task, "BLE scanner"),
             (door_task, "Door MQTT"),
+            (door_ha_task, "Door HA poll"),
             (hvac_task, "HVAC HA poll"),
             (backfill_task, "GATT backfill"),
         ):

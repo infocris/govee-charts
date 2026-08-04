@@ -159,6 +159,14 @@ ring_topic = "ring/#"
 retention_days = 365
 # Optional one-shot import of existing HA recorder history:
 # ha_db_path = "/path/to/home-assistant_v2.db"
+# Optional HA REST poll for contacts not on MQTT (e.g. Tuya door sensors):
+# ha_url = "http://127.0.0.1:8123"
+# ha_token_file = "/path/to/.ha_token"
+# ha_poll_seconds = 10
+# ha_entities = ["binary_sensor.door_sensor_porte", "binary_sensor.door_sensor_2_porte"]
+# [doors.names]
+# "binary_sensor.door_sensor_porte" = "Porte cuisine"
+# "binary_sensor.door_sensor_2_porte" = "Porte chambre"
 
 # HVAC / power historization via Home Assistant REST (Tuya climate + Ecojoko, …).
 # Create a long-lived access token in HA: Profile → Security → Long-lived access tokens.
@@ -184,9 +192,11 @@ retention_days = 365
 # Optional one-shot import from HA recorder SQLite on startup:
 # ha_db_path = "/path/to/home-assistant_v2.db"
 
-# Recover onboard minute history via GATT for gaps missed by live BLE ads.
+# Recover missing minute history: federation peers first, then optional GATT.
 # Single worker; newest windows first (1 h → 24 h → 7 d → deeper day chunks).
-# Requires local BLE scanner. Devices farther than min_rssi are deferred.
+# Starts with a local BLE scanner, or with federation_pull + configured peers
+# (federation-only when scanner is off). Devices farther than min_rssi are
+# deferred for GATT. Per-sensor GATT can be disabled in the Backfill UI.
 # With federation: recovered samples are pushed as "{node_id}/gatt"; the node
 # with the best recent RSSI for a device does the GATT pull. Before GATT, the
 # worker pulls peer /api/history for the gap window (federation_pull).

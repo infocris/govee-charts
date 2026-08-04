@@ -191,6 +191,7 @@ to project rooms as a **multi-node RC network**:
 
 - Corridor hub linked to every room (no direct outdoor coupling)
 - Kitchen + living: southwest façades; bedroom: northeast
+- Façade comparative temperature prefers exterior sensors with **height = high** (e.g. Cuisine / Chambre Ext Haut); falls back to any exterior sensor
 - Capacities from floor area × 2.5 m ceiling; wall/door conductances by edge type
 - Passive nodes (bathroom, WC) without sensors
 - Solar bias from Open-Meteo **shortwave radiation** and **cloud cover**,
@@ -228,7 +229,9 @@ checked about every 30 s while the page is open.
 With `[doors] enabled = true`, Govee Charts listens to MQTT contact sensors
 (Home Assistant discovery and/or ring-mqtt) and stores **open/closed** events
 in SQLite. Optional `ha_db_path` imports existing Home Assistant recorder
-history on startup. Query via `/api/doors` and `/api/doors/history`.
+history on startup. Contacts that are only in HA (e.g. Tuya door sensors) can
+be polled via REST with `ha_entities` + `ha_token_file` (same token as HVAC).
+Query via `/api/doors` and `/api/doors/history`.
 
 On the **Overview** page, **Doors & windows** lets you assign each contact a
 **kind** (`door` / `window` / `other`) and a **room** (same room taxonomy as
@@ -283,9 +286,9 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `GET /api/energy/summary` — today's (or `?hours=`) electrical + indoor heat estimate
 - `GET /api/backfill` — GATT history backfill queue + selected sensors + last recovered readings / jobs
 - `POST /api/backfill/pause` / `resume` / `refresh` — control the backfill worker
-- `POST /api/backfill/devices` — opt a sensor in/out (`{address, enabled}`)
-- `POST /api/backfill/import/preview` — parse Govee Home CSV/ZIP and compare to existing readings (no write)
-- `POST /api/backfill/import` — confirm ingest of the same CSV/ZIP for a chosen sensor
+- `POST /api/backfill/devices` — opt a sensor in/out and/or toggle GATT (`{address, enabled?, gatt_enabled?}`; persisted even if the worker is offline)
+- `POST /api/backfill/import/preview` — parse Govee Home CSV/ZIP and compare to existing readings (form: `address`, `file`, optional `overwrite`); includes would_insert / would_overwrite + sample diffs
+- `POST /api/backfill/import` — confirm ingest (same form fields); with `overwrite=true`, updates conflicting minutes
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
 - `GET /api/health` — health + `node_id`
 
@@ -293,5 +296,5 @@ Data © [Open-Meteo](https://open-meteo.com/).
 
 - Soft-blocked Bluetooth: `rfkill unblock bluetooth`
 - No Govee cloud API — BLE only
-- Optional GATT history backfill (`[backfill]`) recovers onboard minute samples for gaps missed by live ads. Opt-in per sensor in the Backfill UI (none selected by default). One device at a time; lookback up to ~20 days. Prefer sensors with RSSI ≥ `min_rssi` (default −75 dBm). With federation, the worker first pulls peer `/api/history` for the gap (`federation_pull`); only remaining holes go to GATT. Recovered GATT history is shared as `{node_id}/gatt` and the best-RSSI node does the pull.
-- Manual **Import CSV** on the Coverage tab accepts Govee Home app exports (`.csv` or `.zip`). Analyze shows a file recap and a compare vs existing minutes (already present / would insert); Import stores new samples as `{node_id}/csv` (local only, no federation push). The Coverage view also shows full/partial/missing timelines for all sensors.
+- Optional history backfill (`[backfill]`) recovers missing minute samples. Opt-in per sensor in the Backfill UI (none selected by default); a per-sensor **GATT** checkbox (default on) allows local BLE history after peer fill — uncheck it for federation-only recovery. Selection stays editable even when the worker is offline. The worker starts with a local BLE scanner **or** with `federation_pull` plus configured peers. One device at a time; lookback up to ~20 days. Prefer sensors with RSSI ≥ `min_rssi` (default −75 dBm) for GATT. With federation, the worker first pulls peer `/api/history` for the gap (`federation_pull`); only remaining holes go to GATT when enabled. Recovered GATT history is shared as `{node_id}/gatt` and the best-RSSI node does the pull.
+- Manual **Import CSV** on the Coverage tab accepts Govee Home app exports (`.csv` or `.zip`). Drop several files at once: each is matched to a sensor by filename, analyzed (samples / already present / would insert / would overwrite / zigzag risk), then imported together with checkboxes to exclude files. Optional **Overwrite existing minutes** replaces conflicting `(address, ts)` rows when temp/humidity differ (preview shows sample diffs and max |ΔT|/|ΔH|). Nearby BLE readings at a different timestamp within ±60s that disagree (|ΔT|≥1°C or |ΔH|≥5%) are flagged as zigzag; insert-only is blocked until overwrite is enabled. Imports store samples as `{node_id}/csv` (local only, no federation push). The Coverage view also shows full/partial/missing timelines plus temperature/humidity charts for the selected sensor.

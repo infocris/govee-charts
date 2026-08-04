@@ -139,7 +139,8 @@ class Database:
                 last_attempt_ts REAL,
                 last_rssi INTEGER,
                 last_battery INTEGER,
-                enabled INTEGER NOT NULL DEFAULT 0
+                enabled INTEGER NOT NULL DEFAULT 0,
+                gatt_enabled INTEGER NOT NULL DEFAULT 1
             );
             """
         )
@@ -195,6 +196,12 @@ class Database:
             # Opt-in default: existing rows stay disabled until selected in the UI.
             await self.db.execute(
                 "ALTER TABLE backfill_state ADD COLUMN enabled INTEGER NOT NULL DEFAULT 0"
+            )
+        if state_cols and "gatt_enabled" not in state_cols:
+            # Default on: allow GATT after federation pull unless the UI opts out.
+            await self.db.execute(
+                "ALTER TABLE backfill_state ADD COLUMN gatt_enabled "
+                "INTEGER NOT NULL DEFAULT 1"
             )
 
     async def _merge_alias_devices(self) -> None:
@@ -328,48 +335,81 @@ class Database:
         await self.db.commit()
         return cursor.rowcount
 
-    async def list_devices(self) -> list[dict[str, Any]]:
+    async def list_devices(self, *, include_stats: bool = True) -> list[dict[str, Any]]:
         # ~120 B/row incl. indexes — rough SQLite footprint for one readings row.
         bytes_per_reading = 120
-        cursor = await self.db.execute(
-            """
-            SELECT
-                d.address,
-                d.name,
-                d.model,
-                d.first_seen,
-                d.last_seen,
-                d.zone,
-                d.height,
-                d.room,
-                r.temperature_c,
-                r.humidity,
-                r.battery,
-                r.rssi,
-                r.ts AS last_reading_ts,
-                r.source AS last_source,
-                COALESCE(s.sample_count, 0) AS sample_count,
-                s.oldest_ts,
-                s.newest_ts
-            FROM devices d
-            LEFT JOIN readings r ON r.id = (
-                SELECT id FROM readings
-                WHERE address = d.address
-                ORDER BY ts DESC
-                LIMIT 1
-            )
-            LEFT JOIN (
+        if include_stats:
+            cursor = await self.db.execute(
+                """
                 SELECT
-                    address,
-                    COUNT(*) AS sample_count,
-                    MIN(ts) AS oldest_ts,
-                    MAX(ts) AS newest_ts
-                FROM readings
-                GROUP BY address
-            ) s ON s.address = d.address
-            ORDER BY d.name COLLATE NOCASE, d.address
-            """
-        )
+                    d.address,
+                    d.name,
+                    d.model,
+                    d.first_seen,
+                    d.last_seen,
+                    d.zone,
+                    d.height,
+                    d.room,
+                    r.temperature_c,
+                    r.humidity,
+                    r.battery,
+                    r.rssi,
+                    r.ts AS last_reading_ts,
+                    r.source AS last_source,
+                    COALESCE(s.sample_count, 0) AS sample_count,
+                    s.oldest_ts,
+                    s.newest_ts
+                FROM devices d
+                LEFT JOIN readings r ON r.id = (
+                    SELECT id FROM readings
+                    WHERE address = d.address
+                    ORDER BY ts DESC
+                    LIMIT 1
+                )
+                LEFT JOIN (
+                    SELECT
+                        address,
+                        COUNT(*) AS sample_count,
+                        MIN(ts) AS oldest_ts,
+                        MAX(ts) AS newest_ts
+                    FROM readings
+                    GROUP BY address
+                ) s ON s.address = d.address
+                ORDER BY d.name COLLATE NOCASE, d.address
+                """
+            )
+        else:
+            # Fast path for frequent polls (backfill UI): skip full-table aggregates.
+            cursor = await self.db.execute(
+                """
+                SELECT
+                    d.address,
+                    d.name,
+                    d.model,
+                    d.first_seen,
+                    d.last_seen,
+                    d.zone,
+                    d.height,
+                    d.room,
+                    r.temperature_c,
+                    r.humidity,
+                    r.battery,
+                    r.rssi,
+                    r.ts AS last_reading_ts,
+                    r.source AS last_source,
+                    0 AS sample_count,
+                    NULL AS oldest_ts,
+                    NULL AS newest_ts
+                FROM devices d
+                LEFT JOIN readings r ON r.id = (
+                    SELECT id FROM readings
+                    WHERE address = d.address
+                    ORDER BY ts DESC
+                    LIMIT 1
+                )
+                ORDER BY d.name COLLATE NOCASE, d.address
+                """
+            )
         rows = await cursor.fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
@@ -771,7 +811,9 @@ class Database:
             """
         )
         rows = [dict(row) for row in await cursor.fetchall()]
-        # Prefer Ring MQTT UUID rows over HA entity_id imports when names match.
+        # Prefer Ring MQTT UUID rows over HA recorder mirrors of the same Ring
+        # contact (binary_sensor.porte_cuisine, …). Keep distinct HA devices
+        # such as Tuya door_sensor_* even when the display name matches.
         import unicodedata
 
         def _norm_name(value: str) -> str:
@@ -780,25 +822,48 @@ class Database:
             text = text.replace("'", " ").replace("'", " ")
             return " ".join(text.lower().split())
 
-        by_name: dict[str, dict[str, Any]] = {}
+        def _is_ha_ring_mirror(sensor_id: str) -> bool:
+            sid = str(sensor_id or "")
+            if not sid.startswith("binary_sensor."):
+                return False
+            slug = sid.removeprefix("binary_sensor.")
+            if slug.startswith("door_sensor") or "konyks" in slug:
+                return False
+            return slug.startswith(("porte_", "fenetre_", "fenêtre_", "window_"))
+
+        def _is_distinct_ha(sensor_id: str) -> bool:
+            sid = str(sensor_id or "")
+            if not sid.startswith("binary_sensor."):
+                return False
+            slug = sid.removeprefix("binary_sensor.")
+            return slug.startswith("door_sensor") or "konyks" in slug
+
+        def _dedupe_key(row: dict[str, Any]) -> str:
+            sid = str(row.get("sensor_id") or "")
+            name_key = _norm_name(str(row.get("name") or "")) or sid
+            if _is_distinct_ha(sid):
+                return f"id:{sid}"
+            return f"name:{name_key}"
+
+        by_key: dict[str, dict[str, Any]] = {}
         for row in rows:
-            key = _norm_name(str(row.get("name") or ""))
-            if not key:
-                key = str(row.get("sensor_id") or "")
-            prev = by_name.get(key)
+            key = _dedupe_key(row)
+            prev = by_key.get(key)
             if prev is None:
-                by_name[key] = row
+                by_key[key] = row
                 continue
-            prev_is_ha = str(prev.get("sensor_id") or "").startswith("binary_sensor.")
-            cur_is_ha = str(row.get("sensor_id") or "").startswith("binary_sensor.")
-            if prev_is_ha and not cur_is_ha:
-                by_name[key] = row
-            elif float(row.get("ts") or 0) > float(prev.get("ts") or 0) and not (
-                cur_is_ha and not prev_is_ha
-            ):
-                by_name[key] = row
+            if key.startswith("name:"):
+                prev_is_mirror = _is_ha_ring_mirror(str(prev.get("sensor_id") or ""))
+                cur_is_mirror = _is_ha_ring_mirror(str(row.get("sensor_id") or ""))
+                if prev_is_mirror and not cur_is_mirror:
+                    by_key[key] = row
+                    continue
+                if cur_is_mirror and not prev_is_mirror:
+                    continue
+            if float(row.get("ts") or 0) > float(prev.get("ts") or 0):
+                by_key[key] = row
         return sorted(
-            by_name.values(),
+            by_key.values(),
             key=lambda r: (
                 str(r.get("name") or "").lower(),
                 str(r.get("sensor_id") or ""),
@@ -881,27 +946,47 @@ class Database:
             text = text.replace("'", " ").replace("'", " ")
             return " ".join(text.lower().split())
 
+        def _is_ha_ring_mirror(sensor_id: str) -> bool:
+            sid = str(sensor_id or "")
+            if not sid.startswith("binary_sensor."):
+                return False
+            slug = sid.removeprefix("binary_sensor.")
+            if slug.startswith("door_sensor") or "konyks" in slug:
+                return False
+            return slug.startswith(("porte_", "fenetre_", "fenêtre_", "window_"))
+
+        def _is_distinct_ha(sensor_id: str) -> bool:
+            sid = str(sensor_id or "")
+            if not sid.startswith("binary_sensor."):
+                return False
+            slug = sid.removeprefix("binary_sensor.")
+            return slug.startswith("door_sensor") or "konyks" in slug
+
+        def _stream_key(row: dict[str, Any]) -> str:
+            sid = str(row.get("sensor_id") or "")
+            name_key = _norm_name(str(row.get("name") or "")) or sid
+            if _is_distinct_ha(sid):
+                return f"id:{sid}"
+            return f"name:{name_key}"
+
         by_name: dict[str, list[dict[str, Any]]] = {}
         kinds_by_name: dict[str, str] = {}
         for row in rows:
-            key = _norm_name(str(row.get("name") or "")) or str(
-                row.get("sensor_id") or ""
-            )
+            key = _stream_key(row)
             sid = str(row.get("sensor_id") or "")
-            is_ha = sid.startswith("binary_sensor.")
+            is_ha_mirror = _is_ha_ring_mirror(sid)
             kind = str(row.get("kind") or "").lower()
-            prev_kind = kinds_by_name.get(key)
             if key not in by_name:
                 by_name[key] = []
                 kinds_by_name[key] = kind
-            # Prefer Ring UUID stream over HA import for the same label.
-            if is_ha and by_name[key] and not str(
-                by_name[key][0].get("sensor_id") or ""
-            ).startswith("binary_sensor."):
+            # Prefer Ring UUID stream over HA recorder mirrors of the same Ring contact.
+            if is_ha_mirror and by_name[key] and not _is_ha_ring_mirror(
+                str(by_name[key][0].get("sensor_id") or "")
+            ):
                 continue
-            if not is_ha and by_name[key] and str(
-                by_name[key][0].get("sensor_id") or ""
-            ).startswith("binary_sensor."):
+            if (not is_ha_mirror) and by_name[key] and _is_ha_ring_mirror(
+                str(by_name[key][0].get("sensor_id") or "")
+            ):
                 by_name[key] = []
                 kinds_by_name[key] = kind
             by_name[key].append(row)
@@ -1404,6 +1489,53 @@ class Database:
         )
         return {int(float(row[0]) // 60) for row in await cursor.fetchall()}
 
+    async def reading_values_by_minute(
+        self,
+        address: str,
+        start_ts: float,
+        end_ts: float,
+    ) -> dict[int, tuple[float, float, float]]:
+        """Map unix-minute index → (ts, temperature_c, humidity) in [start_ts, end_ts)."""
+        cursor = await self.db.execute(
+            """
+            SELECT ts, temperature_c, humidity FROM readings
+            WHERE address = ? AND ts >= ? AND ts < ?
+            ORDER BY ts
+            """,
+            (address.upper(), float(start_ts), float(end_ts)),
+        )
+        out: dict[int, tuple[float, float, float]] = {}
+        for row in await cursor.fetchall():
+            ts = float(row[0])
+            minute = int(ts // 60)
+            out[minute] = (ts, float(row[1]), float(row[2]))
+        return out
+
+    async def reading_rows_in_range(
+        self,
+        address: str,
+        start_ts: float,
+        end_ts: float,
+    ) -> list[tuple[float, float, float, str | None]]:
+        """All readings in [start_ts, end_ts) as (ts, temp, humidity, source)."""
+        cursor = await self.db.execute(
+            """
+            SELECT ts, temperature_c, humidity, source FROM readings
+            WHERE address = ? AND ts >= ? AND ts < ?
+            ORDER BY ts
+            """,
+            (address.upper(), float(start_ts), float(end_ts)),
+        )
+        return [
+            (
+                float(row[0]),
+                float(row[1]),
+                float(row[2]),
+                str(row[3]) if row[3] is not None else None,
+            )
+            for row in await cursor.fetchall()
+        ]
+
     async def coverage_report(
         self,
         address: str,
@@ -1773,7 +1905,15 @@ class Database:
                 address,
                 COUNT(*) AS jobs,
                 COALESCE(SUM(samples_expected), 0) AS samples_expected,
-                MIN(priority) AS priority
+                MIN(priority) AS priority,
+                (
+                    SELECT b2.phase
+                    FROM backfill_jobs b2
+                    WHERE b2.address = backfill_jobs.address
+                      AND b2.status IN ('pending', 'deferred')
+                    ORDER BY b2.priority ASC, b2.window_end DESC, b2.id ASC
+                    LIMIT 1
+                ) AS phase
             FROM backfill_jobs
             WHERE status IN ('pending', 'deferred')
             GROUP BY address
@@ -1782,25 +1922,13 @@ class Database:
         rows = await cursor.fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
-            addr = str(row[0]).upper()
-            pri = int(row[3])
-            phase_cur = await self.db.execute(
-                """
-                SELECT phase FROM backfill_jobs
-                WHERE address = ? AND status IN ('pending', 'deferred')
-                ORDER BY priority ASC, window_end DESC, id ASC
-                LIMIT 1
-                """,
-                (addr,),
-            )
-            phase_row = await phase_cur.fetchone()
             out.append(
                 {
-                    "address": addr,
+                    "address": str(row[0]).upper(),
                     "jobs": int(row[1]),
                     "samples_expected": int(row[2]),
-                    "priority": pri,
-                    "phase": str(phase_row[0]) if phase_row else "hour",
+                    "priority": int(row[3]),
+                    "phase": str(row[4] or "hour"),
                 }
             )
         return out
@@ -1809,25 +1937,27 @@ class Database:
         """Latest RSSI from readings produced by this node (not peer ingest)."""
         node_id = str(node_id).strip()
         gatt = f"{node_id}/gatt"
-        cursor = await self.db.execute(
-            """
-            SELECT r.address, r.rssi
-            FROM readings r
-            INNER JOIN (
-                SELECT address, MAX(ts) AS mts
-                FROM readings
-                WHERE source = ? OR source = ?
-                GROUP BY address
-            ) latest
-              ON latest.address = r.address AND latest.mts = r.ts
-            WHERE r.rssi IS NOT NULL
-            """,
-            (node_id, gatt),
-        )
+        # Prefer indexed per-address lookups over a full-table GROUP BY on source.
+        cursor = await self.db.execute("SELECT address FROM devices")
+        addresses = [str(row[0]).upper() for row in await cursor.fetchall() if row[0]]
         out: dict[str, int] = {}
-        for row in await cursor.fetchall():
+        for address in addresses:
+            cur = await self.db.execute(
+                """
+                SELECT rssi FROM readings
+                WHERE address = ?
+                  AND rssi IS NOT NULL
+                  AND (source = ? OR source = ?)
+                ORDER BY ts DESC
+                LIMIT 1
+                """,
+                (address, node_id, gatt),
+            )
+            row = await cur.fetchone()
+            if not row:
+                continue
             try:
-                out[str(row[0]).upper()] = int(row[1])
+                out[address] = int(row[0])
             except (TypeError, ValueError):
                 continue
         cursor = await self.db.execute(
@@ -1904,7 +2034,8 @@ class Database:
         cursor = await self.db.execute(
             """
             SELECT address, last_success_ts, last_attempt_ts, last_rssi,
-                   last_battery, COALESCE(enabled, 0) AS enabled
+                   last_battery, COALESCE(enabled, 0) AS enabled,
+                   COALESCE(gatt_enabled, 1) AS gatt_enabled
             FROM backfill_state
             WHERE address = ?
             """,
@@ -1915,10 +2046,11 @@ class Database:
             return None
         out = dict(row)
         out["enabled"] = bool(int(out.get("enabled") or 0))
+        out["gatt_enabled"] = bool(int(out.get("gatt_enabled") if out.get("gatt_enabled") is not None else 1))
         return out
 
     async def list_backfill_enabled(self) -> set[str]:
-        """Addresses opted in for GATT history backfill."""
+        """Addresses opted in for history backfill."""
         cursor = await self.db.execute(
             """
             SELECT address FROM backfill_state
@@ -1926,6 +2058,27 @@ class Database:
             """
         )
         return {str(row[0]).upper() for row in await cursor.fetchall()}
+
+    async def list_backfill_flags(self) -> dict[str, dict[str, bool]]:
+        """address -> {enabled, gatt_enabled} for known backfill_state rows."""
+        cursor = await self.db.execute(
+            """
+            SELECT address,
+                   COALESCE(enabled, 0) AS enabled,
+                   COALESCE(gatt_enabled, 1) AS gatt_enabled
+            FROM backfill_state
+            """
+        )
+        out: dict[str, dict[str, bool]] = {}
+        for row in await cursor.fetchall():
+            addr = str(row[0]).upper()
+            out[addr] = {
+                "enabled": bool(int(row[1] or 0)),
+                "gatt_enabled": bool(
+                    int(row[2] if row[2] is not None else 1)
+                ),
+            }
+        return out
 
     async def is_backfill_enabled(self, address: str) -> bool:
         cursor = await self.db.execute(
@@ -1938,23 +2091,65 @@ class Database:
         row = await cursor.fetchone()
         return bool(row and int(row[0] or 0) == 1)
 
+    async def is_backfill_gatt_enabled(self, address: str) -> bool:
+        """Whether remaining gaps may use GATT after federation pull (default true)."""
+        cursor = await self.db.execute(
+            """
+            SELECT COALESCE(gatt_enabled, 1) FROM backfill_state
+            WHERE address = ?
+            """,
+            (address.upper(),),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return True
+        return bool(int(row[0] if row[0] is not None else 1))
+
     async def set_backfill_enabled(self, address: str, enabled: bool) -> bool:
         """Persist opt-in flag. Returns the stored enabled value."""
+        flags = await self.set_backfill_flags(address, enabled=enabled)
+        return flags["enabled"]
+
+    async def set_backfill_flags(
+        self,
+        address: str,
+        *,
+        enabled: bool | None = None,
+        gatt_enabled: bool | None = None,
+    ) -> dict[str, bool]:
+        """Persist opt-in and/or GATT flags. Returns stored values."""
+        if enabled is None and gatt_enabled is None:
+            raise ValueError("enabled or gatt_enabled required")
         address = address.upper()
-        flag = 1 if enabled else 0
+        existing = await self.get_backfill_state(address)
+        en = (
+            bool(enabled)
+            if enabled is not None
+            else bool((existing or {}).get("enabled"))
+        )
+        gatt = (
+            bool(gatt_enabled)
+            if gatt_enabled is not None
+            else (
+                True
+                if existing is None
+                else bool((existing or {}).get("gatt_enabled", True))
+            )
+        )
         await self.db.execute(
             """
             INSERT INTO backfill_state
                 (address, last_success_ts, last_attempt_ts, last_rssi,
-                 last_battery, enabled)
-            VALUES (?, NULL, NULL, NULL, NULL, ?)
+                 last_battery, enabled, gatt_enabled)
+            VALUES (?, NULL, NULL, NULL, NULL, ?, ?)
             ON CONFLICT(address) DO UPDATE SET
-                enabled = excluded.enabled
+                enabled = excluded.enabled,
+                gatt_enabled = excluded.gatt_enabled
             """,
-            (address, flag),
+            (address, 1 if en else 0, 1 if gatt else 0),
         )
         await self.db.commit()
-        return bool(flag)
+        return {"enabled": en, "gatt_enabled": gatt}
 
     async def upsert_backfill_state(
         self,
@@ -1982,20 +2177,26 @@ class Database:
             else (existing or {}).get("last_battery")
         )
         enabled = 1 if (existing or {}).get("enabled") else 0
+        gatt_enabled = (
+            1
+            if existing is None or (existing or {}).get("gatt_enabled", True)
+            else 0
+        )
         await self.db.execute(
             """
             INSERT INTO backfill_state
                 (address, last_success_ts, last_attempt_ts, last_rssi,
-                 last_battery, enabled)
-            VALUES (?, ?, ?, ?, ?, ?)
+                 last_battery, enabled, gatt_enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(address) DO UPDATE SET
                 last_success_ts = excluded.last_success_ts,
                 last_attempt_ts = excluded.last_attempt_ts,
                 last_rssi = COALESCE(excluded.last_rssi, backfill_state.last_rssi),
                 last_battery = COALESCE(excluded.last_battery, backfill_state.last_battery),
-                enabled = backfill_state.enabled
+                enabled = backfill_state.enabled,
+                gatt_enabled = backfill_state.gatt_enabled
             """,
-            (address, success_ts, attempt, rssi, battery, enabled),
+            (address, success_ts, attempt, rssi, battery, enabled, gatt_enabled),
         )
         await self.db.commit()
 
@@ -2009,11 +2210,23 @@ class Database:
         battery: int,
         rssi: int | None,
         source: str = "local/gatt",
-    ) -> int:
-        """Bulk INSERT OR IGNORE GATT history samples. samples: (ts, temp, humidity)."""
+        overwrite: bool = False,
+        eps_temp: float = 0.05,
+        eps_hum: float = 0.05,
+    ) -> dict[str, int]:
+        """
+        Bulk insert GATT/CSV history samples. samples: (ts, temp, humidity).
+
+        Returns ``{"inserted": n, "overwritten": m}``.
+        With ``overwrite=False`` (default), existing minutes are skipped
+        (``INSERT OR IGNORE`` on exact ``ts``).
+        With ``overwrite=True``, conflicting minutes are updated in place (matched
+        by unix minute even if the stored ``ts`` is not minute-aligned);
+        ``overwritten`` counts minutes whose temp/humidity changed beyond epsilon.
+        """
         address = address.upper()
         if not samples:
-            return 0
+            return {"inserted": 0, "overwritten": 0}
         now = time.time()
         first_ts = min(ts for ts, _, _ in samples)
         last_ts = max(ts for ts, _, _ in samples)
@@ -2029,30 +2242,72 @@ class Database:
             """,
             (address, display_name, model, first_ts, max(last_ts, now)),
         )
-        before = await self.reading_minutes(
-            address,
-            min(ts for ts, _, _ in samples) - 1.0,
-            max(ts for ts, _, _ in samples) + 61.0,
-        )
-        await self.db.executemany(
-            """
-            INSERT OR IGNORE INTO readings
-                (address, ts, temperature_c, humidity, battery, rssi, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (address, float(ts), float(temp), float(hum), int(battery), rssi, source)
-                for ts, temp, hum in samples
-            ],
-        )
-        await self.db.commit()
-        after = await self.reading_minutes(
-            address,
-            min(ts for ts, _, _ in samples) - 1.0,
-            max(ts for ts, _, _ in samples) + 61.0,
-        )
-        return max(0, len(after) - len(before))
 
+        # Deduplicate by minute (last sample wins); keep sample ts for inserts.
+        by_minute: dict[int, tuple[float, float, float]] = {}
+        for ts, temp, hum in samples:
+            minute = int(float(ts) // 60)
+            by_minute[minute] = (float(ts), float(temp), float(hum))
+
+        floored = [float(m * 60) for m in by_minute]
+        win_start = min(first_ts, min(floored)) - 1.0
+        win_end = max(last_ts, max(floored)) + 61.0
+
+        if not overwrite:
+            before = await self.reading_exact_minutes(address, win_start, win_end)
+            await self.db.executemany(
+                """
+                INSERT OR IGNORE INTO readings
+                    (address, ts, temperature_c, humidity, battery, rssi, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (address, ts, temp, hum, int(battery), rssi, source)
+                    for ts, temp, hum in by_minute.values()
+                ],
+            )
+            await self.db.commit()
+            after = await self.reading_exact_minutes(address, win_start, win_end)
+            return {
+                "inserted": max(0, len(after) - len(before)),
+                "overwritten": 0,
+            }
+
+        before_values = await self.reading_values_by_minute(address, win_start, win_end)
+        inserted = 0
+        overwritten = 0
+        insert_rows: list[tuple] = []
+        for minute, (ts, temp, hum) in by_minute.items():
+            old = before_values.get(minute)
+            if old is None:
+                inserted += 1
+                insert_rows.append(
+                    (address, ts, temp, hum, int(battery), rssi, source)
+                )
+            else:
+                old_ts, old_temp, old_hum = old
+                if abs(old_temp - temp) > eps_temp or abs(old_hum - hum) > eps_hum:
+                    overwritten += 1
+                await self.db.execute(
+                    """
+                    UPDATE readings
+                    SET temperature_c = ?, humidity = ?, battery = ?, rssi = ?, source = ?
+                    WHERE address = ? AND ts = ?
+                    """,
+                    (temp, hum, int(battery), rssi, source, address, old_ts),
+                )
+
+        if insert_rows:
+            await self.db.executemany(
+                """
+                INSERT INTO readings
+                    (address, ts, temperature_c, humidity, battery, rssi, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                insert_rows,
+            )
+        await self.db.commit()
+        return {"inserted": inserted, "overwritten": overwritten}
 
 COVERAGE_FULL_THRESHOLD = 0.90
 
