@@ -169,6 +169,10 @@ class Database:
                 await self.db.execute(
                     f"ALTER TABLE devices ADD COLUMN {col} TEXT"
                 )
+        if "height_cm" not in device_cols:
+            await self.db.execute(
+                "ALTER TABLE devices ADD COLUMN height_cm REAL"
+            )
 
         # Deduplicate before creating unique index (keep lowest id)
         await self.db.execute(
@@ -349,6 +353,7 @@ class Database:
                     d.last_seen,
                     d.zone,
                     d.height,
+                    d.height_cm,
                     d.room,
                     r.temperature_c,
                     r.humidity,
@@ -390,6 +395,7 @@ class Database:
                     d.last_seen,
                     d.zone,
                     d.height,
+                    d.height_cm,
                     d.room,
                     r.temperature_c,
                     r.humidity,
@@ -431,6 +437,7 @@ class Database:
                 d.last_seen,
                 d.zone,
                 d.height,
+                d.height_cm,
                 d.room,
                 r.temperature_c,
                 r.humidity,
@@ -458,6 +465,7 @@ class Database:
         *,
         zone: str | None | object = ...,
         height: str | None | object = ...,
+        height_cm: float | None | object = ...,
         room: str | None | object = ...,
     ) -> dict[str, Any] | None:
         """Update category fields. Ellipsis means leave unchanged."""
@@ -473,6 +481,9 @@ class Database:
         if height is not ...:
             fields.append("height = ?")
             values.append(height)
+        if height_cm is not ...:
+            fields.append("height_cm = ?")
+            values.append(height_cm)
         if room is not ...:
             fields.append("room = ?")
             values.append(room)

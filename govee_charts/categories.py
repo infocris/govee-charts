@@ -99,18 +99,49 @@ def _norm_choice(value: Any, allowed: tuple[str, ...]) -> str | None:
     return text
 
 
+def _norm_height_cm(value: Any) -> float | None:
+    """Sensor mounting height above floor in centimetres (0–600), or unset."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if not text or text in ("none", "null", "unset", "-"):
+            return None
+        try:
+            cm = float(text.replace(",", "."))
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid height_cm {value!r}; expected a number in cm"
+            ) from exc
+    else:
+        try:
+            cm = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid height_cm {value!r}; expected a number in cm"
+            ) from exc
+    if cm < 0 or cm > 600:
+        raise ValueError(
+            f"Invalid height_cm {value!r}; expected 0–600 cm above floor"
+        )
+    return round(cm, 1)
+
+
 def normalize_patch(
     *,
     zone: Any = ...,
     height: Any = ...,
+    height_cm: Any = ...,
     room: Any = ...,
-) -> dict[str, str | None]:
+) -> dict[str, Any]:
     """Build a partial update dict. Ellipsis means 'field not provided'."""
-    out: dict[str, str | None] = {}
+    out: dict[str, Any] = {}
     if zone is not ...:
         out["zone"] = _norm_choice(zone, ZONES)
     if height is not ...:
         out["height"] = _norm_choice(height, HEIGHTS)
+    if height_cm is not ...:
+        out["height_cm"] = _norm_height_cm(height_cm)
     if room is not ...:
         out["room"] = _norm_choice(room, ROOMS)
     return out

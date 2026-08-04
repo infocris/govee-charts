@@ -9,7 +9,8 @@ pushes its readings to the others.
 ## Supported sensors
 
 - **H5075** / H5072 (manufacturer ID `0xEC88`)
-- **H5179** (manufacturer ID `0x8801`)
+- **H5179** (manufacturer ID `0x8801`, or newer firmware with ID `0x0001` /
+  broadcast name `GV5179_XXXX` — same packed payload as H5101/H5177)
 
 Auto-discovery: any Govee device advertising these payloads appears without
 manual pairing.
@@ -160,9 +161,13 @@ See `config.example.toml`:
 ## Sensor categories
 
 On the **Overview** page, each sensor has editable **Zone** (interior/exterior),
-**Height** (high/mid/low), and **Room** (kitchen, bedroom, corridor, living, other).
+**Height** (high/mid/low), optional **Height cm** (exact mounting height above
+the floor, 0–600), and **Room** (kitchen, bedroom, corridor, living, other).
 Values are stored in SQLite and can be filtered in Overview and Compare.
 On first start, empty categories are inferred from friendly labels when possible.
+When **Height cm** is set, the **Map** view places temperatures on the vertical
+band using that height (relative to `apartment.ceiling_m`); otherwise it falls
+back to high/mid/low.
 
 Enable in `config.toml` (`weather.enabled = true`).
 
@@ -213,6 +218,11 @@ The **Facades** view edits which compass orientations each room faces outdoors
 shortwave radiation / cloud cover, plus current wind and natural vs mechanical
 ventilation hints.
 
+The **Map** view shows an **open-room cross-section** (kitchen → corridor →
+bedroom) colored by live temperatures at each sensor `height_cm`, plus a
+topology graph of rooms as vertical bands with walls/doors as edges and
+cooling-draft suggestions.
+
 On the Compare **Temperature** chart, optional **Window open / close** bands
 compare the first selected interior sensor to outdoor air (±0.5 °C): green =
 opening would cool **and** outdoor dew point is safely below indoor air
@@ -244,10 +254,14 @@ With `[hvac] enabled = true`, Govee Charts polls the Home Assistant REST API
 for a climate entity (e.g. Tuya AC) and a power sensor (e.g. Little Monkey /
 Ecojoko realtime watts). Create a **long-lived access token** in HA
 (Profile → Security) and set `hvac.ha_token` or `hvac.ha_token_file`.
+Set `hvac.room` to the apartment room id that hosts the unit (default
+`bedroom`): when the AC is on, the Map badges that room with the
+setpoint and an estimated AC draw (whole-home watts minus baseline).
 
 On startup, optional `hvac.ha_db_path` imports existing recorder history.
 The Compare **Temperature** chart can overlay **AC on** bands and a secondary
-**power (W)** axis (toggle **AC & power**).
+**power (W)** axis (toggle **AC & power**). The status bar shows setpoint,
+estimated AC watts, and grid power.
 
 Energy meters are also polled when configured:
 - `energy_entity` — whole-home kWh since midnight (e.g. Infocris réseau)
@@ -272,15 +286,15 @@ Data © [Open-Meteo](https://open-meteo.com/).
 
 - `GET /api/devices` — known devices + latest reading + categories
 - `GET /api/categories` — zone / height / room taxonomy
-- `PATCH /api/devices/{address}/categories` — update `{zone,height,room}`
+- `PATCH /api/devices/{address}/categories` — update `{zone,height,height_cm,room}`
 - `GET /api/history?address=…&hours=24` — time series
 - `GET /api/forecast?hours=24&address=…` — outdoor forecast + optional projections
-- `GET /api/apartment` — layout, façades, linked sensors, live solar gains
+- `GET /api/apartment` — layout, façades, linked sensors, live solar gains (+ `hvac` when enabled)
 - `PATCH /api/apartment/rooms/{id}` — update `{exterior:[…]}` orientations
 - `GET /api/doors` — latest door/window open/closed state (+ room / kind)
 - `PATCH /api/doors/{sensor_id}` — update `{room,kind,name}` for a contact
 - `GET /api/doors/history?hours=168&sensor_id=…` — open/close event history
-- `GET /api/hvac` — latest climate + power snapshot + energy/heat summary
+- `GET /api/hvac` — latest climate + power + estimated `ac_watts` + energy/heat summary
 - `GET /api/hvac/history?hours=168` — climate events + active bands
 - `GET /api/power/history?hours=168` — power samples (W)
 - `GET /api/energy/summary` — today's (or `?hours=`) electrical + indoor heat estimate

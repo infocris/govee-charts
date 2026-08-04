@@ -64,6 +64,8 @@ class HvacConfig:
     ha_token: str = ""
     ha_token_file: str = ""
     climate_entity: str = "climate.medion_smart_mobile_camping_ac_p502_md37735"
+    # Apartment room id where the AC unit sits (Network graph badge).
+    room: str = "bedroom"
     power_entity: str = "sensor.infocris_consommation_temps_reel"
     # Daily-reset whole-home energy (kWh since midnight).
     energy_entity: str = "sensor.infocris_consommation_reseau"
@@ -100,6 +102,7 @@ class HvacConfig:
                 raw.get("climate_entity")
                 or "climate.medion_smart_mobile_camping_ac_p502_md37735"
             ).strip(),
+            room=str(raw.get("room") or "bedroom").strip().lower() or "bedroom",
             power_entity=str(
                 raw.get("power_entity") or "sensor.infocris_consommation_temps_reel"
             ).strip(),

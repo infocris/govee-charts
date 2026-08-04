@@ -101,6 +101,7 @@ DEFAULTS: dict[str, Any] = {
         "ha_token": "",
         "ha_token_file": "",
         "climate_entity": "climate.medion_smart_mobile_camping_ac_p502_md37735",
+        "room": "bedroom",
         "power_entity": "sensor.infocris_consommation_temps_reel",
         "energy_entity": "sensor.infocris_consommation_reseau",
         "water_heater_energy_entity": "sensor.compteur_intelligent_wifi_energie_totale",

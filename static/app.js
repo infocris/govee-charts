@@ -27,15 +27,23 @@
   const networkMetaEl = document.getElementById("network-meta");
   const networkStatusEl = document.getElementById("network-status");
   const networkAirflowEl = document.getElementById("network-airflow");
+  const networkTempScaleEl = document.getElementById("network-temp-scale");
+  const networkTempScaleLoEl = document.getElementById("network-temp-scale-lo");
+  const networkTempScaleHiEl = document.getElementById("network-temp-scale-hi");
+  const sectionSvgEl = document.getElementById("section-svg");
+  const sectionMetaEl = document.getElementById("section-meta");
+  const sectionTempScaleEl = document.getElementById("section-temp-scale");
+  const sectionTempScaleLoEl = document.getElementById("section-temp-scale-lo");
+  const sectionTempScaleHiEl = document.getElementById("section-temp-scale-hi");
   const networkZoomInBtn = document.getElementById("network-zoom-in");
   const networkZoomOutBtn = document.getElementById("network-zoom-out");
   const networkZoomResetBtn = document.getElementById("network-zoom-reset");
   const NETWORK_VB_W = 920;
-  const NETWORK_VB_H = 560;
+  const NETWORK_VB_H = 640;
   const NETWORK_ZOOM_MIN = 0.6;
   const NETWORK_ZOOM_MAX = 4;
   /** @type {number} */
-  let networkZoom = 1.4;
+  let networkZoom = 1.1;
   /** @type {{x:number,y:number}} viewBox top-left offset at current zoom */
   let networkPan = { x: 0, y: 0 };
   /** @type {{x:number,y:number}|null} */
@@ -173,6 +181,7 @@
   const MODEL_KEY = "govee-charts.model";
   const SORT_KEY = "govee-charts.sort";
   const FORECAST_KEY = "govee-charts.forecast";
+  const PROJECTION_SCENARIO_KEY = "govee-charts.projectionScenario";
   const WINDOW_BANDS_KEY = "govee-charts.windowBands";
   const HVAC_KEY = "govee-charts.hvac";
   const WINDOW_NOTIFY_KEY = "govee-charts.windowNotify";
@@ -216,6 +225,7 @@
     ? localStorage.getItem(VIEW_KEY)
     : "overview";
   let showForecast = localStorage.getItem(FORECAST_KEY) !== "0";
+  let projectionScenario = loadProjectionScenario();
   let showWindowBands = localStorage.getItem(WINDOW_BANDS_KEY) !== "0";
   let showHvac = localStorage.getItem(HVAC_KEY) !== "0";
   let windowNotify = localStorage.getItem(WINDOW_NOTIFY_KEY) === "1";
@@ -232,6 +242,7 @@
   /** @type {Map<string, string>} node_id → url */
   let peerByNodeId = new Map();
   const showForecastEl = document.getElementById("show-forecast");
+  const projectionScenarioEl = document.getElementById("projection-scenario");
   const showWindowBandsEl = document.getElementById("show-window-bands");
   const showHvacEl = document.getElementById("show-hvac");
   const windowNotifyEl = document.getElementById("window-notify");
@@ -568,6 +579,18 @@
     }
     if (value == null || value === "" || value === "all") return [];
     return [String(value)];
+  }
+
+  function loadProjectionScenario() {
+    const raw = localStorage.getItem(PROJECTION_SCENARIO_KEY) || "closed";
+    if (["auto", "closed", "open", "both"].includes(raw)) return raw;
+    return "closed";
+  }
+
+  function syncProjectionScenarioControl() {
+    if (!projectionScenarioEl) return;
+    projectionScenarioEl.value = projectionScenario;
+    projectionScenarioEl.disabled = !showForecast;
   }
 
   function loadActiveModels() {
@@ -2310,6 +2333,30 @@
     }
   }
 
+  function deviceStoredInfo(address) {
+    const key = String(address || "").toUpperCase();
+    const device = (devices || []).find(
+      (d) => String(d.address || "").toUpperCase() === key
+    );
+    if (!device) {
+      return { samples: 0, bytes: 0, label: "—", title: "" };
+    }
+    const samples = Number(device.sample_count) || 0;
+    const bytes =
+      device.storage_bytes_est != null
+        ? Number(device.storage_bytes_est)
+        : samples * 120;
+    if (samples <= 0) {
+      return { samples: 0, bytes: 0, label: "—", title: "" };
+    }
+    return {
+      samples,
+      bytes,
+      label: `${formatSampleCount(samples)} · ${formatBytes(bytes)}`,
+      title: `${samples.toLocaleString("en-GB")} samples · ~${formatBytes(bytes)} (est.)`,
+    };
+  }
+
   function renderCoverageAllList(sensors, range) {
     if (!coverageAllListEl) return;
     const rows = Array.isArray(sensors) ? sensors : [];
@@ -2332,7 +2379,15 @@
       name.textContent = s.name || s.address;
       const pct = document.createElement("span");
       pct.className = "coverage-all-pct";
+      const stored = deviceStoredInfo(s.address);
       pct.textContent = `${Number(s.coverage_pct || 0).toFixed(0)}%`;
+      if (stored.samples > 0) {
+        const storeEl = document.createElement("span");
+        storeEl.className = "coverage-all-stored";
+        storeEl.textContent = stored.label;
+        storeEl.title = stored.title;
+        pct.append(" · ", storeEl);
+      }
       meta.append(name, pct);
 
       const bar = document.createElement("div");
@@ -2395,9 +2450,21 @@
           ? sensors.reduce((n, s) => n + Number(s.coverage_pct || 0), 0) /
             sensors.length
           : 0;
+      let totalSamples = 0;
+      let totalBytes = 0;
+      for (const s of sensors) {
+        const stored = deviceStoredInfo(s.address);
+        totalSamples += stored.samples;
+        totalBytes += stored.bytes;
+      }
+      const storeNote =
+        totalSamples > 0
+          ? ` · ~${formatSampleCount(totalSamples)} samples / ${formatBytes(totalBytes)}`
+          : "";
       if (coverageAllSummaryEl) {
         coverageAllSummaryEl.textContent =
           `${sensors.length} sensor(s) · avg ${avg.toFixed(0)}% covered` +
+          storeNote +
           ` · window ${formatImportRange(data.range)}` +
           ` · buckets: ${data.bucket || "day"}`;
       }
@@ -2681,7 +2748,7 @@
     if (backfillLoadInFlight) return;
     backfillLoadInFlight = true;
     try {
-      const res = await fetch("/api/backfill?recent_limit=100&job_limit=50");
+      const res = await fetch("/api/backfill?recent_limit=10&job_limit=10");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       // Avoid overwriting checkboxes mid-PATCH (poll races).
@@ -3240,17 +3307,140 @@
       dx = Math.min(-0.35, dx);
       dy = Math.max(0.35, dy);
     }
-    return { x: p.x + dx * 0.55, y: p.y + dy * 0.55 };
+    // Keep façade nodes close enough to stay inside the padded viewBox.
+    return { x: p.x + dx * 0.38, y: p.y + dy * 0.38 };
+  }
+
+  /** Stable key for rooms that share the same exterior orientation(s). */
+  function networkFacadeKey(room) {
+    const orients = [...new Set((room.exterior || []).map((o) => String(o).toLowerCase()))]
+      .filter(Boolean)
+      .sort();
+    return orients.join("+") || "";
+  }
+
+  /** High / low exterior sensors for a façade group (all rooms on that face). */
+  function networkFacadeTempBands(groupRooms) {
+    const high = [];
+    const low = [];
+    const mid = [];
+    const other = [];
+    for (const room of groupRooms) {
+      for (const s of room.sensors || []) {
+        if (String(s.zone || "").toLowerCase() !== "exterior") continue;
+        const t = Number(s.temperature_c);
+        if (!Number.isFinite(t)) continue;
+        const h = String(s.height || "").toLowerCase();
+        if (h === "high") high.push(t);
+        else if (h === "low") low.push(t);
+        else if (h === "mid") mid.push(t);
+        else other.push(t);
+      }
+    }
+    return { high, mid, low, other };
+  }
+
+  /**
+   * Append a vertical linearGradient (top=ceiling, bottom=floor) and return its url(#id).
+   * ``levels`` is [{offset: "0%"|"50%"|..., temp}] or continuous stop list.
+   */
+  function appendHeightGradient(defs, NS, gradId, stopsOrLevels, tMin, tMax) {
+    const grad = document.createElementNS(NS, "linearGradient");
+    grad.setAttribute("id", gradId);
+    grad.setAttribute("x1", "0");
+    grad.setAttribute("y1", "0");
+    grad.setAttribute("x2", "0");
+    grad.setAttribute("y2", "1");
+    let levels;
+    if (Array.isArray(stopsOrLevels)) {
+      levels = stopsOrLevels;
+    } else {
+      const stops = stopsOrLevels;
+      levels = [
+        { offset: "0%", temp: stops.high },
+        { offset: "50%", temp: stops.mid },
+        { offset: "100%", temp: stops.low },
+      ];
+    }
+    for (const level of levels) {
+      const stop = document.createElementNS(NS, "stop");
+      stop.setAttribute("offset", level.offset);
+      stop.setAttribute(
+        "stop-color",
+        networkTempColor(level.temp, tMin, tMax)
+      );
+      grad.appendChild(stop);
+    }
+    defs.appendChild(grad);
+    return `url(#${gradId})`;
+  }
+
+  /** Prefer exact height_cm; else map high/mid/low onto ceiling fractions. */
+  function sensorHeightCm(sensor, ceilingCm) {
+    const cm = Number(sensor && sensor.height_cm);
+    if (Number.isFinite(cm) && cm >= 0) return cm;
+    const h = String((sensor && sensor.height) || "").toLowerCase();
+    if (h === "high") return ceilingCm * 0.85;
+    if (h === "mid") return ceilingCm * 0.5;
+    if (h === "low") return ceilingCm * 0.15;
+    return null;
+  }
+
+  /**
+   * Build SVG gradient stops from sensors (offset 0% = ceiling / top).
+   * Returns null when no usable heights+temps.
+   */
+  function networkSensorGradientLevels(sensors, ceilingCm, { exterior = false } = {}) {
+    const ceil = Math.max(Number(ceilingCm) || 250, 1);
+    /** @type {Map<number, number[]>} */
+    const byCm = new Map();
+    for (const s of sensors || []) {
+      const zone = String(s.zone || "").toLowerCase();
+      if (exterior) {
+        if (zone !== "exterior") continue;
+      } else if (zone === "exterior") {
+        continue;
+      }
+      const cm = sensorHeightCm(s, ceil);
+      const t = Number(s.temperature_c);
+      if (cm == null || !Number.isFinite(t)) continue;
+      const key = Math.round(cm);
+      if (!byCm.has(key)) byCm.set(key, []);
+      byCm.get(key).push(t);
+    }
+    if (!byCm.size) return null;
+    const points = [...byCm.entries()]
+      .map(([cm, temps]) => ({
+        cm,
+        temp: temps.reduce((a, b) => a + b, 0) / temps.length,
+      }))
+      .sort((a, b) => b.cm - a.cm); // high first
+    // Ensure top (ceiling) and bottom (floor) ends exist for a full band fill.
+    const top = points[0];
+    const bot = points[points.length - 1];
+    if (top.cm < ceil * 0.95) {
+      points.unshift({ cm: ceil, temp: top.temp });
+    }
+    if (bot.cm > ceil * 0.05) {
+      points.push({ cm: 0, temp: bot.temp });
+    }
+    return points.map((p) => {
+      const fromTop = Math.min(1, Math.max(0, (ceil - p.cm) / ceil));
+      return {
+        offset: `${(fromTop * 100).toFixed(1)}%`,
+        temp: p.temp,
+      };
+    });
   }
 
   /** Preferred relative positions for the default T3 layout (unit circle). */
   const NETWORK_PREF = {
     corridor: [0, 0],
-    bedroom: [0.15, -0.85],
-    bathroom: [0.75, -0.45],
-    living: [-0.55, 0.55],
-    kitchen: [-0.85, -0.05],
-    wc: [0.05, 0.85],
+    bedroom: [0.12, -0.68],
+    bathroom: [0.68, -0.38],
+    living: [-0.5, 0.48],
+    kitchen: [-0.72, -0.02],
+    wc: [0.05, 0.72],
   };
 
   function networkLayout(rooms, edges) {
@@ -3291,6 +3481,163 @@
     return `${Number(temp).toFixed(1)}°C`;
   }
 
+  function formatNetworkTempBand(temps) {
+    const vals = (temps || [])
+      .map((t) => Number(t))
+      .filter((t) => Number.isFinite(t));
+    if (!vals.length) return null;
+    const lo = Math.min(...vals);
+    const hi = Math.max(...vals);
+    if (Math.abs(hi - lo) < 0.05) return `${lo.toFixed(1)}°C`;
+    return `${lo.toFixed(1)}–${hi.toFixed(1)}°C`;
+  }
+
+  /** Split interior sensors by height for map pill layout. */
+  function networkInteriorTempBands(room) {
+    const high = [];
+    const low = [];
+    const mid = [];
+    const other = [];
+    for (const s of room.sensors || []) {
+      if (String(s.zone || "").toLowerCase() === "exterior") continue;
+      const t = Number(s.temperature_c);
+      if (!Number.isFinite(t)) continue;
+      const h = String(s.height || "").toLowerCase();
+      if (h === "high") high.push(t);
+      else if (h === "low") low.push(t);
+      else if (h === "mid") mid.push(t);
+      else other.push(t);
+    }
+    return { high, mid, low, other };
+  }
+
+  function networkAvgTemp(temps) {
+    const vals = (temps || [])
+      .map((t) => Number(t))
+      .filter((t) => Number.isFinite(t));
+    if (!vals.length) return null;
+    return vals.reduce((a, b) => a + b, 0) / vals.length;
+  }
+
+  /** Global min/max across interior room sensors for the shared color scale. */
+  function networkTempScale(rooms) {
+    let tMin = Infinity;
+    let tMax = -Infinity;
+    for (const room of rooms) {
+      for (const s of room.sensors || []) {
+        if (String(s.zone || "").toLowerCase() === "exterior") continue;
+        const t = Number(s.temperature_c);
+        if (!Number.isFinite(t)) continue;
+        if (t < tMin) tMin = t;
+        if (t > tMax) tMax = t;
+      }
+      // Also include façade exterior sensors so the scale covers outdoor bands.
+      for (const s of room.sensors || []) {
+        if (String(s.zone || "").toLowerCase() !== "exterior") continue;
+        const t = Number(s.temperature_c);
+        if (!Number.isFinite(t)) continue;
+        if (t < tMin) tMin = t;
+        if (t > tMax) tMax = t;
+      }
+    }
+    if (!Number.isFinite(tMin) || !Number.isFinite(tMax)) {
+      return { tMin: 18, tMax: 28 };
+    }
+    if (tMax - tMin < 1.0) {
+      const mid = (tMin + tMax) / 2;
+      tMin = mid - 0.5;
+      tMax = mid + 0.5;
+    }
+    return { tMin, tMax };
+  }
+
+  /** Map temperature onto cool→warm palette (#2b7bbf → #c4782a → #c45c4a). */
+  function networkTempColor(temp, tMin, tMax) {
+    const t = Number(temp);
+    if (!Number.isFinite(t)) return "#6a756e";
+    const span = Math.max(tMax - tMin, 0.01);
+    const u = Math.min(1, Math.max(0, (t - tMin) / span));
+    const stops = [
+      { u: 0, r: 0x2b, g: 0x7b, b: 0xbf },
+      { u: 0.5, r: 0xc4, g: 0x78, b: 0x2a },
+      { u: 1, r: 0xc4, g: 0x5c, b: 0x4a },
+    ];
+    let a = stops[0];
+    let b = stops[stops.length - 1];
+    for (let i = 0; i < stops.length - 1; i += 1) {
+      if (u >= stops[i].u && u <= stops[i + 1].u) {
+        a = stops[i];
+        b = stops[i + 1];
+        break;
+      }
+    }
+    const local = (u - a.u) / Math.max(b.u - a.u, 1e-6);
+    const r = Math.round(a.r + (b.r - a.r) * local);
+    const g = Math.round(a.g + (b.g - a.g) * local);
+    const bl = Math.round(a.b + (b.b - a.b) * local);
+    return `#${[r, g, bl]
+      .map((x) => x.toString(16).padStart(2, "0"))
+      .join("")}`;
+  }
+
+  /**
+   * Resolve high / mid / low representative temps for a vertical gradient.
+   * Missing mid is interpolated from high+low when both exist.
+   */
+  function networkHeightStops(bands) {
+    const high = networkAvgTemp(bands.high);
+    const low = networkAvgTemp(bands.low);
+    let mid = networkAvgTemp(bands.mid);
+    const other = networkAvgTemp(bands.other);
+    if (mid == null && high != null && low != null) {
+      mid = (high + low) / 2;
+    }
+    if (high == null && low == null && mid == null && other != null) {
+      return { high: other, mid: other, low: other };
+    }
+    if (high == null && mid == null && low != null) {
+      return { high: low, mid: low, low };
+    }
+    if (low == null && mid == null && high != null) {
+      return { high, mid: high, low: high };
+    }
+    if (high == null && low == null && mid != null) {
+      return { high: mid, mid, low: mid };
+    }
+    return {
+      high: high != null ? high : mid != null ? mid : low,
+      mid: mid != null ? mid : high != null && low != null ? (high + low) / 2 : high ?? low,
+      low: low != null ? low : mid != null ? mid : high,
+    };
+  }
+
+  function networkHottestRoomIds(rooms) {
+    let best = -Infinity;
+    for (const room of rooms) {
+      const t =
+        room.temp_c != null
+          ? Number(room.temp_c)
+          : room.temp_max != null
+            ? Number(room.temp_max)
+            : NaN;
+      if (Number.isFinite(t) && t > best) best = t;
+    }
+    if (!Number.isFinite(best)) return new Set();
+    const ids = new Set();
+    for (const room of rooms) {
+      const t =
+        room.temp_c != null
+          ? Number(room.temp_c)
+          : room.temp_max != null
+            ? Number(room.temp_max)
+            : NaN;
+      if (Number.isFinite(t) && Math.abs(t - best) < 0.05) {
+        ids.add(room.id);
+      }
+    }
+    return ids;
+  }
+
   function clampNetworkPan() {
     const vw = NETWORK_VB_W / networkZoom;
     const vh = NETWORK_VB_H / networkZoom;
@@ -3298,6 +3645,14 @@
     const maxY = Math.max(0, NETWORK_VB_H - vh);
     networkPan.x = Math.min(maxX, Math.max(0, networkPan.x));
     networkPan.y = Math.min(maxY, Math.max(0, networkPan.y));
+  }
+
+  function centerNetworkPan() {
+    const vw = NETWORK_VB_W / networkZoom;
+    const vh = NETWORK_VB_H / networkZoom;
+    networkPan.x = Math.max(0, (NETWORK_VB_W - vw) / 2);
+    networkPan.y = Math.max(0, (NETWORK_VB_H - vh) / 2);
+    clampNetworkPan();
   }
 
   function applyNetworkViewBox() {
@@ -3348,14 +3703,287 @@
     applyNetworkViewBox();
   }
 
+  /** Default open-plan row through the apartment hub. */
+  const SECTION_PATH = ["kitchen", "corridor", "bedroom"];
+
+  function edgeOpeningBetween(edges, a, b) {
+    for (const e of edges || []) {
+      if (
+        (e.a === a && e.b === b) ||
+        (e.a === b && e.b === a)
+      ) {
+        return {
+          opening: e.opening || "unknown",
+          kind: e.kind || "door",
+          source: e.opening_source || "",
+        };
+      }
+    }
+    return { opening: "unknown", kind: "door", source: "" };
+  }
+
+  function renderOpenRoomSection(data) {
+    if (!sectionSvgEl) return;
+    const NS = "http://www.w3.org/2000/svg";
+    sectionSvgEl.replaceChildren();
+    if (!data || !data.enabled) {
+      if (sectionTempScaleEl) sectionTempScaleEl.hidden = true;
+      if (sectionMetaEl) {
+        sectionMetaEl.textContent =
+          "Enable [apartment] in config.toml to show the cross-section.";
+      }
+      return;
+    }
+    const rooms = data.rooms || [];
+    const edges = data.edges || [];
+    const byId = Object.fromEntries(rooms.map((r) => [r.id, r]));
+    const path = SECTION_PATH.filter((id) => byId[id]);
+    if (path.length < 2) {
+      if (sectionTempScaleEl) sectionTempScaleEl.hidden = true;
+      if (sectionMetaEl) {
+        sectionMetaEl.textContent =
+          "Need kitchen, corridor and bedroom in the apartment layout.";
+      }
+      return;
+    }
+
+    const ceilingCm = Math.max(
+      50,
+      Math.round(Number(data.ceiling_m || 2.5) * 100)
+    );
+    const sectionRooms = path.map((id) => byId[id]);
+    const { tMin, tMax } = networkTempScale(sectionRooms);
+    if (sectionTempScaleEl) {
+      sectionTempScaleEl.hidden = false;
+      if (sectionTempScaleLoEl) {
+        sectionTempScaleLoEl.textContent = `${tMin.toFixed(1)}°`;
+      }
+      if (sectionTempScaleHiEl) {
+        sectionTempScaleHiEl.textContent = `${tMax.toFixed(1)}°`;
+      }
+    }
+
+    const padL = 52;
+    const padR = 18;
+    const padT = 28;
+    const padB = 42;
+    const W = 920;
+    const H = 360;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+    const gap = 14;
+    const areas = sectionRooms.map((r) => Math.max(1, Number(r.area_m2) || 1));
+    const areaSum = areas.reduce((a, b) => a + b, 0);
+    const usable = plotW - gap * (sectionRooms.length - 1);
+    const widths = areas.map((a) => (a / areaSum) * usable);
+
+    sectionSvgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    sectionSvgEl.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+    const defs = document.createElementNS(NS, "defs");
+    sectionSvgEl.appendChild(defs);
+
+    // Height axis
+    const axisG = document.createElementNS(NS, "g");
+    axisG.setAttribute("class", "section-axis");
+    const axisLine = document.createElementNS(NS, "line");
+    axisLine.setAttribute("x1", String(padL - 8));
+    axisLine.setAttribute("x2", String(padL - 8));
+    axisLine.setAttribute("y1", String(padT));
+    axisLine.setAttribute("y2", String(padT + plotH));
+    axisLine.setAttribute("stroke", "var(--line)");
+    axisLine.setAttribute("stroke-width", "1.5");
+    axisG.appendChild(axisLine);
+    const ticks = [0, 0.25, 0.5, 0.75, 1];
+    for (const u of ticks) {
+      const cm = Math.round(ceilingCm * (1 - u));
+      const y = padT + u * plotH;
+      const tick = document.createElementNS(NS, "line");
+      tick.setAttribute("x1", String(padL - 12));
+      tick.setAttribute("x2", String(padL - 4));
+      tick.setAttribute("y1", String(y));
+      tick.setAttribute("y2", String(y));
+      tick.setAttribute("stroke", "var(--line)");
+      axisG.appendChild(tick);
+      const lab = document.createElementNS(NS, "text");
+      lab.setAttribute("x", String(padL - 16));
+      lab.setAttribute("y", String(y + 4));
+      lab.setAttribute("class", "section-axis-label");
+      lab.textContent = `${cm}`;
+      axisG.appendChild(lab);
+    }
+    const axisTitle = document.createElementNS(NS, "text");
+    axisTitle.setAttribute("x", String(padL - 16));
+    axisTitle.setAttribute("y", String(padT - 10));
+    axisTitle.setAttribute("class", "section-axis-label");
+    axisTitle.textContent = "cm";
+    axisG.appendChild(axisTitle);
+    sectionSvgEl.appendChild(axisG);
+
+    // Floor / ceiling guides
+    const guides = document.createElementNS(NS, "g");
+    for (const [u, dash] of [
+      [0, ""],
+      [1, ""],
+    ]) {
+      const y = padT + u * plotH;
+      const line = document.createElementNS(NS, "line");
+      line.setAttribute("x1", String(padL));
+      line.setAttribute("x2", String(W - padR));
+      line.setAttribute("y1", String(y));
+      line.setAttribute("y2", String(y));
+      line.setAttribute("stroke", "var(--line)");
+      line.setAttribute("stroke-width", u === 1 ? "2" : "1.25");
+      if (dash) line.setAttribute("stroke-dasharray", dash);
+      line.setAttribute("opacity", "0.55");
+      guides.appendChild(line);
+    }
+    sectionSvgEl.appendChild(guides);
+
+    let x = padL;
+    const doorBits = [];
+    for (let i = 0; i < sectionRooms.length; i += 1) {
+      const room = sectionRooms[i];
+      const w = widths[i];
+      const contLevels = networkSensorGradientLevels(
+        room.sensors || [],
+        ceilingCm,
+        { exterior: false }
+      );
+      const bands = networkInteriorTempBands(room);
+      const heightStops = networkHeightStops(bands);
+      const hasTemp = !!(
+        contLevels ||
+        heightStops.high != null ||
+        heightStops.mid != null ||
+        heightStops.low != null
+      );
+      const gradId = `section-grad-${String(room.id).replace(/[^a-z0-9_-]/gi, "_")}`;
+      const fill = hasTemp
+        ? appendHeightGradient(
+            defs,
+            NS,
+            gradId,
+            contLevels || heightStops,
+            tMin,
+            tMax
+          )
+        : "#2a3230";
+
+      const rect = document.createElementNS(NS, "rect");
+      rect.setAttribute("x", String(x));
+      rect.setAttribute("y", String(padT));
+      rect.setAttribute("width", String(w));
+      rect.setAttribute("height", String(plotH));
+      rect.setAttribute("rx", "8");
+      rect.setAttribute("ry", "8");
+      rect.setAttribute("class", "section-room");
+      rect.setAttribute("fill", fill);
+      rect.setAttribute("stroke", "var(--line)");
+      rect.setAttribute("stroke-width", "1.5");
+      const title = document.createElementNS(NS, "title");
+      const sensorBits = (room.sensors || [])
+        .filter((s) => String(s.zone || "").toLowerCase() !== "exterior")
+        .map((s) => {
+          const cm =
+            s.height_cm != null && Number.isFinite(Number(s.height_cm))
+              ? `${Math.round(Number(s.height_cm))} cm`
+              : String(s.height || "?");
+          return `${s.name} @ ${cm}: ${formatNetworkTemp(s.temperature_c)}`;
+        })
+        .join("; ");
+      title.textContent =
+        `${room.label || room.id}` +
+        (sensorBits ? `\n${sensorBits}` : "\nNo interior sensors");
+      rect.appendChild(title);
+      sectionSvgEl.appendChild(rect);
+
+      // Sensor markers at exact heights
+      for (const s of room.sensors || []) {
+        if (String(s.zone || "").toLowerCase() === "exterior") continue;
+        const cm = sensorHeightCm(s, ceilingCm);
+        const t = Number(s.temperature_c);
+        if (cm == null || !Number.isFinite(t)) continue;
+        const y = padT + ((ceilingCm - cm) / ceilingCm) * plotH;
+        const cx = x + w * 0.5;
+        const dot = document.createElementNS(NS, "circle");
+        dot.setAttribute("cx", String(cx));
+        dot.setAttribute("cy", String(y));
+        dot.setAttribute("r", "5");
+        dot.setAttribute("fill", networkTempColor(t, tMin, tMax));
+        dot.setAttribute("stroke", "#fff");
+        dot.setAttribute("stroke-width", "1.5");
+        const tip = document.createElementNS(NS, "title");
+        tip.textContent = `${s.name}: ${formatNetworkTemp(t)} @ ${Math.round(cm)} cm`;
+        dot.appendChild(tip);
+        sectionSvgEl.appendChild(dot);
+
+        const lab = document.createElementNS(NS, "text");
+        lab.setAttribute("x", String(cx + 8));
+        lab.setAttribute("y", String(y + 4));
+        lab.setAttribute("class", "section-sensor-label");
+        lab.setAttribute("fill", t >= (tMin + tMax) / 2 ? "var(--temp)" : "var(--hum)");
+        lab.textContent = `${t.toFixed(1)}° · ${Math.round(cm)}`;
+        sectionSvgEl.appendChild(lab);
+      }
+
+      const nameLab = document.createElementNS(NS, "text");
+      nameLab.setAttribute("x", String(x + w / 2));
+      nameLab.setAttribute("y", String(H - 14));
+      nameLab.setAttribute("class", "section-room-label");
+      nameLab.textContent = room.label || room.id;
+      sectionSvgEl.appendChild(nameLab);
+
+      if (i < sectionRooms.length - 1) {
+        const nextId = sectionRooms[i + 1].id;
+        const link = edgeOpeningBetween(edges, room.id, nextId);
+        const doorX = x + w + gap / 2;
+        const door = document.createElementNS(NS, "line");
+        door.setAttribute("x1", String(doorX));
+        door.setAttribute("x2", String(doorX));
+        door.setAttribute("y1", String(padT + plotH * 0.18));
+        door.setAttribute("y2", String(padT + plotH * 0.82));
+        door.setAttribute(
+          "class",
+          `section-door ${link.opening || "unknown"}`
+        );
+        const dTitle = document.createElementNS(NS, "title");
+        dTitle.textContent =
+          `${room.id} ↔ ${nextId}: ${link.kind} ${link.opening}` +
+          (link.source ? ` (${link.source})` : "");
+        door.appendChild(dTitle);
+        sectionSvgEl.appendChild(door);
+        doorBits.push(
+          `${(byId[room.id] && byId[room.id].label) || room.id}↔${
+            (byId[nextId] && byId[nextId].label) || nextId
+          }: ${link.opening}`
+        );
+        x += w + gap;
+      } else {
+        x += w;
+      }
+    }
+
+    if (sectionMetaEl) {
+      sectionMetaEl.textContent =
+        `Ceiling ${ceilingCm} cm · ${path
+          .map((id) => (byId[id] && byId[id].label) || id)
+          .join(" → ")}` +
+        (doorBits.length ? ` · doors ${doorBits.join(", ")}` : "") +
+        ` · scale ${tMin.toFixed(1)}–${tMax.toFixed(1)} °C`;
+    }
+  }
+
   function renderNetwork(data) {
     if (!networkSvgEl) return;
     const NS = "http://www.w3.org/2000/svg";
     networkSvgEl.replaceChildren();
+    renderOpenRoomSection(data);
     if (!data || !data.enabled) {
+      if (networkTempScaleEl) networkTempScaleEl.hidden = true;
       if (networkMetaEl) {
         networkMetaEl.textContent =
-          "Apartment network disabled — enable [apartment] in config.toml.";
+          "Apartment map disabled — enable [apartment] in config.toml.";
       }
       if (networkStatusEl) networkStatusEl.textContent = "Disabled";
       return;
@@ -3363,6 +3991,7 @@
     const rooms = data.rooms || [];
     const edges = data.edges || [];
     if (!rooms.length) {
+      if (networkTempScaleEl) networkTempScaleEl.hidden = true;
       if (networkMetaEl) networkMetaEl.textContent = "No apartment rooms in config.";
       if (networkStatusEl) networkStatusEl.textContent = "Empty";
       return;
@@ -3371,11 +4000,15 @@
     const { pos } = networkLayout(rooms, edges);
     const W = NETWORK_VB_W;
     const H = NETWORK_VB_H;
+    // Leave room for node radii (~44) + labels so top/bottom façade nodes are not clipped.
+    const pad = 78;
+    const usable = Math.min(W - 2 * pad, H - 2 * pad);
     const cx = W / 2;
     const cy = H / 2;
-    const scale = Math.min(W, H) * 0.38;
+    const scale = usable * 0.42;
     const toXY = (p) => ({ x: cx + p.x * scale, y: cy + p.y * scale });
 
+    centerNetworkPan();
     applyNetworkViewBox();
 
     const defs = document.createElementNS(NS, "defs");
@@ -3400,6 +4033,21 @@
       defs.appendChild(marker);
     }
     networkSvgEl.appendChild(defs);
+
+    const { tMin, tMax } = networkTempScale(rooms);
+    const ceilingCm = Math.max(
+      50,
+      Math.round(Number(data.ceiling_m || 2.5) * 100)
+    );
+    if (networkTempScaleEl) {
+      networkTempScaleEl.hidden = false;
+      if (networkTempScaleLoEl) {
+        networkTempScaleLoEl.textContent = `${tMin.toFixed(1)}°`;
+      }
+      if (networkTempScaleHiEl) {
+        networkTempScaleHiEl.textContent = `${tMax.toFixed(1)}°`;
+      }
+    }
 
     const gEdges = document.createElementNS(NS, "g");
     gEdges.setAttribute("class", "network-edges");
@@ -3489,15 +4137,50 @@
       else openDoors += 1;
     }
 
+    const hottestIds = networkHottestRoomIds(rooms);
+    const hvac = data.hvac || null;
+    const hvacRoomId =
+      hvac && hvac.active && hvac.room ? String(hvac.room).toLowerCase() : "";
+    const hvacClimate = (hvac && hvac.climate) || null;
+    const hvacSetpoint =
+      hvacClimate && hvacClimate.target_temp_c != null
+        ? Number(hvacClimate.target_temp_c)
+        : null;
+    const hvacAcWatts =
+      hvac && hvac.ac_watts != null ? Number(hvac.ac_watts) : null;
+
+    // Group rooms that share the same exterior orientation (e.g. living+kitchen → SW).
+    const facadeGroups = new Map();
     for (const room of rooms) {
       const p = pos[room.id];
       if (!p) continue;
-      const xy = toXY(p);
-      roomXY[room.id] = xy;
-      const exteriors = room.exterior || [];
-      if (exteriors.length) {
-        const exy = toXY(networkExteriorOffset(room, p));
+      const key = networkFacadeKey(room);
+      if (!key) continue;
+      if (!facadeGroups.has(key)) {
+        facadeGroups.set(key, { key, orients: key.split("+"), rooms: [] });
+      }
+      facadeGroups.get(key).rooms.push(room);
+    }
+
+    for (const group of facadeGroups.values()) {
+      let sx = 0;
+      let sy = 0;
+      let n = 0;
+      for (const room of group.rooms) {
+        const p = pos[room.id];
+        if (!p) continue;
+        const off = networkExteriorOffset(room, p);
+        sx += off.x;
+        sy += off.y;
+        n += 1;
+      }
+      if (!n) continue;
+      const exy = toXY({ x: sx / n, y: sy / n });
+      group.exy = exy;
+
+      for (const room of group.rooms) {
         extXY[room.id] = exy;
+        const xy = toXY(pos[room.id]);
         const wState = room.window_state;
         if (wState === "open") openWindows += 1;
         const line = document.createElementNS(NS, "line");
@@ -3511,109 +4194,295 @@
         );
         const title = document.createElementNS(NS, "title");
         title.textContent =
-          `${room.label || room.id} → exterior (${(exteriors || []).join(", ").toUpperCase()})` +
+          `${room.label || room.id} → façade ${group.orients.join(", ").toUpperCase()}` +
           (wState ? ` — window ${wState}` : "");
         line.appendChild(title);
         gEdges.appendChild(line);
-
-        const extNode = document.createElementNS(NS, "circle");
-        extNode.setAttribute("cx", String(exy.x));
-        extNode.setAttribute("cy", String(exy.y));
-        extNode.setAttribute("r", "28");
-        extNode.setAttribute("class", "network-node-exterior");
-        const extSensorsAll = (room.sensors || []).filter(
-          (s) => String(s.zone || "").toLowerCase() === "exterior"
-        );
-        const extSensorsHigh = extSensorsAll.filter(
-          (s) => String(s.height || "").toLowerCase() === "high"
-        );
-        const extSensors =
-          extSensorsHigh.length > 0 ? extSensorsHigh : extSensorsAll;
-        const extTitle = document.createElementNS(NS, "title");
-        const facadeLo = room.facade_temp_min;
-        const facadeHi = room.facade_temp_max;
-        const facadeBits = extSensors
-          .map((s) => `${s.name}: ${formatNetworkTemp(s.temperature_c)}`)
-          .join("; ");
-        const names = (room.facade_sensor_names || []).join(", ");
-        extTitle.textContent =
-          `${room.label || room.id} façade ${(exteriors || []).join(", ").toUpperCase()}` +
-          (facadeLo != null && facadeHi != null
-            ? ` · ${Number(facadeLo).toFixed(1)}–${Number(facadeHi).toFixed(1)}°C`
-            : "") +
-          (names ? ` · ${names}` : "") +
-          (facadeBits ? `\n${facadeBits}` : "");
-        extNode.appendChild(extTitle);
-        gNodes.appendChild(extNode);
-        const extLab = document.createElementNS(NS, "text");
-        extLab.setAttribute("x", String(exy.x));
-        extLab.setAttribute("y", String(exy.y - 2));
-        extLab.setAttribute("class", "network-label");
-        extLab.textContent = (exteriors[0] || "out").toUpperCase();
-        gLabels.appendChild(extLab);
-        const extSub = document.createElementNS(NS, "text");
-        extSub.setAttribute("x", String(exy.x));
-        extSub.setAttribute("y", String(exy.y + 13));
-        extSub.setAttribute("class", "network-sublabel");
-        if (facadeLo != null && facadeHi != null) {
-          const lo = Number(facadeLo).toFixed(1);
-          const hi = Number(facadeHi).toFixed(1);
-          extSub.textContent = lo === hi ? `${lo}°C` : `${lo}–${hi}°C`;
-        } else if (room.facade_temp_c != null) {
-          extSub.textContent = formatNetworkTemp(room.facade_temp_c);
-        } else {
-          extSub.textContent = "—";
-        }
-        gLabels.appendChild(extSub);
       }
+
+      const bands = networkFacadeTempBands(group.rooms);
+      const highTxt = formatNetworkTempBand(bands.high);
+      const lowTxt = formatNetworkTempBand(bands.low);
+      const otherTxt = formatNetworkTempBand(bands.other);
+      const roomLabels = group.rooms
+        .map((r) => r.label || r.id)
+        .join(" + ");
+      const facadeNames = [
+        ...new Set(
+          group.rooms.flatMap((r) => r.facade_sensor_names || [])
+        ),
+      ];
+      let facadeLo = null;
+      let facadeHi = null;
+      for (const r of group.rooms) {
+        if (r.facade_temp_min != null) {
+          facadeLo =
+            facadeLo == null
+              ? Number(r.facade_temp_min)
+              : Math.min(facadeLo, Number(r.facade_temp_min));
+        }
+        if (r.facade_temp_max != null) {
+          facadeHi =
+            facadeHi == null
+              ? Number(r.facade_temp_max)
+              : Math.max(facadeHi, Number(r.facade_temp_max));
+        }
+      }
+
+      const facadeSensors = group.rooms.flatMap((r) => r.sensors || []);
+      const contLevels = networkSensorGradientLevels(facadeSensors, ceilingCm, {
+        exterior: true,
+      });
+      const heightStops = networkHeightStops(bands);
+      const hasTemp = !!(
+        contLevels ||
+        heightStops.high != null ||
+        heightStops.mid != null ||
+        heightStops.low != null
+      );
+      const extW = 52;
+      const extH = 80;
+      const gradId = `ext-grad-${group.key.replace(/[^a-z0-9+_-]/gi, "_")}`;
+      const fill = hasTemp
+        ? appendHeightGradient(
+            defs,
+            NS,
+            gradId,
+            contLevels || heightStops,
+            tMin,
+            tMax
+          )
+        : "#354860";
+      const extNode = document.createElementNS(NS, "rect");
+      extNode.setAttribute("x", String(exy.x - extW / 2));
+      extNode.setAttribute("y", String(exy.y - extH / 2));
+      extNode.setAttribute("width", String(extW));
+      extNode.setAttribute("height", String(extH));
+      extNode.setAttribute("rx", "14");
+      extNode.setAttribute("ry", "14");
+      extNode.setAttribute("class", "network-node-exterior");
+      extNode.setAttribute("fill", fill);
+      const extTitle = document.createElementNS(NS, "title");
+      const sensorBits = group.rooms
+        .flatMap((r) => r.sensors || [])
+        .filter((s) => String(s.zone || "").toLowerCase() === "exterior")
+        .map((s) => {
+          const h = String(s.height || "").trim();
+          const cm =
+            s.height_cm != null && Number.isFinite(Number(s.height_cm))
+              ? `${Math.round(Number(s.height_cm))} cm`
+              : "";
+          const hBit = [h, cm].filter(Boolean).join(" · ");
+          return `${s.name}${hBit ? ` [${hBit}]` : ""}: ${formatNetworkTemp(
+            s.temperature_c
+          )}`;
+        })
+        .join("; ");
+      extTitle.textContent =
+        `Façade ${group.orients.join(", ").toUpperCase()} · ${roomLabels}` +
+        (facadeLo != null && facadeHi != null
+          ? ` · ${facadeLo.toFixed(1)}–${facadeHi.toFixed(1)}°C`
+          : "") +
+        (facadeNames.length ? ` · ${facadeNames.join(", ")}` : "") +
+        (highTxt ? `\nHigh: ${highTxt}` : "") +
+        (lowTxt ? `\nLow: ${lowTxt}` : "") +
+        (otherTxt && !highTxt && !lowTxt ? `\n${otherTxt}` : "") +
+        (sensorBits ? `\n${sensorBits}` : "");
+      extNode.appendChild(extTitle);
+      gNodes.appendChild(extNode);
+
+      if (highTxt) {
+        const highLab = document.createElementNS(NS, "text");
+        highLab.setAttribute("x", String(exy.x));
+        highLab.setAttribute("y", String(exy.y - extH / 2 + 16));
+        highLab.setAttribute("class", "network-sublabel network-temp-high");
+        highLab.textContent = highTxt;
+        gLabels.appendChild(highLab);
+      }
+
+      const extLab = document.createElementNS(NS, "text");
+      extLab.setAttribute("x", String(exy.x));
+      extLab.setAttribute("y", String(exy.y + 4));
+      extLab.setAttribute("class", "network-label");
+      extLab.textContent = (group.orients[0] || "out").toUpperCase();
+      gLabels.appendChild(extLab);
+
+      const bottomTxt =
+        lowTxt ||
+        (!highTxt
+          ? otherTxt ||
+            (facadeLo != null && facadeHi != null
+              ? facadeLo === facadeHi
+                ? `${facadeLo.toFixed(1)}°C`
+                : `${facadeLo.toFixed(1)}–${facadeHi.toFixed(1)}°C`
+              : null)
+          : null);
+      if (bottomTxt) {
+        const lowLab = document.createElementNS(NS, "text");
+        lowLab.setAttribute("x", String(exy.x));
+        lowLab.setAttribute("y", String(exy.y + extH / 2 - 10));
+        lowLab.setAttribute("class", "network-sublabel network-temp-low");
+        lowLab.textContent = bottomTxt;
+        gLabels.appendChild(lowLab);
+      }
+    }
+
+    const ROOM_W = 64;
+    const ROOM_H = 100;
+
+    for (const room of rooms) {
+      const p = pos[room.id];
+      if (!p) continue;
+      const xy = toXY(p);
+      roomXY[room.id] = xy;
 
       const hasOpen =
         room.window_state === "open" ||
         (room.contacts || []).some((c) => String(c.state || "").toLowerCase() === "open");
-      const node = document.createElementNS(NS, "circle");
-      node.setAttribute("cx", String(xy.x));
-      node.setAttribute("cy", String(xy.y));
-      node.setAttribute("r", "44");
+      const isHottest = hottestIds.has(room.id);
+      const hasAc = hvacRoomId && room.id === hvacRoomId;
+      const bands = networkInteriorTempBands(room);
+      const contLevels = networkSensorGradientLevels(
+        room.sensors || [],
+        ceilingCm,
+        { exterior: false }
+      );
+      const heightStops = networkHeightStops(bands);
+      const hasTemp = !!(
+        contLevels ||
+        heightStops.high != null ||
+        heightStops.mid != null ||
+        heightStops.low != null
+      );
+      const gradId = `room-grad-${String(room.id).replace(/[^a-z0-9_-]/gi, "_")}`;
+      const fill = hasTemp
+        ? appendHeightGradient(
+            defs,
+            NS,
+            gradId,
+            contLevels || heightStops,
+            tMin,
+            tMax
+          )
+        : roomColor(room.id, 0) + "44";
+      const node = document.createElementNS(NS, "rect");
+      node.setAttribute("x", String(xy.x - ROOM_W / 2));
+      node.setAttribute("y", String(xy.y - ROOM_H / 2));
+      node.setAttribute("width", String(ROOM_W));
+      node.setAttribute("height", String(ROOM_H));
+      node.setAttribute("rx", "16");
+      node.setAttribute("ry", "16");
       node.setAttribute(
         "class",
-        `network-node-room${hasOpen ? " has-open" : ""}`
+        `network-node-room${hasOpen ? " has-open" : ""}${
+          isHottest ? " is-hottest" : ""
+        }${hasAc ? " has-ac" : ""}`
       );
-      node.setAttribute("fill", roomColor(room.id, 0) + "33");
+      node.setAttribute("fill", fill);
+      if (isHottest) {
+        node.setAttribute("stroke", "#c45c4a");
+      } else if (hasAc) {
+        node.setAttribute("stroke", "#2b7bbf");
+      }
+      const highTxt = formatNetworkTempBand(bands.high);
+      const lowTxt = formatNetworkTempBand(bands.low);
+      const otherTxt = formatNetworkTempBand(
+        [...(bands.mid || []), ...(bands.other || [])]
+      );
       const title = document.createElementNS(NS, "title");
       const sensorBits = (room.sensors || [])
-        .map((s) => `${s.name}: ${formatNetworkTemp(s.temperature_c)}`)
+        .map((s) => {
+          const h = String(s.height || "").trim();
+          const cm =
+            s.height_cm != null && Number.isFinite(Number(s.height_cm))
+              ? `${Math.round(Number(s.height_cm))} cm`
+              : "";
+          const hBit = [h, cm].filter(Boolean).join(" · ");
+          return `${s.name}${hBit ? ` [${hBit}]` : ""}: ${formatNetworkTemp(
+            s.temperature_c
+          )}`;
+        })
         .join("; ");
+      let acTitle = "";
+      if (hasAc) {
+        const setBit =
+          hvacSetpoint != null && Number.isFinite(hvacSetpoint)
+            ? `setpoint ${hvacSetpoint.toFixed(1)}°C`
+            : "setpoint —";
+        const powBit =
+          hvacAcWatts != null && Number.isFinite(hvacAcWatts)
+            ? `≈ ${Math.round(hvacAcWatts)} W`
+            : "power —";
+        const mode = (hvacClimate && (hvacClimate.hvac_mode || hvacClimate.state)) || "";
+        acTitle =
+          `\nAC on` +
+          (mode ? ` (${mode})` : "") +
+          ` · ${setBit} · ${powBit}`;
+      }
       title.textContent =
         `${room.label || room.id}` +
-        (room.temp_min != null && room.temp_max != null
-          ? ` · ${Number(room.temp_min).toFixed(1)}–${Number(room.temp_max).toFixed(1)}°C now`
-          : room.temp_c != null
-            ? ` · ${formatNetworkTemp(room.temp_c)}`
-            : "") +
+        (isHottest ? " · hottest" : "") +
+        acTitle +
+        (highTxt ? `\nHigh: ${highTxt}` : "") +
+        (lowTxt ? `\nLow: ${lowTxt}` : "") +
+        (otherTxt && !highTxt && !lowTxt ? `\n${otherTxt}` : "") +
         (sensorBits ? `\n${sensorBits}` : "");
       node.appendChild(title);
       gNodes.appendChild(node);
 
+      // High sensors → top of band; low sensors → bottom; name in the middle.
+      if (highTxt) {
+        const highLab = document.createElementNS(NS, "text");
+        highLab.setAttribute("x", String(xy.x));
+        highLab.setAttribute("y", String(xy.y - ROOM_H / 2 + 16));
+        highLab.setAttribute(
+          "class",
+          `network-sublabel network-temp-high${isHottest ? " is-hottest" : ""}`
+        );
+        highLab.textContent = highTxt;
+        gLabels.appendChild(highLab);
+      }
+
       const lab = document.createElementNS(NS, "text");
       lab.setAttribute("x", String(xy.x));
-      lab.setAttribute("y", String(xy.y - 4));
-      lab.setAttribute("class", "network-label");
+      lab.setAttribute("y", String(xy.y + 4));
+      lab.setAttribute(
+        "class",
+        `network-label${isHottest ? " is-hottest" : ""}`
+      );
       lab.textContent = room.label || room.id;
       gLabels.appendChild(lab);
 
-      const sub = document.createElementNS(NS, "text");
-      sub.setAttribute("x", String(xy.x));
-      sub.setAttribute("y", String(xy.y + 12));
-      sub.setAttribute("class", "network-sublabel");
-      if (room.temp_min != null && room.temp_max != null) {
-        const lo = Number(room.temp_min).toFixed(1);
-        const hi = Number(room.temp_max).toFixed(1);
-        sub.textContent =
-          lo === hi ? `${lo}°C` : `${lo}–${hi}°C`;
-      } else {
-        sub.textContent = formatNetworkTemp(room.temp_c);
+      const bottomTxt =
+        lowTxt ||
+        (!highTxt ? otherTxt || formatNetworkTemp(room.temp_c) : null);
+      if (bottomTxt) {
+        const lowLab = document.createElementNS(NS, "text");
+        lowLab.setAttribute("x", String(xy.x));
+        lowLab.setAttribute("y", String(xy.y + ROOM_H / 2 - 10));
+        lowLab.setAttribute(
+          "class",
+          `network-sublabel network-temp-low${isHottest ? " is-hottest" : ""}`
+        );
+        lowLab.textContent = bottomTxt;
+        gLabels.appendChild(lowLab);
       }
-      gLabels.appendChild(sub);
+
+      if (hasAc) {
+        const bits = [];
+        if (hvacSetpoint != null && Number.isFinite(hvacSetpoint)) {
+          bits.push(`${hvacSetpoint.toFixed(1)}°`);
+        }
+        if (hvacAcWatts != null && Number.isFinite(hvacAcWatts)) {
+          bits.push(`≈${Math.round(hvacAcWatts)} W`);
+        }
+        const acLab = document.createElementNS(NS, "text");
+        acLab.setAttribute("x", String(xy.x));
+        acLab.setAttribute("y", String(xy.y + ROOM_H / 2 + 14));
+        acLab.setAttribute("class", "network-sublabel network-ac-label");
+        acLab.textContent = bits.length ? `AC ${bits.join(" · ")}` : "AC on";
+        gLabels.appendChild(acLab);
+      }
     }
 
     function resolveFlowPoint(id) {
@@ -3645,7 +4514,7 @@
         const from = resolveFlowPoint(flow.from);
         const to = resolveFlowPoint(flow.to);
         if (!from || !to) continue;
-        const seg = shortenSegment(from, to, 28);
+        const seg = shortenSegment(from, to, 40);
         const line = document.createElementNS(NS, "line");
         line.setAttribute("x1", String(seg.x1));
         line.setAttribute("y1", String(seg.y1));
@@ -3713,6 +4582,20 @@
             ? `, isolated if ≥ ${couple.closed_threshold_c}°C`
             : "")
         : "";
+    let acBit = "";
+    if (hvacRoomId) {
+      const roomLabel =
+        (rooms.find((r) => r.id === hvacRoomId) || {}).label || hvacRoomId;
+      const setBit =
+        hvacSetpoint != null && Number.isFinite(hvacSetpoint)
+          ? `${hvacSetpoint.toFixed(1)}°C`
+          : "—";
+      const powBit =
+        hvacAcWatts != null && Number.isFinite(hvacAcWatts)
+          ? `≈${Math.round(hvacAcWatts)} W`
+          : "—";
+      acBit = ` · AC on in ${roomLabel} · set ${setBit} · ${powBit}`;
+    }
     if (networkMetaEl) {
       networkMetaEl.textContent =
         `${rooms.length} rooms · ${edges.length} links` +
@@ -3720,7 +4603,8 @@
         (coupledLinks ? ` · ${coupledLinks} thermally coupled` : "") +
         (openWindows ? ` · ${openWindows} window(s) open` : "") +
         outBit +
-        coupleBit;
+        coupleBit +
+        acBit;
     }
     if (networkAirflowEl) {
       if (!airflow || !airflow.mode) {
@@ -4974,8 +5858,16 @@
       climate && climate.current_temp_c != null
         ? `${Number(climate.current_temp_c).toFixed(1)} °C`
         : "—";
+    const acWatts =
+      snapshot && snapshot.ac_watts != null
+        ? `≈ ${Math.round(Number(snapshot.ac_watts))} W`
+        : null;
     const watts =
       power && power.watts != null ? `${Math.round(Number(power.watts))} W` : "—";
+    const roomBit =
+      snapshot && snapshot.room
+        ? ` <span class="muted">(${escapeHtml(String(snapshot.room))})</span>`
+        : "";
     const when = climate && climate.ts
       ? new Date(climate.ts * 1000).toLocaleTimeString("en-GB")
       : power && power.ts
@@ -5012,11 +5904,18 @@
     hvacStatusEl.innerHTML = `
       <span><span class="hvac-pill ${active ? "hvac-pill-on" : "hvac-pill-off"}">${
         active ? "AC on" : "AC off"
-      }</span></span>
+      }</span>${roomBit}</span>
       <span>Mode <strong>${escapeHtml(String(mode))}</strong></span>
       <span>Setpoint <strong>${escapeHtml(target)}</strong></span>
       <span>AC temp <strong>${escapeHtml(current)}</strong></span>
-      <span>Power <strong>${escapeHtml(watts)}</strong></span>
+      ${
+        acWatts
+          ? `<span>AC power <strong title="Estimated from whole-home power minus baseline">${escapeHtml(
+              acWatts
+            )}</strong></span>`
+          : ""
+      }
+      <span>Grid <strong>${escapeHtml(watts)}</strong></span>
       ${when ? `<span>Updated ${escapeHtml(when)}</span>` : ""}
       ${energyHtml}
     `;
@@ -5146,17 +6045,34 @@
       const scenarios = proj.window_scenarios || {};
       const closed = scenarios.windows_closed;
       const opened = scenarios.windows_open;
-      if (closed && closed.summary && opened && opened.summary) {
-        const cSrc = closed.source && closed.source !== "default" ? `/${closed.source}` : "";
+      if (projectionScenario === "closed" && closed && closed.summary) {
+        const cSrc =
+          closed.source && closed.source !== "default" ? `/${closed.source}` : "";
+        scenarioTxt =
+          ` · closed${cSrc} ${Number(closed.summary.temp_min).toFixed(1)}–${Number(closed.summary.temp_max).toFixed(1)} °C`;
+      } else if (projectionScenario === "open" && opened && opened.summary) {
         let oSrc = "";
-        if (opened.source === "facade") {
-          oSrc = "/façade";
-        } else if (opened.source && opened.source !== "default") {
-          oSrc = `/${opened.source}`;
-        }
+        if (opened.source === "facade") oSrc = "/façade";
+        else if (opened.source && opened.source !== "default") oSrc = `/${opened.source}`;
+        scenarioTxt =
+          ` · open${oSrc} ${Number(opened.summary.temp_min).toFixed(1)}–${Number(opened.summary.temp_max).toFixed(1)} °C`;
+      } else if (
+        projectionScenario === "both" &&
+        closed &&
+        closed.summary &&
+        opened &&
+        opened.summary
+      ) {
+        const cSrc =
+          closed.source && closed.source !== "default" ? `/${closed.source}` : "";
+        let oSrc = "";
+        if (opened.source === "facade") oSrc = "/façade";
+        else if (opened.source && opened.source !== "default") oSrc = `/${opened.source}`;
         scenarioTxt =
           ` · closed${cSrc} ${Number(closed.summary.temp_min).toFixed(1)}–${Number(closed.summary.temp_max).toFixed(1)} °C` +
           ` · open${oSrc} ${Number(opened.summary.temp_min).toFixed(1)}–${Number(opened.summary.temp_max).toFixed(1)} °C`;
+      } else if (projectionScenario === "auto" && proj.opening_state) {
+        scenarioTxt = ` · opening ${proj.opening_state}`;
       }
       cards.push(`
         <article class="projection-card" style="--device-color:${colorFor(device.address)}">
@@ -5228,31 +6144,117 @@
     return String(v);
   }
 
+  function labeledCategorySelect(device, field, options, label) {
+    const wrap = document.createElement("label");
+    wrap.className = "overview-cat-field";
+    const caption = document.createElement("span");
+    caption.textContent = label;
+    wrap.append(caption, makeCategorySelect(device, field, options));
+    return wrap;
+  }
+
+  function labeledHeightCmInput(device) {
+    const wrap = document.createElement("label");
+    wrap.className = "overview-cat-field overview-cat-field-cm";
+    const caption = document.createElement("span");
+    caption.textContent = "Height cm";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.className = "cat-input cat-input-cm";
+    input.min = "0";
+    input.max = "600";
+    input.step = "1";
+    input.placeholder = "cm";
+    input.title = "Mounting height above floor (cm)";
+    input.dataset.address = device.address;
+    input.dataset.field = "height_cm";
+    if (device.height_cm != null && Number.isFinite(Number(device.height_cm))) {
+      input.value = String(Math.round(Number(device.height_cm)));
+    } else {
+      input.value = "";
+    }
+    input.addEventListener("click", (ev) => ev.stopPropagation());
+    input.addEventListener("mousedown", (ev) => ev.stopPropagation());
+    input.addEventListener("keydown", (ev) => ev.stopPropagation());
+    input.addEventListener("change", async (ev) => {
+      ev.stopPropagation();
+      const raw = String(input.value || "").trim();
+      const value = raw === "" ? null : Number(raw);
+      if (value != null && (!Number.isFinite(value) || value < 0 || value > 600)) {
+        overviewStatus.textContent = "Height cm must be 0–600";
+        input.value =
+          device.height_cm != null && Number.isFinite(Number(device.height_cm))
+            ? String(Math.round(Number(device.height_cm)))
+            : "";
+        return;
+      }
+      input.disabled = true;
+      try {
+        const res = await fetch(
+          `/api/devices/${encodeURIComponent(device.address)}/categories`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ height_cm: value }),
+          }
+        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${res.status}`);
+        }
+        const updated = await res.json();
+        const idx = devices.findIndex((d) => d.address === device.address);
+        if (idx >= 0) {
+          devices[idx] = { ...devices[idx], ...updated };
+        }
+        fillDeviceList();
+        updateOverview();
+        updateCurrent();
+      } catch (err) {
+        console.error(err);
+        input.value =
+          device.height_cm != null && Number.isFinite(Number(device.height_cm))
+            ? String(Math.round(Number(device.height_cm)))
+            : "";
+        overviewStatus.textContent = `Category update failed: ${err.message}`;
+      } finally {
+        input.disabled = false;
+      }
+    });
+    wrap.append(caption, input);
+    return wrap;
+  }
+
   function updateOverview() {
     overviewBody.innerHTML = "";
     updateSortButtons();
     const visible = filteredDevices();
     if (!devices.length) {
       overviewBody.innerHTML =
-        '<tr><td colspan="11" class="overview-empty">No devices detected</td></tr>';
+        '<p class="overview-empty">No devices detected</p>';
       overviewStatus.textContent = "Waiting for BLE devices…";
       return;
     }
     if (!visible.length) {
       overviewBody.innerHTML =
-        '<tr><td colspan="11" class="overview-empty">No sensors for these filters</td></tr>';
+        '<p class="overview-empty">No sensors for these filters</p>';
       overviewStatus.textContent = `0 / ${devices.length} sensor(s) · filters active`;
       return;
     }
 
     const ranked = sortedDevices(visible);
     for (const device of ranked) {
-      const tr = document.createElement("tr");
-      tr.style.setProperty("--device-color", colorFor(device.address));
+      const card = document.createElement("article");
+      card.className = "overview-card";
+      card.style.setProperty("--device-color", colorFor(device.address));
       const source = device.last_source || "—";
 
-      const nameTd = document.createElement("td");
-      nameTd.innerHTML = `
+      const top = document.createElement("div");
+      top.className = "overview-card-top";
+
+      const identity = document.createElement("div");
+      identity.className = "overview-card-identity";
+      identity.innerHTML = `
         <span class="overview-name">
           <span class="device-swatch" aria-hidden="true"></span>
           ${escapeHtml(deviceLabel(device))}
@@ -5260,72 +6262,47 @@
         <span class="overview-meta">${escapeHtml(device.model)} · ${escapeHtml(device.address)}</span>
       `;
 
-      const zoneTd = document.createElement("td");
-      zoneTd.className = "cat-cell";
-      zoneTd.appendChild(makeCategorySelect(device, "zone", taxonomyData.zones));
+      const readings = document.createElement("div");
+      readings.className = "overview-card-readings";
+      readings.innerHTML =
+        `<span class="overview-card-temp temp">${escapeHtml(
+          fmtNum(device.temperature_c, 1, " °C")
+        )}</span>` +
+        `<span class="overview-card-hum">${escapeHtml(
+          fmtNum(device.humidity, 1, " %")
+        )}</span>`;
 
-      const heightTd = document.createElement("td");
-      heightTd.className = "cat-cell";
-      heightTd.appendChild(makeCategorySelect(device, "height", taxonomyData.heights));
+      top.append(identity, readings);
 
-      const roomTd = document.createElement("td");
-      roomTd.className = "cat-cell";
-      roomTd.appendChild(makeCategorySelect(device, "room", taxonomyData.rooms));
-
-      const tempTd = document.createElement("td");
-      tempTd.className = "num temp";
-      tempTd.textContent = fmtNum(device.temperature_c, 1, " °C");
-
-      const humTd = document.createElement("td");
-      humTd.className = "num";
-      humTd.textContent = fmtNum(device.humidity, 1, " %");
-
-      const battTd = document.createElement("td");
-      battTd.className = "num";
-      battTd.textContent = device.battery != null ? `${device.battery} %` : "—";
-
-      const rssiTd = document.createElement("td");
-      rssiTd.className = "num rssi-cell";
-      rssiTd.innerHTML = rssiHtml(device.rssi);
-
-      const sourceTd = document.createElement("td");
-      sourceTd.className = "overview-source";
-      sourceTd.innerHTML = sourceHtml(source);
-
-      const storeTd = document.createElement("td");
-      storeTd.className = "num";
-      const samples = Number(device.sample_count) || 0;
-      const bytes =
-        device.storage_bytes_est != null
-          ? Number(device.storage_bytes_est)
-          : samples * 120;
-      storeTd.title = `${samples.toLocaleString("en-GB")} samples · ~${formatBytes(
-        bytes
-      )} (est.)`;
-      storeTd.innerHTML =
-        samples > 0
-          ? `<span>${escapeHtml(formatSampleCount(samples))}</span>` +
-            `<span class="overview-meta"> · ${escapeHtml(formatBytes(bytes))}</span>`
-          : "—";
-
-      const timeTd = document.createElement("td");
-      timeTd.textContent = fmtTime(device.last_reading_ts || device.last_seen);
-
-      tr.append(
-        nameTd,
-        zoneTd,
-        heightTd,
-        roomTd,
-        tempTd,
-        humTd,
-        battTd,
-        rssiTd,
-        sourceTd,
-        storeTd,
-        timeTd
+      const place = document.createElement("div");
+      place.className = "overview-card-place";
+      place.append(
+        labeledCategorySelect(device, "zone", taxonomyData.zones, "Zone"),
+        labeledCategorySelect(device, "height", taxonomyData.heights, "Height"),
+        labeledHeightCmInput(device),
+        labeledCategorySelect(device, "room", taxonomyData.rooms, "Room")
       );
-      tr.addEventListener("click", (ev) => {
-        if (ev.target.closest("select, a, button")) return;
+
+      const foot = document.createElement("div");
+      foot.className = "overview-card-foot";
+      const footLeft = document.createElement("div");
+      footLeft.className = "overview-card-foot-left rssi-cell";
+      footLeft.innerHTML =
+        `<span>Battery ${
+          device.battery != null ? `${Number(device.battery)} %` : "—"
+        }</span>` + `<span>${rssiHtml(device.rssi)}</span>`;
+      const footRight = document.createElement("div");
+      footRight.className = "overview-card-foot-right";
+      footRight.innerHTML =
+        `<span class="overview-source">${sourceHtml(source)}</span>` +
+        `<span class="overview-meta">${escapeHtml(
+          fmtTime(device.last_reading_ts || device.last_seen)
+        )}</span>`;
+      foot.append(footLeft, footRight);
+
+      card.append(top, place, foot);
+      card.addEventListener("click", (ev) => {
+        if (ev.target.closest("select, a, button, label")) return;
         selected = new Set([device.address]);
         persistSelection();
         fillDeviceList();
@@ -5335,7 +6312,7 @@
           statusEl.textContent = `Error: ${err.message}`;
         });
       });
-      overviewBody.appendChild(tr);
+      overviewBody.appendChild(card);
     }
 
     const temps = ranked
@@ -5344,22 +6321,6 @@
     const span =
       temps.length >= 2
         ? ` · Δ ${(Math.max(...temps) - Math.min(...temps)).toFixed(1)} °C`
-        : "";
-    const totalSamples = ranked.reduce(
-      (acc, d) => acc + (Number(d.sample_count) || 0),
-      0
-    );
-    const totalBytes = ranked.reduce(
-      (acc, d) =>
-        acc +
-        (d.storage_bytes_est != null
-          ? Number(d.storage_bytes_est)
-          : (Number(d.sample_count) || 0) * 120),
-      0
-    );
-    const storeNote =
-      totalSamples > 0
-        ? ` · ~${formatSampleCount(totalSamples)} samples / ${formatBytes(totalBytes)}`
         : "";
     const activeCats = ["zone", "height", "room"].flatMap((k) => catFilters[k]);
     const filterNote = [
@@ -5370,7 +6331,7 @@
       .join(" · ");
     overviewStatus.textContent =
       `${ranked.length}${ranked.length === devices.length ? "" : ` / ${devices.length}`} sensor(s)` +
-      `${filterNote ? ` · ${filterNote}` : ""}${span}${storeNote} · updated ${new Date().toLocaleTimeString("en-GB")}`;
+      `${filterNote ? ` · ${filterNote}` : ""}${span} · updated ${new Date().toLocaleTimeString("en-GB")}`;
   }
 
   function updateCurrent() {
@@ -5668,47 +6629,57 @@
 
       if (showForecast) {
         const projections = forecast.projections || {};
+        const showAuto = projectionScenario === "auto";
+        const showClosed =
+          projectionScenario === "closed" || projectionScenario === "both";
+        const showOpen =
+          projectionScenario === "open" || projectionScenario === "both";
         for (const { device } of results) {
           const proj = projections[device.address];
-          if (!proj || !(proj.points || []).length) continue;
+          if (!proj) continue;
           const color = colorFor(device.address);
-          tempDatasets.push(
-            makeDataset(
-              `${deviceLabel(device)} (proj.)`,
-              color,
-              proj.points.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
-              false,
-              { borderDash: [2, 4], borderWidth: 1.5 }
-            )
-          );
-          humDatasets.push(
-            makeDataset(
-              `${deviceLabel(device)} (proj.)`,
-              color,
-              proj.points.map((p) => ({ x: p.ts * 1000, y: p.humidity })),
-              false,
-              { borderDash: [2, 4], borderWidth: 1.5 }
-            )
-          );
-          dewDatasets.push(
-            makeDataset(
-              `${deviceLabel(device)} (proj.)`,
-              color,
-              proj.points
-                .filter((p) => p.humidity > 0)
-                .map((p) => ({
-                  x: p.ts * 1000,
-                  y: dewPoint(p.temperature_c, p.humidity),
-                })),
-              false,
-              { borderDash: [2, 4], borderWidth: 1.5 }
-            )
-          );
-
           const scenarios = proj.window_scenarios || {};
-          const closedPts = (scenarios.windows_closed && scenarios.windows_closed.points) || [];
-          const openPts = (scenarios.windows_open && scenarios.windows_open.points) || [];
-          if (closedPts.length) {
+          const closedPts =
+            (scenarios.windows_closed && scenarios.windows_closed.points) || [];
+          const openPts =
+            (scenarios.windows_open && scenarios.windows_open.points) || [];
+
+          if (showAuto && (proj.points || []).length) {
+            tempDatasets.push(
+              makeDataset(
+                `${deviceLabel(device)} (proj.)`,
+                color,
+                proj.points.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [2, 4], borderWidth: 1.5 }
+              )
+            );
+            humDatasets.push(
+              makeDataset(
+                `${deviceLabel(device)} (proj.)`,
+                color,
+                proj.points.map((p) => ({ x: p.ts * 1000, y: p.humidity })),
+                false,
+                { borderDash: [2, 4], borderWidth: 1.5 }
+              )
+            );
+            dewDatasets.push(
+              makeDataset(
+                `${deviceLabel(device)} (proj.)`,
+                color,
+                proj.points
+                  .filter((p) => p.humidity > 0)
+                  .map((p) => ({
+                    x: p.ts * 1000,
+                    y: dewPoint(p.temperature_c, p.humidity),
+                  })),
+                false,
+                { borderDash: [2, 4], borderWidth: 1.5 }
+              )
+            );
+          }
+
+          if (showClosed && closedPts.length) {
             tempDatasets.push(
               makeDataset(
                 `${deviceLabel(device)} (windows closed)`,
@@ -5719,7 +6690,7 @@
               )
             );
           }
-          if (openPts.length) {
+          if (showOpen && openPts.length) {
             const openSrc =
               scenarios.windows_open && scenarios.windows_open.source === "facade"
                 ? "windows open · façade"
@@ -5963,7 +6934,7 @@
   if (networkZoomResetBtn) {
     networkZoomResetBtn.addEventListener("click", () => {
       networkZoom = 1;
-      networkPan = { x: 0, y: 0 };
+      centerNetworkPan();
       applyNetworkViewBox();
     });
   }
@@ -6121,8 +7092,25 @@
       showForecast = showForecastEl.checked;
       localStorage.setItem(FORECAST_KEY, showForecast ? "1" : "0");
       if (!showForecast) clearProjections();
+      syncProjectionScenarioControl();
       updateGeoStatus();
       if (currentView === "compare") {
+        loadHistory().catch((err) => {
+          statusEl.textContent = `Error: ${err.message}`;
+        });
+      }
+    });
+  }
+
+  if (projectionScenarioEl) {
+    syncProjectionScenarioControl();
+    projectionScenarioEl.addEventListener("change", () => {
+      const next = projectionScenarioEl.value;
+      projectionScenario = ["auto", "closed", "open", "both"].includes(next)
+        ? next
+        : "closed";
+      localStorage.setItem(PROJECTION_SCENARIO_KEY, projectionScenario);
+      if (currentView === "compare" && showForecast) {
         loadHistory().catch((err) => {
           statusEl.textContent = `Error: ${err.message}`;
         });

@@ -6,7 +6,7 @@ import re
 
 # Govee local names embed the last two MAC octets as hex (e.g. GVH5075_1270 → …:12:70).
 GOVEE_NAME_SUFFIX_RE = re.compile(
-    r"^(?:GVH5075|Govee_H5179|GVH5177)_([0-9A-Fa-f]{4})$"
+    r"^(?:GVH5075|Govee_H5179|GVH5177|GV5179)_([0-9A-Fa-f]{4})$"
 )
 BLE_MAC_RE = re.compile(r"^([0-9A-F]{2}:){5}[0-9A-F]{2}$", re.IGNORECASE)
 

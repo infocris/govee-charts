@@ -29,7 +29,7 @@
       <button type="button" role="tab" data-view="overview" class="active" aria-selected="true">Overview</button>
       <button type="button" role="tab" data-view="compare" aria-selected="false">Compare</button>
       <button type="button" role="tab" data-view="facades" aria-selected="false">Facades</button>
-      <button type="button" role="tab" data-view="network" aria-selected="false">Network</button>
+      <button type="button" role="tab" data-view="network" aria-selected="false">Map</button>
       <button type="button" role="tab" data-view="coverage" aria-selected="false">Coverage</button>
       <button type="button" role="tab" data-view="backfill" aria-selected="false">Backfill</button>
       <button type="button" id="restart-btn" class="restart-btn" title="Restart service">Restart</button>
@@ -41,7 +41,7 @@
     <section id="view-overview" class="view" role="tabpanel" aria-label="Overview">
       <div class="overview-head">
         <h2>All sensors</h2>
-        <p class="overview-hint">Edit zone / height / room inline — click a row to compare charts</p>
+        <p class="overview-hint">Edit zone / height / height cm / room inline — click a card to compare charts</p>
       </div>
 
       <div class="model-filters" id="model-filters" role="group" aria-label="Filter by model"></div>
@@ -50,49 +50,19 @@
         <div class="filter-row" id="height-filters" role="group" aria-label="Height"></div>
         <div class="filter-row" id="room-filters" role="group" aria-label="Room"></div>
       </div>
-      <div class="overview-table-wrap">
-        <table class="overview-table" id="overview-table">
-          <thead>
-            <tr>
-              <th scope="col">
-                <button type="button" class="sort-btn" data-sort="name">Sensor</button>
-              </th>
-              <th scope="col">
-                <button type="button" class="sort-btn" data-sort="zone">Zone</button>
-              </th>
-              <th scope="col">
-                <button type="button" class="sort-btn" data-sort="height">Height</button>
-              </th>
-              <th scope="col">
-                <button type="button" class="sort-btn" data-sort="room">Room</button>
-              </th>
-              <th scope="col" class="num">
-                <button type="button" class="sort-btn" data-sort="temperature_c">Temperature</button>
-              </th>
-              <th scope="col" class="num">
-                <button type="button" class="sort-btn" data-sort="humidity">Humidity</button>
-              </th>
-              <th scope="col" class="num">
-                <button type="button" class="sort-btn" data-sort="battery">Battery</button>
-              </th>
-              <th scope="col" class="num">
-                <button type="button" class="sort-btn" data-sort="rssi">Signal</button>
-              </th>
-              <th scope="col">
-                <button type="button" class="sort-btn" data-sort="last_source">Source</button>
-              </th>
-              <th scope="col" class="num">
-                <button type="button" class="sort-btn" data-sort="sample_count" title="Approximate SQLite footprint (~120 B per sample)">Stored</button>
-              </th>
-              <th scope="col">
-                <button type="button" class="sort-btn" data-sort="last_reading_ts">Last reading</button>
-              </th>
-            </tr>
-          </thead>
-          <tbody id="overview-body">
-            <tr><td colspan="11" class="overview-empty">Loading…</td></tr>
-          </tbody>
-        </table>
+      <div class="overview-sort" role="group" aria-label="Sort sensors">
+        <span class="overview-sort-label">Sort</span>
+        <button type="button" class="sort-btn" data-sort="name">Name</button>
+        <button type="button" class="sort-btn" data-sort="temperature_c">Temp</button>
+        <button type="button" class="sort-btn" data-sort="humidity">Humidity</button>
+        <button type="button" class="sort-btn" data-sort="battery">Battery</button>
+        <button type="button" class="sort-btn" data-sort="rssi">Signal</button>
+        <button type="button" class="sort-btn" data-sort="zone">Zone</button>
+        <button type="button" class="sort-btn" data-sort="room">Room</button>
+        <button type="button" class="sort-btn" data-sort="last_reading_ts">Updated</button>
+      </div>
+      <div class="overview-sensor-list" id="overview-body" aria-live="polite">
+        <p class="overview-empty">Loading…</p>
       </div>
       <p class="status" id="overview-status">Loading…</p>
 
@@ -199,6 +169,15 @@
           <input type="checkbox" id="show-forecast" checked>
           <span>Forecast &amp; projections</span>
         </label>
+        <label class="forecast-toggle projection-scenario-toggle" for="projection-scenario">
+          <span>Scenario</span>
+          <select id="projection-scenario" title="Which window scenario to plot">
+            <option value="auto">Current opening</option>
+            <option value="closed" selected>Windows closed</option>
+            <option value="open">Windows open</option>
+            <option value="both">Closed + open</option>
+          </select>
+        </label>
         <label class="forecast-toggle">
           <input type="checkbox" id="show-window-bands" checked>
           <span>Window open / close</span>
@@ -304,16 +283,31 @@
       <p class="status" id="facade-status">Loading…</p>
     </section>
 
-    <section id="view-network" class="view" role="tabpanel" aria-label="Network" hidden>
+    <section id="view-network" class="view" role="tabpanel" aria-label="Map" hidden>
       <div class="overview-head">
-        <h2>Apartment network</h2>
+        <h2>Apartment map</h2>
         <p class="overview-hint">
-          Rooms as nodes, walls and doors as edges. Node temps are live min–max across
-          interior sensors. Door state uses contacts when available; otherwise close
-          24h maxima (ΔTmax) imply air coupling between rooms.
+          Cross-section of open rooms side by side (kitchen → corridor → bedroom),
+          colored by temperature at each sensor height. Topology graph below.
         </p>
       </div>
       <p class="network-meta" id="network-meta" aria-live="polite">Loading…</p>
+
+      <div class="section-panel">
+        <div class="section-head">
+          <h3>Open-room cross-section</h3>
+          <span class="net-temp-scale" id="section-temp-scale" hidden>
+            <span class="net-temp-scale-lo" id="section-temp-scale-lo">—</span>
+            <span class="net-temp-scale-bar" aria-hidden="true"></span>
+            <span class="net-temp-scale-hi" id="section-temp-scale-hi">—</span>
+          </span>
+        </div>
+        <p class="section-meta" id="section-meta" aria-live="polite"></p>
+        <div class="section-canvas-wrap" id="section-canvas-wrap">
+          <svg id="section-svg" class="section-svg" role="img" aria-label="Kitchen corridor bedroom temperature cross-section"></svg>
+        </div>
+      </div>
+
       <div class="network-toolbar">
         <div class="network-legend" aria-hidden="true">
           <span class="net-leg net-leg-open">Open / coupled</span>
@@ -323,6 +317,12 @@
           <span class="net-leg net-leg-partial">Partial wall</span>
           <span class="net-leg net-leg-exterior">Exterior</span>
           <span class="net-leg net-leg-flow">Cooling draft</span>
+          <span class="net-leg net-leg-ac">AC running</span>
+          <span class="net-temp-scale" id="network-temp-scale" hidden>
+            <span class="net-temp-scale-lo" id="network-temp-scale-lo">—</span>
+            <span class="net-temp-scale-bar" aria-hidden="true"></span>
+            <span class="net-temp-scale-hi" id="network-temp-scale-hi">—</span>
+          </span>
         </div>
         <div class="ranges network-zoom" role="group" aria-label="Zoom">
           <button type="button" id="network-zoom-out" title="Zoom out">−</button>
@@ -332,7 +332,7 @@
       </div>
       <p class="network-airflow" id="network-airflow" aria-live="polite"></p>
       <div class="network-canvas-wrap" id="network-canvas-wrap">
-        <svg id="network-svg" class="network-svg" role="img" aria-label="Apartment room network"></svg>
+        <svg id="network-svg" class="network-svg" role="img" aria-label="Apartment temperature map"></svg>
       </div>
       <p class="status" id="network-status">Loading…</p>
     </section>
@@ -622,7 +622,7 @@
 
       <div class="overview-head overview-head-secondary">
         <h2>Recent jobs</h2>
-        <p class="overview-hint">Last non-pending updates (running, done, deferred, failed, …)</p>
+        <p class="overview-hint">Last 10 non-pending updates (running, done, deferred, failed, …)</p>
       </div>
       <div class="overview-table-wrap">
         <table class="overview-table backfill-log-table" id="backfill-jobs-table">
@@ -644,7 +644,7 @@
 
       <div class="overview-head overview-head-secondary">
         <h2>Recovered readings</h2>
-        <p class="overview-hint">Last 100 GATT samples stored (newest insert first)</p>
+        <p class="overview-hint">Last 10 GATT samples stored (newest insert first)</p>
       </div>
       <div class="overview-table-wrap">
         <table class="overview-table backfill-log-table" id="backfill-recent-table">

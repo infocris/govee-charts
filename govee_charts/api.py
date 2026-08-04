@@ -35,7 +35,7 @@ from govee_charts.csv_import import MAX_UPLOAD_BYTES, parse_upload, summarize_sa
 from govee_charts.db import Database, coverage_from_minute_set
 from govee_charts.decode import Reading
 from govee_charts.federation import csv_source
-from govee_charts.energy import build_energy_summary
+from govee_charts.energy import build_energy_summary, estimate_live_ac_watts
 from govee_charts.hvac import HvacConfig, hvac_active_bands, is_hvac_active
 from govee_charts.weather import WeatherService
 
@@ -114,6 +114,7 @@ class IngestPayload(BaseModel):
 class CategoryPatch(BaseModel):
     zone: str | None = None
     height: str | None = None
+    height_cm: float | None = None
     room: str | None = None
 
     model_config = {"extra": "forbid"}
@@ -201,6 +202,62 @@ def _backfill_disabled_snapshot(
     }
 
 
+async def _hvac_live_snapshot(
+    db: Database,
+    hvac_cfg: HvacConfig,
+    *,
+    include_energy: bool = True,
+) -> dict[str, Any]:
+    """Latest climate + power + estimated AC watts for UI overlays."""
+    climate = await db.latest_hvac(
+        entity_id=hvac_cfg.climate_entity or None
+    )
+    power = await db.latest_power(entity_id=hvac_cfg.power_entity or None)
+    active = is_hvac_active(str((climate or {}).get("state") or ""))
+    home_watts = None
+    if power and power.get("watts") is not None:
+        try:
+            home_watts = float(power["watts"])
+        except (TypeError, ValueError):
+            home_watts = None
+    ac_watts = await estimate_live_ac_watts(
+        db,
+        home_watts=home_watts,
+        active=active,
+        power_entity=hvac_cfg.power_entity,
+        climate_entity=hvac_cfg.climate_entity,
+        idle_floor_w=hvac_cfg.ac_idle_floor_w,
+    )
+    energy = None
+    if include_energy:
+        try:
+            energy = await build_energy_summary(
+                db,
+                energy_entity=hvac_cfg.energy_entity,
+                water_heater_entity=hvac_cfg.water_heater_energy_entity,
+                power_entity=hvac_cfg.power_entity,
+                climate_entity=hvac_cfg.climate_entity,
+                water_heater_indoor_fraction=hvac_cfg.water_heater_indoor_fraction,
+                other_loads_indoor_fraction=hvac_cfg.other_loads_indoor_fraction,
+                ac_cop=hvac_cfg.ac_cop,
+                ac_idle_floor_w=hvac_cfg.ac_idle_floor_w,
+                timezone=hvac_cfg.timezone,
+                include_heat_gain=False,
+            )
+        except Exception as exc:
+            logger.warning("Energy summary failed: %s", exc)
+            energy = {"error": str(exc)}
+    return {
+        "enabled": True,
+        "room": hvac_cfg.room,
+        "climate": climate,
+        "power": power,
+        "active": active,
+        "ac_watts": ac_watts,
+        "energy": energy,
+    }
+
+
 def create_app(
     db: Database,
     *,
@@ -243,8 +300,8 @@ def create_app(
 
     @app.get("/api/backfill")
     async def api_backfill(
-        recent_limit: int = Query(100, ge=1, le=500),
-        job_limit: int = Query(50, ge=1, le=200),
+        recent_limit: int = Query(10, ge=1, le=500),
+        job_limit: int = Query(10, ge=1, le=200),
     ) -> dict[str, Any]:
         """Live history backfill queue snapshot + recent recovered readings."""
         recent = await db.recent_gatt_readings(limit=recent_limit)
@@ -262,8 +319,8 @@ def create_app(
 
     @app.post("/api/backfill/pause")
     async def api_backfill_pause(
-        recent_limit: int = Query(100, ge=1, le=500),
-        job_limit: int = Query(50, ge=1, le=200),
+        recent_limit: int = Query(10, ge=1, le=500),
+        job_limit: int = Query(10, ge=1, le=200),
     ) -> dict[str, Any]:
         service: BackfillService | None = app.state.backfill
         if service is None:
@@ -276,8 +333,8 @@ def create_app(
 
     @app.post("/api/backfill/resume")
     async def api_backfill_resume(
-        recent_limit: int = Query(100, ge=1, le=500),
-        job_limit: int = Query(50, ge=1, le=200),
+        recent_limit: int = Query(10, ge=1, le=500),
+        job_limit: int = Query(10, ge=1, le=200),
     ) -> dict[str, Any]:
         service: BackfillService | None = app.state.backfill
         if service is None:
@@ -290,8 +347,8 @@ def create_app(
 
     @app.post("/api/backfill/refresh")
     async def api_backfill_refresh(
-        recent_limit: int = Query(100, ge=1, le=500),
-        job_limit: int = Query(50, ge=1, le=200),
+        recent_limit: int = Query(10, ge=1, le=500),
+        job_limit: int = Query(10, ge=1, le=200),
     ) -> dict[str, Any]:
         service: BackfillService | None = app.state.backfill
         if service is None:
@@ -306,8 +363,8 @@ def create_app(
     @app.post("/api/backfill/devices")
     async def api_backfill_device(
         payload: BackfillDevicePatch,
-        recent_limit: int = Query(100, ge=1, le=500),
-        job_limit: int = Query(50, ge=1, le=200),
+        recent_limit: int = Query(10, ge=1, le=500),
+        job_limit: int = Query(10, ge=1, le=200),
     ) -> dict[str, Any]:
         """Enable/disable backfill and/or GATT for one sensor (always persisted)."""
         if payload.enabled is None and payload.gatt_enabled is None:
@@ -940,6 +997,7 @@ def create_app(
                     "name": d.get("name") or d.get("address"),
                     "zone": d.get("zone"),
                     "height": d.get("height"),
+                    "height_cm": d.get("height_cm"),
                     "temperature_c": d.get("temperature_c"),
                     "humidity": d.get("humidity"),
                 }
@@ -1456,6 +1514,14 @@ def create_app(
             ),
         )
 
+        hvac_cfg: HvacConfig = app.state.hvac
+        if hvac_cfg.enabled:
+            payload["hvac"] = await _hvac_live_snapshot(
+                db, hvac_cfg, include_energy=False
+            )
+        else:
+            payload["hvac"] = {"enabled": False, "active": False, "room": hvac_cfg.room}
+
         return payload
 
     @app.patch("/api/apartment/rooms/{room_id}")
@@ -1505,6 +1571,7 @@ def create_app(
             patch = normalize_patch(
                 zone=provided["zone"] if "zone" in provided else ...,
                 height=provided["height"] if "height" in provided else ...,
+                height_cm=provided["height_cm"] if "height_cm" in provided else ...,
                 room=provided["room"] if "room" in provided else ...,
             )
         except ValueError as exc:
@@ -1614,35 +1681,18 @@ def create_app(
     @app.get("/api/hvac")
     async def api_hvac() -> dict[str, Any]:
         """Latest climate state + latest power sample + energy/heat summary."""
-        climate = await db.latest_hvac()
-        power = await db.latest_power()
-        active = is_hvac_active(str((climate or {}).get("state") or ""))
         hvac_cfg: HvacConfig = app.state.hvac
-        energy = None
-        if hvac_cfg.enabled:
-            try:
-                energy = await build_energy_summary(
-                    db,
-                    energy_entity=hvac_cfg.energy_entity,
-                    water_heater_entity=hvac_cfg.water_heater_energy_entity,
-                    power_entity=hvac_cfg.power_entity,
-                    climate_entity=hvac_cfg.climate_entity,
-                    water_heater_indoor_fraction=hvac_cfg.water_heater_indoor_fraction,
-                    other_loads_indoor_fraction=hvac_cfg.other_loads_indoor_fraction,
-                    ac_cop=hvac_cfg.ac_cop,
-                    ac_idle_floor_w=hvac_cfg.ac_idle_floor_w,
-                    timezone=hvac_cfg.timezone,
-                    include_heat_gain=False,
-                )
-            except Exception as exc:
-                logger.warning("Energy summary failed: %s", exc)
-                energy = {"error": str(exc)}
-        return {
-            "climate": climate,
-            "power": power,
-            "active": active,
-            "energy": energy,
-        }
+        if not hvac_cfg.enabled:
+            return {
+                "enabled": False,
+                "climate": None,
+                "power": None,
+                "active": False,
+                "ac_watts": None,
+                "energy": None,
+                "room": hvac_cfg.room,
+            }
+        return await _hvac_live_snapshot(db, hvac_cfg)
 
     @app.get("/api/energy/summary")
     async def api_energy_summary(

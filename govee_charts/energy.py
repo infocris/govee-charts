@@ -211,6 +211,56 @@ def _off_period_watts(
     return out
 
 
+async def estimate_live_ac_watts(
+    db: Database,
+    *,
+    home_watts: float | None,
+    active: bool,
+    power_entity: str = "",
+    climate_entity: str = "",
+    idle_floor_w: float = 150.0,
+    lookback_hours: float = 6.0,
+) -> float | None:
+    """
+    Estimate instantaneous AC draw (W) from whole-home power minus baseline.
+
+    When HVAC is off, returns 0. When on, subtracts the baseline just before
+    the current active band (same logic as energy totals).
+    """
+    if home_watts is None:
+        return None
+    if not active:
+        return 0.0
+    now = time.time()
+    power_pts = await db.power_history(
+        hours=lookback_hours, entity_id=power_entity or None
+    )
+    events = await db.hvac_history(
+        hours=lookback_hours, entity_id=climate_entity or None
+    )
+    bands = hvac_active_bands(events, now_ts=now)
+    active_clipped: list[dict[str, float]] = []
+    t_start = now - lookback_hours * 3600.0
+    for b in bands:
+        x1 = max(float(b["x1"]) / 1000.0, t_start)
+        x2 = min(float(b["x2"]) / 1000.0, now)
+        if x2 > x1:
+            active_clipped.append({"x1": x1 * 1000.0, "x2": x2 * 1000.0})
+    off_watts = _off_period_watts(
+        power_pts, active_clipped, start_ts=t_start, end_ts=now
+    )
+    band_start = now
+    if active_clipped:
+        band_start = float(active_clipped[-1]["x1"]) / 1000.0
+    base = _baseline_watts(
+        power_pts,
+        band_start,
+        idle_floor_w=idle_floor_w,
+        off_watts=off_watts,
+    )
+    return round(max(0.0, float(home_watts) - base), 0)
+
+
 def estimate_ac_energy_kwh(
     power_points: list[dict[str, Any]],
     bands: list[dict[str, float]],
