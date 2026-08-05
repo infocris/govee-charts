@@ -38,6 +38,13 @@
   const networkZoomInBtn = document.getElementById("network-zoom-in");
   const networkZoomOutBtn = document.getElementById("network-zoom-out");
   const networkZoomResetBtn = document.getElementById("network-zoom-reset");
+  const networkMetricButtons = [
+    ...document.querySelectorAll(".network-metric-ranges > button[data-map-metric]"),
+  ];
+  const sectionWingButtons = [
+    ...document.querySelectorAll(".section-wing-ranges > button[data-section-wing]"),
+  ];
+  const sectionPathClearBtn = document.getElementById("section-path-clear");
   const NETWORK_VB_W = 920;
   const NETWORK_VB_H = 640;
   const NETWORK_ZOOM_MIN = 0.6;
@@ -48,6 +55,14 @@
   let networkPan = { x: 0, y: 0 };
   /** @type {{x:number,y:number}|null} */
   let networkPanDrag = null;
+  /** @type {"temp"|"humidity"} */
+  let networkMapMetric = "temp";
+  /** @type {"kitchen"|"living"} left wing preset when no custom waypoints */
+  let sectionWing = "kitchen";
+  /** Ordered room ids clicked on the topology graph (section waypoints). */
+  let sectionWaypoints = [];
+  /** @type {any} */
+  let networkLastData = null;
   const selectAllBtn = document.getElementById("select-all");
   const selectNoneBtn = document.getElementById("select-none");
   const rangeButtons = [
@@ -3374,7 +3389,47 @@
     const res = await fetch(`/api/apartment?${params}`);
     if (!res.ok) throw new Error(`apartment HTTP ${res.status}`);
     const data = await res.json();
+    networkLastData = data;
     renderNetwork(data);
+  }
+
+  function networkMetricField() {
+    return networkMapMetric === "humidity" ? "humidity" : "temperature_c";
+  }
+
+  function networkSensorMetric(sensor) {
+    const v = Number(sensor && sensor[networkMetricField()]);
+    return Number.isFinite(v) ? v : NaN;
+  }
+
+  function networkMetricUnit() {
+    return networkMapMetric === "humidity" ? "%" : "°C";
+  }
+
+  function networkMetricUnitShort() {
+    return networkMapMetric === "humidity" ? "%" : "°";
+  }
+
+  function syncNetworkMetricButtons() {
+    networkMetricButtons.forEach((btn) => {
+      btn.classList.toggle(
+        "active",
+        btn.dataset.mapMetric === networkMapMetric
+      );
+    });
+  }
+
+  function setNetworkMapMetric(metric) {
+    const next = metric === "humidity" ? "humidity" : "temp";
+    if (next === networkMapMetric) return;
+    networkMapMetric = next;
+    try {
+      localStorage.setItem("govee-charts.mapMetric", networkMapMetric);
+    } catch (_) {
+      /* ignore */
+    }
+    syncNetworkMetricButtons();
+    if (networkLastData) renderNetwork(networkLastData);
   }
 
   function networkExteriorOffset(room, p) {
@@ -3414,7 +3469,7 @@
     for (const room of groupRooms) {
       for (const s of room.sensors || []) {
         if (String(s.zone || "").toLowerCase() !== "exterior") continue;
-        const t = Number(s.temperature_c);
+        const t = networkSensorMetric(s);
         if (!Number.isFinite(t)) continue;
         const h = String(s.height || "").toLowerCase();
         if (h === "high") high.push(t);
@@ -3488,7 +3543,7 @@
         continue;
       }
       const cm = sensorHeightCm(s, ceil);
-      const t = Number(s.temperature_c);
+      const t = networkSensorMetric(s);
       if (cm == null || !Number.isFinite(t)) continue;
       const key = Math.round(cm);
       if (!byCm.has(key)) byCm.set(key, []);
@@ -3563,8 +3618,8 @@
   }
 
   function formatNetworkTemp(temp) {
-    if (temp == null || Number.isNaN(Number(temp))) return "—";
-    return `${Number(temp).toFixed(1)}°C`;
+    if (temp == null || !Number.isFinite(Number(temp))) return "—";
+    return `${Number(temp).toFixed(1)}${networkMetricUnit()}`;
   }
 
   function formatNetworkTempBand(temps) {
@@ -3574,8 +3629,9 @@
     if (!vals.length) return null;
     const lo = Math.min(...vals);
     const hi = Math.max(...vals);
-    if (Math.abs(hi - lo) < 0.05) return `${lo.toFixed(1)}°C`;
-    return `${lo.toFixed(1)}–${hi.toFixed(1)}°C`;
+    const u = networkMetricUnit();
+    if (Math.abs(hi - lo) < 0.05) return `${lo.toFixed(1)}${u}`;
+    return `${lo.toFixed(1)}–${hi.toFixed(1)}${u}`;
   }
 
   /** Split interior sensors by height for map pill layout. */
@@ -3586,7 +3642,7 @@
     const other = [];
     for (const s of room.sensors || []) {
       if (String(s.zone || "").toLowerCase() === "exterior") continue;
-      const t = Number(s.temperature_c);
+      const t = networkSensorMetric(s);
       if (!Number.isFinite(t)) continue;
       const h = String(s.height || "").toLowerCase();
       if (h === "high") high.push(t);
@@ -3605,34 +3661,28 @@
     return vals.reduce((a, b) => a + b, 0) / vals.length;
   }
 
-  /** Global min/max across interior room sensors for the shared color scale. */
+  /** Global min/max across sensors for the shared color scale. */
   function networkTempScale(rooms) {
     let tMin = Infinity;
     let tMax = -Infinity;
     for (const room of rooms) {
       for (const s of room.sensors || []) {
-        if (String(s.zone || "").toLowerCase() === "exterior") continue;
-        const t = Number(s.temperature_c);
-        if (!Number.isFinite(t)) continue;
-        if (t < tMin) tMin = t;
-        if (t > tMax) tMax = t;
-      }
-      // Also include façade exterior sensors so the scale covers outdoor bands.
-      for (const s of room.sensors || []) {
-        if (String(s.zone || "").toLowerCase() !== "exterior") continue;
-        const t = Number(s.temperature_c);
+        const t = networkSensorMetric(s);
         if (!Number.isFinite(t)) continue;
         if (t < tMin) tMin = t;
         if (t > tMax) tMax = t;
       }
     }
     if (!Number.isFinite(tMin) || !Number.isFinite(tMax)) {
-      return { tMin: 18, tMax: 28 };
+      return networkMapMetric === "humidity"
+        ? { tMin: 30, tMax: 70 }
+        : { tMin: 18, tMax: 28 };
     }
-    if (tMax - tMin < 1.0) {
+    const minSpan = networkMapMetric === "humidity" ? 5.0 : 1.0;
+    if (tMax - tMin < minSpan) {
       const mid = (tMin + tMax) / 2;
-      tMin = mid - 0.5;
-      tMax = mid + 0.5;
+      tMin = mid - minSpan / 2;
+      tMax = mid + minSpan / 2;
     }
     return { tMin, tMax };
   }
@@ -3698,6 +3748,29 @@
   }
 
   function networkHottestRoomIds(rooms) {
+    if (networkMapMetric === "humidity") {
+      let best = -Infinity;
+      /** @type {Map<string, number>} */
+      const avgs = new Map();
+      for (const room of rooms) {
+        const vals = [];
+        for (const s of room.sensors || []) {
+          if (String(s.zone || "").toLowerCase() === "exterior") continue;
+          const v = networkSensorMetric(s);
+          if (Number.isFinite(v)) vals.push(v);
+        }
+        if (!vals.length) continue;
+        const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+        avgs.set(room.id, avg);
+        if (avg > best) best = avg;
+      }
+      if (!Number.isFinite(best)) return new Set();
+      const ids = new Set();
+      for (const [id, avg] of avgs) {
+        if (Math.abs(avg - best) < 0.05) ids.add(id);
+      }
+      return ids;
+    }
     let best = -Infinity;
     for (const room of rooms) {
       const t =
@@ -3789,8 +3862,232 @@
     applyNetworkViewBox();
   }
 
-  /** Default open-plan row through the apartment hub. */
-  const SECTION_PATH = ["kitchen", "corridor", "bedroom"];
+  /** Walkable links for section path finding (doors + partial walls). */
+  function buildNetworkAdj(edges) {
+    /** @type {Map<string, Set<string>>} */
+    const adj = new Map();
+    const link = (a, b) => {
+      if (!a || !b || a === b) return;
+      if (!adj.has(a)) adj.set(a, new Set());
+      if (!adj.has(b)) adj.set(b, new Set());
+      adj.get(a).add(b);
+      adj.get(b).add(a);
+    };
+    for (const e of edges || []) {
+      const kind = String(e.kind || "door");
+      if (kind === "wall") continue;
+      link(String(e.a || ""), String(e.b || ""));
+    }
+    return adj;
+  }
+
+  function bfsRoomPath(adj, start, end) {
+    const s = String(start || "");
+    const t = String(end || "");
+    if (!s || !t) return null;
+    if (s === t) return [s];
+    if (!adj.has(s) || !adj.has(t)) return null;
+    const q = [s];
+    /** @type {Map<string, string|null>} */
+    const prev = new Map([[s, null]]);
+    while (q.length) {
+      const u = q.shift();
+      for (const v of adj.get(u) || []) {
+        if (prev.has(v)) continue;
+        prev.set(v, u);
+        if (v === t) {
+          const path = [v];
+          let cur = u;
+          while (cur != null) {
+            path.push(cur);
+            cur = prev.get(cur);
+          }
+          return path.reverse();
+        }
+        q.push(v);
+      }
+    }
+    return null;
+  }
+
+  function stitchRoomPaths(adj, stops) {
+    const ids = (stops || []).filter(Boolean);
+    if (ids.length < 2) return ids.length ? [ids[0]] : [];
+    const out = [];
+    for (let i = 0; i < ids.length - 1; i += 1) {
+      const seg = bfsRoomPath(adj, ids[i], ids[i + 1]);
+      if (!seg || !seg.length) return null;
+      if (out.length) out.pop();
+      out.push(...seg);
+    }
+    return out;
+  }
+
+  /** Compass score: SW/W/S left (−), NE/E/N right (+). */
+  function facadeSideScore(key) {
+    const k = String(key || "").toLowerCase();
+    let score = 0;
+    for (const o of k.split("+")) {
+      if (o === "sw" || o === "w" || o === "s" || o === "nw") score -= 1;
+      if (o === "ne" || o === "e" || o === "n" || o === "se") score += 1;
+    }
+    return score;
+  }
+
+  function pickFacadeEndpoints(rooms, waypoints, wing) {
+    /** @type {Map<string, any[]>} */
+    const byKey = new Map();
+    for (const room of rooms || []) {
+      const key = networkFacadeKey(room);
+      if (!key) continue;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(room);
+    }
+    const keys = [...byKey.keys()].sort(
+      (a, b) => facadeSideScore(a) - facadeSideScore(b) || a.localeCompare(b)
+    );
+    if (keys.length < 2) return null;
+    const leftKey = keys[0];
+    const rightKey = keys[keys.length - 1];
+    if (leftKey === rightKey) return null;
+
+    const preferLeft = [
+      ...waypoints,
+      wing === "living" ? "living" : "kitchen",
+      "kitchen",
+      "living",
+    ];
+    const preferRight = [...waypoints, "bedroom"];
+
+    const pick = (key, prefers) => {
+      const list = byKey.get(key) || [];
+      for (const id of prefers) {
+        const hit = list.find((r) => r.id === id);
+        if (hit) return String(hit.id);
+      }
+      return list.length ? String(list[0].id) : "";
+    };
+
+    const left = pick(leftKey, preferLeft);
+    const right = pick(rightKey, preferRight);
+    if (!left || !right || left === right) return null;
+    return { left, right, leftKey, rightKey };
+  }
+
+  function orderWaypointsGreedy(adj, start, end, waypoints) {
+    const remaining = new Set(
+      (waypoints || []).filter((id) => id && id !== start && id !== end)
+    );
+    const ordered = [];
+    let cur = start;
+    while (remaining.size) {
+      let best = null;
+      let bestLen = Infinity;
+      for (const id of remaining) {
+        const p = bfsRoomPath(adj, cur, id);
+        const len = p ? p.length : Infinity;
+        if (len < bestLen) {
+          bestLen = len;
+          best = id;
+        }
+      }
+      if (!best || !Number.isFinite(bestLen)) break;
+      ordered.push(best);
+      remaining.delete(best);
+      cur = best;
+    }
+    return ordered;
+  }
+
+  function persistSectionPathState() {
+    try {
+      localStorage.setItem("govee-charts.sectionWing", sectionWing);
+      localStorage.setItem(
+        "govee-charts.sectionWaypoints",
+        JSON.stringify(sectionWaypoints)
+      );
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function syncSectionWingButtons() {
+    const custom = sectionWaypoints.length > 0;
+    sectionWingButtons.forEach((btn) => {
+      const wing = btn.dataset.sectionWing;
+      btn.classList.toggle("active", !custom && wing === sectionWing);
+    });
+    if (sectionPathClearBtn) {
+      sectionPathClearBtn.disabled = !custom;
+      sectionPathClearBtn.classList.toggle("active", custom);
+    }
+  }
+
+  /**
+   * Room sequence for the open-room cross-section.
+   * Preset wing when no clicks; otherwise façade → waypoints → façade via graph.
+   */
+  function sectionPathIds(data) {
+    const wing = sectionWing === "living" ? "living" : "kitchen";
+    const preset = [wing, "corridor", "bedroom"];
+    if (!data || !data.enabled) return preset;
+    const rooms = data.rooms || [];
+    const byId = Object.fromEntries(rooms.map((r) => [r.id, r]));
+    const adj = buildNetworkAdj(data.edges || []);
+    if (!sectionWaypoints.length) {
+      return preset.filter((id) => byId[id]);
+    }
+    const waypoints = sectionWaypoints.filter((id) => byId[id]);
+    const ends = pickFacadeEndpoints(rooms, waypoints, wing);
+    let stops;
+    if (ends) {
+      const mid = orderWaypointsGreedy(adj, ends.left, ends.right, waypoints);
+      stops = [ends.left, ...mid, ends.right];
+    } else if (waypoints.length >= 2) {
+      stops = [...waypoints];
+    } else {
+      return preset.filter((id) => byId[id]);
+    }
+    // Drop consecutive duplicates in stop list.
+    stops = stops.filter((id, i) => i === 0 || id !== stops[i - 1]);
+    const path = stitchRoomPaths(adj, stops);
+    if (!path || path.length < 2) {
+      return preset.filter((id) => byId[id]);
+    }
+    // Collapse consecutive duplicates only (keep intentional revisits).
+    return path.filter((id, i) => i === 0 || id !== path[i - 1]);
+  }
+
+  function setSectionWing(wing) {
+    const next = wing === "living" ? "living" : "kitchen";
+    sectionWing = next;
+    sectionWaypoints = [];
+    persistSectionPathState();
+    syncSectionWingButtons();
+    if (networkLastData) renderNetwork(networkLastData);
+  }
+
+  function clearSectionWaypoints() {
+    if (!sectionWaypoints.length) return;
+    sectionWaypoints = [];
+    persistSectionPathState();
+    syncSectionWingButtons();
+    if (networkLastData) renderNetwork(networkLastData);
+  }
+
+  function toggleSectionWaypoint(roomId) {
+    const id = String(roomId || "");
+    if (!id) return;
+    const idx = sectionWaypoints.indexOf(id);
+    if (idx >= 0) {
+      sectionWaypoints = sectionWaypoints.filter((x) => x !== id);
+    } else {
+      sectionWaypoints = [...sectionWaypoints, id];
+    }
+    persistSectionPathState();
+    syncSectionWingButtons();
+    if (networkLastData) renderNetwork(networkLastData);
+  }
 
   function edgeOpeningBetween(edges, a, b) {
     for (const e of edges || []) {
@@ -3830,15 +4127,18 @@
       const roomLabels = facadeRooms
         .map((r) => r.label || r.id)
         .join(" + ");
-      // Window state: open if any attached room reports open.
+      // Window state for legend on this façade band (open wins; else closed
+      // only if every known contact is closed — null contacts ignored).
       let windowState = "unknown";
-      if (facadeRooms.some((r) => r.window_state === "open")) {
+      const known = facadeRooms
+        .map((r) => r.window_state)
+        .filter((s) => s === "open" || s === "closed" || s === "unknown");
+      if (known.some((s) => s === "open")) {
         windowState = "open";
-      } else if (
-        facadeRooms.length &&
-        facadeRooms.every((r) => r.window_state === "closed")
-      ) {
+      } else if (known.length && known.every((s) => s === "closed")) {
         windowState = "closed";
+      } else if (known.some((s) => s === "unknown")) {
+        windowState = "unknown";
       }
       return {
         kind: "facade",
@@ -3893,12 +4193,12 @@
     const rooms = data.rooms || [];
     const edges = data.edges || [];
     const byId = Object.fromEntries(rooms.map((r) => [r.id, r]));
-    const path = SECTION_PATH.filter((id) => byId[id]);
+    const path = sectionPathIds(data).filter((id) => byId[id]);
     if (path.length < 2) {
       if (sectionTempScaleEl) sectionTempScaleEl.hidden = true;
       if (sectionMetaEl) {
         sectionMetaEl.textContent =
-          "Need kitchen, corridor and bedroom in the apartment layout.";
+          "Need at least two connected rooms between façades for a cross-section.";
       }
       return;
     }
@@ -3918,11 +4218,12 @@
     const { tMin, tMax } = networkTempScale(scaleRooms);
     if (sectionTempScaleEl) {
       sectionTempScaleEl.hidden = false;
+      const u = networkMetricUnitShort();
       if (sectionTempScaleLoEl) {
-        sectionTempScaleLoEl.textContent = `${tMin.toFixed(1)}°`;
+        sectionTempScaleLoEl.textContent = `${tMin.toFixed(1)}${u}`;
       }
       if (sectionTempScaleHiEl) {
-        sectionTempScaleHiEl.textContent = `${tMax.toFixed(1)}°`;
+        sectionTempScaleHiEl.textContent = `${tMax.toFixed(1)}${u}`;
       }
     }
 
@@ -4063,7 +4364,7 @@
             s.height_cm != null && Number.isFinite(Number(s.height_cm))
               ? `${Math.round(Number(s.height_cm))} cm`
               : String(s.height || "?");
-          return `${s.name} @ ${cm}: ${formatNetworkTemp(s.temperature_c)}`;
+          return `${s.name} @ ${cm}: ${formatNetworkTemp(networkSensorMetric(s))}`;
         })
         .join("; ");
       title.textContent =
@@ -4080,7 +4381,7 @@
 
       for (const s of col.sensors || []) {
         const cm = sensorHeightCm(s, ceilingCm);
-        const t = Number(s.temperature_c);
+        const t = networkSensorMetric(s);
         if (cm == null || !Number.isFinite(t)) continue;
         const y = padT + ((ceilingCm - cm) / ceilingCm) * plotH;
         const cx = x + w * 0.5;
@@ -4104,7 +4405,7 @@
           "fill",
           t >= (tMin + tMax) / 2 ? "var(--temp)" : "var(--hum)"
         );
-        lab.textContent = `${t.toFixed(1)}° · ${Math.round(cm)}`;
+        lab.textContent = `${t.toFixed(1)}${networkMetricUnitShort()} · ${Math.round(cm)}`;
         sectionSvgEl.appendChild(lab);
       }
 
@@ -4132,27 +4433,44 @@
         const next = columns[i + 1];
         const doorX = x + w + gap / 2;
         let opening = "unknown";
+        let linkKind = "door";
         let linkTitle = "";
         if (col.kind === "room" && next.kind === "room") {
           const link = edgeOpeningBetween(edges, col.id, next.id);
           opening = link.opening || "unknown";
+          linkKind = link.kind || "door";
           linkTitle =
-            `${col.id} ↔ ${next.id}: ${link.kind} ${opening}` +
+            `${col.id} ↔ ${next.id}: ${linkKind} ${opening}` +
             (link.source ? ` (${link.source})` : "");
-          linkBits.push(`${col.label}↔${next.label}: ${opening}`);
+          linkBits.push(`${col.label}↔${next.label}: ${linkKind} ${opening}`);
         } else {
-          // Façade ↔ room: use window state on the façade side.
+          // Façade ↔ room: use that room's window/door state, not the merged
+          // façade aggregate (kitchen+living share SW — living unknown must not
+          // dash the kitchen link when kitchen is closed).
+          const roomCol = col.kind === "room" ? col : next;
           const facadeCol = col.kind === "facade" ? col : next;
-          opening = facadeCol.windowState || "unknown";
-          linkTitle = `Window ${facadeCol.label}: ${opening}`;
-          linkBits.push(`win ${facadeCol.label}: ${opening}`);
+          const room = roomCol.room || null;
+          const wState = room ? room.window_state : null;
+          if (wState === "open" || wState === "closed" || wState === "unknown") {
+            opening = wState;
+          } else {
+            opening = "unknown";
+          }
+          linkKind = "exterior";
+          linkTitle =
+            `Window ${facadeCol.label} ↔ ${roomCol.label}: ${opening}` +
+            (wState == null ? " (no contact)" : "");
+          linkBits.push(
+            `win ${roomCol.label}: ${opening}${wState == null ? "?" : ""}`
+          );
         }
+        const kindClass = `section-link-${String(linkKind).replace(/[^a-z0-9_-]/gi, "_")}`;
         const door = document.createElementNS(NS, "line");
         door.setAttribute("x1", String(doorX));
         door.setAttribute("x2", String(doorX));
         door.setAttribute("y1", String(padT + plotH * 0.18));
         door.setAttribute("y2", String(padT + plotH * 0.82));
-        door.setAttribute("class", `section-door ${opening}`);
+        door.setAttribute("class", `section-door ${kindClass} ${opening}`);
         const dTitle = document.createElementNS(NS, "title");
         dTitle.textContent = linkTitle;
         door.appendChild(dTitle);
@@ -4170,7 +4488,7 @@
       sectionMetaEl.textContent =
         `Ceiling ${ceilingCm} cm · ${labels.join(" → ")}` +
         (linkBits.length ? ` · ${linkBits.join(", ")}` : "") +
-        ` · scale ${tMin.toFixed(1)}–${tMax.toFixed(1)} °C`;
+        ` · scale ${tMin.toFixed(1)}–${tMax.toFixed(1)} ${networkMetricUnit()}`;
     }
   }
 
@@ -4198,6 +4516,19 @@
     }
 
     const { pos } = networkLayout(rooms, edges);
+    const sectionPath = sectionPathIds(data).filter((id) =>
+      rooms.some((r) => r.id === id)
+    );
+    const sectionPathSet = new Set(sectionPath);
+    /** @type {Set<string>} */
+    const sectionEdgeKeys = new Set();
+    for (let i = 0; i < sectionPath.length - 1; i += 1) {
+      const a = sectionPath[i];
+      const b = sectionPath[i + 1];
+      sectionEdgeKeys.add(`${a}|${b}`);
+      sectionEdgeKeys.add(`${b}|${a}`);
+    }
+    const waypointSet = new Set(sectionWaypoints);
     const W = NETWORK_VB_W;
     const H = NETWORK_VB_H;
     // Leave room for node radii (~44) + labels so top/bottom façade nodes are not clipped.
@@ -4241,11 +4572,12 @@
     );
     if (networkTempScaleEl) {
       networkTempScaleEl.hidden = false;
+      const u = networkMetricUnitShort();
       if (networkTempScaleLoEl) {
-        networkTempScaleLoEl.textContent = `${tMin.toFixed(1)}°`;
+        networkTempScaleLoEl.textContent = `${tMin.toFixed(1)}${u}`;
       }
       if (networkTempScaleHiEl) {
-        networkTempScaleHiEl.textContent = `${tMax.toFixed(1)}°`;
+        networkTempScaleHiEl.textContent = `${tMax.toFixed(1)}${u}`;
       }
     }
 
@@ -4280,6 +4612,10 @@
         "class",
         `network-edge network-edge-${kind}${
           kind === "door" || kind === "wall_partial" ? ` ${opening}` : ""
+        }${
+          sectionEdgeKeys.has(`${edge.a}|${edge.b}`)
+            ? " is-section-path"
+            : ""
         }`
       );
       const title = document.createElementNS(NS, "title");
@@ -4474,13 +4810,15 @@
               : "";
           const hBit = [h, cm].filter(Boolean).join(" · ");
           return `${s.name}${hBit ? ` [${hBit}]` : ""}: ${formatNetworkTemp(
-            s.temperature_c
+            networkSensorMetric(s)
           )}`;
         })
         .join("; ");
       extTitle.textContent =
         `Façade ${group.orients.join(", ").toUpperCase()} · ${roomLabels}` +
-        (facadeLo != null && facadeHi != null
+        (networkMapMetric === "temp" &&
+        facadeLo != null &&
+        facadeHi != null
           ? ` · ${facadeLo.toFixed(1)}–${facadeHi.toFixed(1)}°C`
           : "") +
         (facadeNames.length ? ` · ${facadeNames.join(", ")}` : "") +
@@ -4511,7 +4849,9 @@
         lowTxt ||
         (!highTxt
           ? otherTxt ||
-            (facadeLo != null && facadeHi != null
+            (networkMapMetric === "temp" &&
+            facadeLo != null &&
+            facadeHi != null
               ? facadeLo === facadeHi
                 ? `${facadeLo.toFixed(1)}°C`
                 : `${facadeLo.toFixed(1)}–${facadeHi.toFixed(1)}°C`
@@ -4565,6 +4905,9 @@
             tMax
           )
         : roomColor(room.id, 0) + "44";
+      const isOnPath = sectionPathSet.has(room.id);
+      const isWaypoint = waypointSet.has(room.id);
+      const waypointIdx = sectionWaypoints.indexOf(room.id);
       const node = document.createElementNS(NS, "rect");
       node.setAttribute("x", String(xy.x - ROOM_W / 2));
       node.setAttribute("y", String(xy.y - ROOM_H / 2));
@@ -4576,10 +4919,27 @@
         "class",
         `network-node-room${hasOpen ? " has-open" : ""}${
           isHottest ? " is-hottest" : ""
-        }${hasAc ? " has-ac" : ""}`
+        }${hasAc ? " has-ac" : ""}${isOnPath ? " is-section-path" : ""}${
+          isWaypoint ? " is-section-waypoint" : ""
+        }`
       );
+      node.style.cursor = "pointer";
+      node.addEventListener("pointerdown", (ev) => {
+        // Keep room clicks from starting a canvas pan.
+        ev.stopPropagation();
+      });
+      node.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        toggleSectionWaypoint(room.id);
+      });
       node.setAttribute("fill", fill);
-      if (isHottest) {
+      if (isWaypoint) {
+        node.setAttribute("stroke", "#1f8a70");
+        node.setAttribute("stroke-width", "3");
+      } else if (isOnPath) {
+        node.setAttribute("stroke", "#5b8fd9");
+        node.setAttribute("stroke-width", "2.5");
+      } else if (isHottest) {
         node.setAttribute("stroke", "#c45c4a");
       } else if (hasAc) {
         node.setAttribute("stroke", "#2b7bbf");
@@ -4599,7 +4959,7 @@
               : "";
           const hBit = [h, cm].filter(Boolean).join(" · ");
           return `${s.name}${hBit ? ` [${hBit}]` : ""}: ${formatNetworkTemp(
-            s.temperature_c
+            networkSensorMetric(s)
           )}`;
         })
         .join("; ");
@@ -4619,9 +4979,16 @@
           (mode ? ` (${mode})` : "") +
           ` · ${setBit} · ${powBit}`;
       }
+      const peakLabel = networkMapMetric === "humidity" ? "most humid" : "hottest";
+      const pathBit = isWaypoint
+        ? `\nSection waypoint #${waypointIdx + 1} (click to remove)`
+        : isOnPath
+          ? "\nOn cross-section path (click to pin as waypoint)"
+          : "\nClick to add to cross-section path";
       title.textContent =
         `${room.label || room.id}` +
-        (isHottest ? " · hottest" : "") +
+        (isHottest ? ` · ${peakLabel}` : "") +
+        pathBit +
         acTitle +
         (highTxt ? `\nHigh: ${highTxt}` : "") +
         (lowTxt ? `\nLow: ${lowTxt}` : "") +
@@ -4629,6 +4996,15 @@
         (sensorBits ? `\n${sensorBits}` : "");
       node.appendChild(title);
       gNodes.appendChild(node);
+
+      if (isWaypoint) {
+        const badge = document.createElementNS(NS, "text");
+        badge.setAttribute("x", String(xy.x + ROOM_W / 2 - 10));
+        badge.setAttribute("y", String(xy.y - ROOM_H / 2 + 14));
+        badge.setAttribute("class", "network-waypoint-badge");
+        badge.textContent = String(waypointIdx + 1);
+        gLabels.appendChild(badge);
+      }
 
       // High sensors → top of band; low sensors → bottom; name in the middle.
       if (highTxt) {
@@ -4653,9 +5029,18 @@
       lab.textContent = room.label || room.id;
       gLabels.appendChild(lab);
 
+      const roomFallback =
+        networkMapMetric === "temp"
+          ? formatNetworkTemp(room.temp_c)
+          : formatNetworkTemp(
+              networkAvgTemp(
+                (room.sensors || [])
+                  .filter((s) => String(s.zone || "").toLowerCase() !== "exterior")
+                  .map((s) => networkSensorMetric(s))
+              )
+            );
       const bottomTxt =
-        lowTxt ||
-        (!highTxt ? otherTxt || formatNetworkTemp(room.temp_c) : null);
+        lowTxt || (!highTxt ? otherTxt || roomFallback : null);
       if (bottomTxt) {
         const lowLab = document.createElementNS(NS, "text");
         lowLab.setAttribute("x", String(xy.x));
@@ -4768,12 +5153,15 @@
     networkSvgEl.appendChild(gLabels);
 
     const outdoor = data.outdoor || {};
-    const outBit =
+    const outTemp =
       outdoor.available && outdoor.temp_now != null
-        ? ` · outdoor ${formatNetworkTemp(outdoor.temp_now)}`
+        ? Number(outdoor.temp_now)
         : outdoor.available && outdoor.temp_c != null
-          ? ` · outdoor ${formatNetworkTemp(outdoor.temp_c)}`
-          : "";
+          ? Number(outdoor.temp_c)
+          : NaN;
+    const outBit = Number.isFinite(outTemp)
+      ? ` · outdoor ${outTemp.toFixed(1)}°C`
+      : "";
     const couple = data.temp_couple || {};
     const coupleBit =
       couple.open_threshold_c != null
@@ -4797,6 +5185,13 @@
       acBit = ` · AC on in ${roomLabel} · set ${setBit} · ${powBit}`;
     }
     if (networkMetaEl) {
+      const pathLabels = sectionPath
+        .map((id) => {
+          const r = rooms.find((x) => x.id === id);
+          return (r && (r.label || r.id)) || id;
+        })
+        .join(" → ");
+      const pathBit = pathLabels ? ` · cut ${pathLabels}` : "";
       networkMetaEl.textContent =
         `${rooms.length} rooms · ${edges.length} links` +
         (openDoors ? ` · ${openDoors} contact open` : "") +
@@ -4804,7 +5199,8 @@
         (openWindows ? ` · ${openWindows} window(s) open` : "") +
         outBit +
         coupleBit +
-        acBit;
+        acBit +
+        pathBit;
     }
     if (networkAirflowEl) {
       if (!airflow || !airflow.mode) {
@@ -7215,6 +7611,21 @@
       applyNetworkViewBox();
     });
   }
+  networkMetricButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setNetworkMapMetric(btn.dataset.mapMetric);
+    });
+  });
+  sectionWingButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setSectionWing(btn.dataset.sectionWing);
+    });
+  });
+  if (sectionPathClearBtn) {
+    sectionPathClearBtn.addEventListener("click", () => {
+      clearSectionWaypoints();
+    });
+  }
   if (networkCanvasWrapEl && networkSvgEl) {
     networkCanvasWrapEl.addEventListener(
       "wheel",
@@ -7805,6 +8216,31 @@
     coverageHours = savedCovHours;
   }
   syncCoverageRangeButtons();
+
+  const savedMapMetric = localStorage.getItem("govee-charts.mapMetric");
+  if (savedMapMetric === "humidity" || savedMapMetric === "temp") {
+    networkMapMetric = savedMapMetric;
+  }
+  syncNetworkMetricButtons();
+
+  const savedSectionWing = localStorage.getItem("govee-charts.sectionWing");
+  if (savedSectionWing === "living" || savedSectionWing === "kitchen") {
+    sectionWing = savedSectionWing;
+  }
+  try {
+    const rawWp = localStorage.getItem("govee-charts.sectionWaypoints");
+    if (rawWp) {
+      const parsed = JSON.parse(rawWp);
+      if (Array.isArray(parsed)) {
+        sectionWaypoints = parsed
+          .map((x) => String(x || "").trim())
+          .filter(Boolean);
+      }
+    }
+  } catch (_) {
+    sectionWaypoints = [];
+  }
+  syncSectionWingButtons();
 
   loadPersistedRange();
   syncRangeControls();

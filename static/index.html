@@ -301,25 +301,38 @@
       <div class="overview-head">
         <h2>Apartment map</h2>
         <p class="overview-hint">
-          Cross-section of open rooms side by side (façade → kitchen → corridor →
-          bedroom → façade), colored by temperature at each sensor height.
-          Topology graph below.
+          Cross-section follows a path from one façade to the other through
+          rooms you click on the topology graph (Kitchen / Living presets available).
+          Colored by temperature or humidity at each sensor height.
         </p>
+      </div>
+      <div class="network-metric-bar">
+        <div class="ranges network-metric-ranges" role="group" aria-label="Map metric">
+          <button type="button" data-map-metric="temp" class="active">Temperature</button>
+          <button type="button" data-map-metric="humidity">Humidity</button>
+        </div>
       </div>
       <p class="network-meta" id="network-meta" aria-live="polite">Loading…</p>
 
       <div class="section-panel">
         <div class="section-head">
           <h3>Open-room cross-section</h3>
-          <span class="net-temp-scale" id="section-temp-scale" hidden>
-            <span class="net-temp-scale-lo" id="section-temp-scale-lo">—</span>
-            <span class="net-temp-scale-bar" aria-hidden="true"></span>
-            <span class="net-temp-scale-hi" id="section-temp-scale-hi">—</span>
-          </span>
+          <div class="section-head-right">
+            <div class="ranges section-wing-ranges" role="group" aria-label="Cross-section wing">
+              <button type="button" data-section-wing="kitchen" class="active">Kitchen</button>
+              <button type="button" data-section-wing="living">Living</button>
+              <button type="button" id="section-path-clear" title="Clear clicked rooms">Clear</button>
+            </div>
+            <span class="net-temp-scale" id="section-temp-scale" hidden>
+              <span class="net-temp-scale-lo" id="section-temp-scale-lo">—</span>
+              <span class="net-temp-scale-bar" aria-hidden="true"></span>
+              <span class="net-temp-scale-hi" id="section-temp-scale-hi">—</span>
+            </span>
+          </div>
         </div>
         <p class="section-meta" id="section-meta" aria-live="polite"></p>
         <div class="section-canvas-wrap" id="section-canvas-wrap">
-          <svg id="section-svg" class="section-svg" role="img" aria-label="Kitchen corridor bedroom temperature cross-section"></svg>
+          <svg id="section-svg" class="section-svg" role="img" aria-label="Apartment cross-section"></svg>
         </div>
       </div>
 
@@ -347,7 +360,7 @@
       </div>
       <p class="network-airflow" id="network-airflow" aria-live="polite"></p>
       <div class="network-canvas-wrap" id="network-canvas-wrap">
-        <svg id="network-svg" class="network-svg" role="img" aria-label="Apartment temperature map"></svg>
+        <svg id="network-svg" class="network-svg" role="img" aria-label="Apartment map"></svg>
       </div>
       <p class="status" id="network-status">Loading…</p>
     </section>

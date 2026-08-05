@@ -2371,6 +2371,14 @@ main {
   font-size: 0.92rem;
 }
 
+.network-metric-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin: 0 0 0.65rem;
+}
+
 .network-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -2501,6 +2509,13 @@ main {
   font-weight: 600;
 }
 
+.section-head-right {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 0.85rem;
+}
+
 .section-meta {
   margin: 0 0 0.55rem;
   color: var(--muted);
@@ -2564,20 +2579,52 @@ main {
 .section-door {
   stroke-width: 3;
   fill: none;
+  stroke-linecap: round;
 }
 
 .section-door.open {
   stroke: #2f9e6b;
+  stroke-dasharray: none;
 }
 
 .section-door.closed {
-  stroke: #8a908c;
-  stroke-dasharray: 5 4;
+  stroke: #6b7280;
+  stroke-dasharray: none;
 }
 
 .section-door.unknown {
   stroke: #c4a35a;
-  stroke-dasharray: 4 3;
+  stroke-dasharray: 6 5;
+}
+
+/* Kind overrides (room↔room): match topology legend. */
+.section-door.section-link-wall {
+  stroke: #8a908c;
+  stroke-width: 2;
+  stroke-dasharray: none;
+  opacity: 0.85;
+}
+
+.section-door.section-link-wall_partial {
+  stroke: #8a908c;
+  stroke-width: 2.25;
+  stroke-dasharray: 5 4;
+  opacity: 0.9;
+}
+
+.section-door.section-link-exterior.open {
+  stroke: #2f9e6b;
+  stroke-dasharray: none;
+}
+
+.section-door.section-link-exterior.closed {
+  stroke: #5b8fd9;
+  stroke-dasharray: none;
+}
+
+.section-door.section-link-exterior.unknown {
+  stroke: #c4a35a;
+  stroke-dasharray: 6 5;
 }
 
 .network-airflow {
@@ -2640,6 +2687,13 @@ main {
   stroke-linecap: round;
 }
 
+.network-edge.is-section-path {
+  stroke: #5b8fd9 !important;
+  stroke-width: 5 !important;
+  stroke-dasharray: none !important;
+  opacity: 1;
+}
+
 .network-edge-door.open {
   stroke: #2f9e6b;
   stroke-width: 3.5;
@@ -2691,6 +2745,17 @@ main {
   /* fill set per-node via SVG height gradient */
   stroke: var(--line);
   stroke-width: 1.5;
+  cursor: pointer;
+}
+
+.network-node-room.is-section-path {
+  stroke: #5b8fd9;
+  stroke-width: 2.5;
+}
+
+.network-node-room.is-section-waypoint {
+  stroke: #1f8a70;
+  stroke-width: 3;
 }
 
 .network-node-room.has-open {
@@ -2714,6 +2779,12 @@ main {
 
 .network-node-room.has-ac.is-hottest {
   stroke: #c45c4a;
+}
+
+.network-node-room.is-section-waypoint.has-open,
+.network-node-room.is-section-waypoint.is-hottest,
+.network-node-room.is-section-waypoint.has-ac {
+  stroke: #1f8a70;
 }
 
 .network-ac-label {
@@ -2747,6 +2818,18 @@ main {
 
 .network-label.is-hottest {
   fill: #fff;
+}
+
+.network-waypoint-badge {
+  fill: #1f8a70;
+  stroke: #0e1410;
+  stroke-width: 3.5px;
+  stroke-linejoin: round;
+  paint-order: stroke fill;
+  font-size: 11px;
+  font-weight: 700;
+  text-anchor: middle;
+  pointer-events: none;
 }
 
 .network-sublabel {
