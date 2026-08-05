@@ -127,12 +127,25 @@ def _norm_height_cm(value: Any) -> float | None:
     return round(cm, 1)
 
 
+def _norm_label(value: Any) -> str | None:
+    """Friendly display name; empty clears the override."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in ("none", "null", "unset", "-"):
+        return None
+    if len(text) > 80:
+        raise ValueError("Label too long (max 80 characters)")
+    return text
+
+
 def normalize_patch(
     *,
     zone: Any = ...,
     height: Any = ...,
     height_cm: Any = ...,
     room: Any = ...,
+    label: Any = ...,
 ) -> dict[str, Any]:
     """Build a partial update dict. Ellipsis means 'field not provided'."""
     out: dict[str, Any] = {}
@@ -144,6 +157,8 @@ def normalize_patch(
         out["height_cm"] = _norm_height_cm(height_cm)
     if room is not ...:
         out["room"] = _norm_choice(room, ROOMS)
+    if label is not ...:
+        out["label"] = _norm_label(label)
     return out
 
 

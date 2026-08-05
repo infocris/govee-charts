@@ -160,11 +160,13 @@ See `config.example.toml`:
 
 ## Sensor categories
 
-On the **Overview** page, each sensor has editable **Zone** (interior/exterior),
-**Height** (high/mid/low), optional **Height cm** (exact mounting height above
-the floor, 0–600), and **Room** (kitchen, bedroom, corridor, living, other).
-Values are stored in SQLite and can be filtered in Overview and Compare.
-On first start, empty categories are inferred from friendly labels when possible.
+On the **Overview** page, each sensor has an editable **name** (friendly label),
+**Zone** (interior/exterior), **Height** (high/mid/low), optional **Height cm**
+(exact mounting height above the floor, 0–600), and **Room** (kitchen, bedroom,
+corridor, living, other). Names and categories are stored in SQLite (labels also
+still work from `config.toml` as fallback). Values can be filtered in Overview
+and Compare. On first start, empty categories are inferred from friendly labels
+when possible.
 When **Height cm** is set, the **Map** view places temperatures on the vertical
 band using that height (relative to `apartment.ceiling_m`); otherwise it falls
 back to high/mid/low.
@@ -286,7 +288,7 @@ Data © [Open-Meteo](https://open-meteo.com/).
 
 - `GET /api/devices` — known devices + latest reading + categories
 - `GET /api/categories` — zone / height / room taxonomy
-- `PATCH /api/devices/{address}/categories` — update `{zone,height,height_cm,room}`
+- `PATCH /api/devices/{address}/categories` — update `{zone,height,height_cm,room,label}`
 - `GET /api/history?address=…&hours=24` — time series
 - `GET /api/forecast?hours=24&address=…` — outdoor forecast + optional projections
 - `GET /api/apartment` — layout, façades, linked sensors, live solar gains (+ `hvac` when enabled)

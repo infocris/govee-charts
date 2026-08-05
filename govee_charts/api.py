@@ -116,6 +116,7 @@ class CategoryPatch(BaseModel):
     height: str | None = None
     height_cm: float | None = None
     room: str | None = None
+    label: str | None = None
 
     model_config = {"extra": "forbid"}
 
@@ -145,6 +146,31 @@ class BackfillDevicePatch(BaseModel):
 _BACKFILL_MODELS = ("h5075", "h5072", "h5179")
 
 
+def device_display_name(
+    device: dict[str, Any],
+    labels: dict[str, str] | None = None,
+) -> str:
+    """UI label > config.toml [labels] > BLE advertisement name > address."""
+    addr = str(device.get("address") or "").upper()
+    custom = str(device.get("label") or "").strip()
+    if custom:
+        return custom
+    if labels and addr in labels:
+        return labels[addr]
+    return str(device.get("name") or addr)
+
+
+def enrich_device(
+    device: dict[str, Any],
+    labels: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Copy device row and set ``name`` to the resolved display name."""
+    out = dict(device)
+    out["ble_name"] = device.get("name")
+    out["name"] = device_display_name(device, labels)
+    return out
+
+
 async def _backfill_devices_from_db(
     db: Database,
     labels: dict[str, str],
@@ -163,7 +189,7 @@ async def _backfill_devices_from_db(
         rows.append(
             {
                 "address": addr,
-                "name": labels.get(addr) or str(device.get("name") or addr),
+                "name": device_display_name(device, labels),
                 "model": model or None,
                 "enabled": bool(flags.get("enabled")),
                 "gatt_enabled": bool(flags.get("gatt_enabled", True)),
@@ -418,8 +444,7 @@ def create_app(
         )
         snap["device_update"] = {
             "address": address,
-            "name": app.state.labels.get(address)
-            or str(device.get("name") or address),
+            "name": device_display_name(device, app.state.labels),
             "enabled": flags["enabled"],
             "gatt_enabled": flags["gatt_enabled"],
             "cancelled": 0,
@@ -598,7 +623,7 @@ def create_app(
         device = await _resolve_import_device(address)
         addr = str(device["address"]).upper()
         labels: dict[str, str] = app.state.labels
-        name = labels.get(addr) or str(device.get("name") or addr)
+        name = device_display_name(device, labels)
         filename, data = await _read_import_upload(file)
         try:
             samples, bad_rows, files, file_stats = parse_upload(filename, data)
@@ -732,7 +757,7 @@ def create_app(
         device = await _resolve_import_device(address)
         addr = str(device["address"]).upper()
         labels: dict[str, str] = app.state.labels
-        name = labels.get(addr) or str(device.get("name") or addr)
+        name = device_display_name(device, labels)
         model = str(device.get("model") or "h5075")
         filename, data = await _read_import_upload(file)
         try:
@@ -839,7 +864,10 @@ def create_app(
 
     @app.get("/api/devices")
     async def api_devices() -> list[dict[str, Any]]:
-        return await db.list_devices()
+        labels: dict[str, str] = app.state.labels
+        return [
+            enrich_device(d, labels) for d in await db.list_devices()
+        ]
 
     @app.get("/api/coverage")
     async def api_coverage(
@@ -855,7 +883,7 @@ def create_app(
         if device is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         labels: dict[str, str] = app.state.labels
-        name = labels.get(addr) or str(device.get("name") or addr)
+        name = device_display_name(device, labels)
 
         now = time.time()
         if since is not None and until is not None:
@@ -874,6 +902,8 @@ def create_app(
             t0 = t1 - h * 3600.0
 
         report = await db.coverage_report(addr, t0, t1)
+        recent = await db.recent_readings(addr, limit=10)
+        recent_jobs = await db.recent_backfill_jobs_for_address(addr, limit=10)
         return {
             "address": addr,
             "name": name,
@@ -884,6 +914,8 @@ def create_app(
             "sources": report.get("sources") or {},
             "samples": report.get("samples") or 0,
             "counts": report.get("counts") or {},
+            "recent": recent,
+            "recent_jobs": recent_jobs,
         }
 
     @app.get("/api/history/aggregate")
@@ -901,7 +933,7 @@ def create_app(
         if device is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         labels: dict[str, str] = app.state.labels
-        name = labels.get(addr) or str(device.get("name") or addr)
+        name = device_display_name(device, labels)
 
         now = time.time()
         if since is not None and until is not None:
@@ -983,6 +1015,7 @@ def create_app(
         payload["hours"] = hours
 
         # Attach sensors grouped by room category
+        labels: dict[str, str] = app.state.labels
         devices = await db.list_devices()
         by_room: dict[str, list[dict[str, Any]]] = {
             r["id"]: [] for r in payload["rooms"]
@@ -994,7 +1027,7 @@ def create_app(
             by_room[room].append(
                 {
                     "address": d.get("address"),
-                    "name": d.get("name") or d.get("address"),
+                    "name": device_display_name(d, labels),
                     "zone": d.get("zone"),
                     "height": d.get("height"),
                     "height_cm": d.get("height_cm"),
@@ -1573,6 +1606,7 @@ def create_app(
                 height=provided["height"] if "height" in provided else ...,
                 height_cm=provided["height_cm"] if "height_cm" in provided else ...,
                 room=provided["room"] if "room" in provided else ...,
+                label=provided["label"] if "label" in provided else ...,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1580,7 +1614,7 @@ def create_app(
         updated = await db.update_device_categories(address, **patch)
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown device")
-        return updated
+        return enrich_device(updated, app.state.labels)
 
     @app.get("/api/history")
     async def api_history(
@@ -1806,7 +1840,15 @@ def create_app(
                 suffix_map=suffix_map,
             )
             register_mac(suffix_map, address)
-            display = labels.get(address) or ble_name
+            existing = await db.get_device(address)
+            display = device_display_name(
+                {
+                    **(existing or {}),
+                    "address": address,
+                    "name": ble_name,
+                },
+                labels,
+            )
             reading = Reading(
                 temperature_c=item.temperature_c,
                 humidity=item.humidity,

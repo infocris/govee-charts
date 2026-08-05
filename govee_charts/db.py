@@ -173,6 +173,10 @@ class Database:
             await self.db.execute(
                 "ALTER TABLE devices ADD COLUMN height_cm REAL"
             )
+        if "label" not in device_cols:
+            await self.db.execute(
+                "ALTER TABLE devices ADD COLUMN label TEXT"
+            )
 
         # Deduplicate before creating unique index (keep lowest id)
         await self.db.execute(
@@ -354,6 +358,7 @@ class Database:
                     d.zone,
                     d.height,
                     d.height_cm,
+                    d.label,
                     d.room,
                     r.temperature_c,
                     r.humidity,
@@ -396,6 +401,7 @@ class Database:
                     d.zone,
                     d.height,
                     d.height_cm,
+                    d.label,
                     d.room,
                     r.temperature_c,
                     r.humidity,
@@ -438,6 +444,7 @@ class Database:
                 d.zone,
                 d.height,
                 d.height_cm,
+                d.label,
                 d.room,
                 r.temperature_c,
                 r.humidity,
@@ -467,6 +474,7 @@ class Database:
         height: str | None | object = ...,
         height_cm: float | None | object = ...,
         room: str | None | object = ...,
+        label: str | None | object = ...,
     ) -> dict[str, Any] | None:
         """Update category fields. Ellipsis means leave unchanged."""
         device = await self.get_device(address)
@@ -487,6 +495,9 @@ class Database:
         if room is not ...:
             fields.append("room = ?")
             values.append(room)
+        if label is not ...:
+            fields.append("label = ?")
+            values.append(label)
         if not fields:
             return device
 
@@ -555,6 +566,25 @@ class Database:
         )
         rows = [dict(row) for row in await cursor.fetchall()]
         return _downsample_readings(rows, max_points=max(100, int(max_points)))
+
+    async def recent_readings(
+        self,
+        address: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Latest readings for one device (no time window or downsampling)."""
+        lim = max(1, min(int(limit), 100))
+        cursor = await self.db.execute(
+            """
+            SELECT ts, temperature_c, humidity, battery, rssi, source
+            FROM readings
+            WHERE address = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (address.upper(), lim),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
 
     async def history_aggregate(
         self,
@@ -1623,7 +1653,11 @@ class Database:
             addr = str(device.get("address") or "").upper()
             if not addr:
                 continue
-            name = labels.get(addr) or str(device.get("name") or addr)
+            name = (
+                str(device.get("label") or "").strip()
+                or labels.get(addr)
+                or str(device.get("name") or addr)
+            )
             stamps = by_addr.get(addr) or []
             covered: set[int] = set()
             samples_in_range = 0
@@ -1790,6 +1824,26 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def recent_backfill_jobs_for_address(
+        self,
+        address: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Most recently updated backfill jobs for one sensor."""
+        limit = max(1, min(int(limit), 50))
+        cursor = await self.db.execute(
+            """
+            SELECT id, address, phase, window_start, window_end, status,
+                   priority, samples_done, samples_expected, error, updated_at
+            FROM backfill_jobs
+            WHERE address = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (address.upper(), limit),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
 
     async def recent_backfill_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
         """Most recently updated backfill jobs, excluding still-pending ones."""

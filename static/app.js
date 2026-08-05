@@ -66,6 +66,9 @@
   const coverageAggEl = document.getElementById("coverage-agg");
   const coverageAggBodyEl = document.getElementById("coverage-agg-body");
   const coverageAggHintEl = document.getElementById("coverage-agg-hint");
+  const coverageRecentEl = document.getElementById("coverage-recent");
+  const coverageRecentBody = document.getElementById("coverage-recent-body");
+  const coverageRecentJobsBody = document.getElementById("coverage-recent-jobs-body");
   const coverageAggButtons = [
     ...document.querySelectorAll(".coverage-agg-ranges > button[data-agg-bucket]"),
   ];
@@ -88,6 +91,7 @@
   const facadeChartsEl = document.getElementById("facade-charts");
   const facadeStatusEl = document.getElementById("facade-status");
   const windowBannerEl = document.getElementById("window-banner");
+  const topBarEl = document.getElementById("top-bar");
   const windowBannerTitleEl = document.getElementById("window-banner-title");
   const windowBannerDetailEl = document.getElementById("window-banner-detail");
   const backfillPanelEl = document.getElementById("backfill-panel");
@@ -155,7 +159,7 @@
   /** @type {import('chart.js').Chart | null} */
   let coverageHumChart = null;
   /** @type {string} */
-  let coverageHours = "2160";
+  let coverageHours = "1";
   /** @type {string} */
   let coverageAddress = localStorage.getItem("govee-charts.coverageAddress") || "";
   /** @type {string} */
@@ -198,6 +202,9 @@
   const RANGE_MAX_HOURS = 26280;
   const QUICK_RANGE_HOURS = new Set([1, 6, 12, 24, 72, 168, 336]);
   const SELECT_RANGE_HOURS = new Set([720, 2160, 4320, 8760, 17520, 26280]);
+  const COVERAGE_RANGE_HOURS = new Set([
+    "1", "6", "12", "24", "72", "168", "336", "720", "2160", "8760", "all",
+  ]);
 
   /** @type {number} relative window in hours (ignored when customSince/Until set) */
   let hours = 24;
@@ -245,7 +252,7 @@
   const projectionScenarioEl = document.getElementById("projection-scenario");
   const showWindowBandsEl = document.getElementById("show-window-bands");
   const showHvacEl = document.getElementById("show-hvac");
-  const windowNotifyEl = document.getElementById("window-notify");
+  const windowNotifyEl = document.getElementById("window-notify-btn");
   const windowLegendEl = document.getElementById("window-legend");
   const hvacLegendEl = document.getElementById("hvac-legend");
   const hvacStatusEl = document.getElementById("hvac-status");
@@ -1211,6 +1218,81 @@
           <td class="num">${escapeHtml(batt)}</td>
           <td class="num">${rssiHtml(row.rssi)}</td>
           <td class="overview-source">${sourceHtml(row.source || "—")}</td>
+        </tr>`;
+      })
+      .join("");
+  }
+
+  function coverageReadingTemp(row) {
+    return row.temperature_c != null && Number.isFinite(Number(row.temperature_c))
+      ? `${Number(row.temperature_c).toFixed(1)} °C`
+      : "—";
+  }
+
+  function coverageReadingHum(row) {
+    return row.humidity != null && Number.isFinite(Number(row.humidity))
+      ? `${Number(row.humidity).toFixed(1)} %`
+      : "—";
+  }
+
+  function coverageReadingBatt(row) {
+    return row.battery != null && Number.isFinite(Number(row.battery))
+      ? `${Number(row.battery)} %`
+      : "—";
+  }
+
+  function coverageRecentRowsHtml(rows, emptyMsg) {
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) {
+      return `<tr><td colspan="6" class="overview-empty">${escapeHtml(
+        emptyMsg || "No readings yet"
+      )}</td></tr>`;
+    }
+    return list
+      .map((row) => {
+        return `<tr>
+          <td>${escapeHtml(formatBackfillTs(row.ts))}</td>
+          <td class="num temp">${escapeHtml(coverageReadingTemp(row))}</td>
+          <td class="num">${escapeHtml(coverageReadingHum(row))}</td>
+          <td class="num">${escapeHtml(coverageReadingBatt(row))}</td>
+          <td class="num">${rssiHtml(row.rssi)}</td>
+          <td class="overview-source">${sourceHtml(row.source || "—")}</td>
+        </tr>`;
+      })
+      .join("");
+  }
+
+  function renderCoverageRecent(recent) {
+    if (coverageRecentEl) coverageRecentEl.hidden = !coverageAddress;
+    if (!coverageRecentBody) return;
+    coverageRecentBody.innerHTML = coverageRecentRowsHtml(recent, "No readings yet");
+  }
+
+  function renderCoverageRecentJobs(jobs) {
+    if (!coverageRecentJobsBody) return;
+    const rows = jobs || [];
+    if (!rows.length) {
+      coverageRecentJobsBody.innerHTML =
+        '<tr><td colspan="5" class="overview-empty">No backfill jobs yet</td></tr>';
+      return;
+    }
+    coverageRecentJobsBody.innerHTML = rows
+      .map((job) => {
+        const st = String(job.status || "").replace(/[^a-z0-9_-]/gi, "");
+        const samples =
+          `${Number(job.samples_done) || 0}` +
+          (job.samples_expected != null
+            ? ` / ${Number(job.samples_expected) || 0}`
+            : "");
+        const detail = job.error
+          ? escapeHtml(String(job.error))
+          : `${formatBackfillTs(job.window_start)} → ${formatBackfillTs(job.window_end)}`;
+        return `<tr>
+          <td>${escapeHtml(formatBackfillTs(job.updated_at))}</td>
+          <td>${escapeHtml(phaseLabel(job.phase))}</td>
+          <td><span class="backfill-job-status backfill-job-status-${st}">${escapeHtml(job.status || "—")}</span></td>
+          <td class="num">${escapeHtml(samples)}</td>
+          <td class="backfill-job-detail">${detail}</td>
         </tr>`;
       })
       .join("");
@@ -2485,6 +2567,8 @@
       if (coverageSegmentsEl) coverageSegmentsEl.innerHTML = "";
       if (coverageStatusEl) coverageStatusEl.textContent = "";
       if (coverageAggEl) coverageAggEl.hidden = true;
+      renderCoverageRecent([]);
+      renderCoverageRecentJobs([]);
       clearCoverageCharts();
       return;
     }
@@ -2520,6 +2604,8 @@
         : "—";
       coverageStatusEl.textContent = `Sources · ${srcTxt}`;
     }
+    renderCoverageRecent(data.recent);
+    renderCoverageRecentJobs(data.recent_jobs);
     await Promise.all([
       loadCoverageAggregates(),
       loadCoverageCharts(data.range || null),
@@ -3722,6 +3808,76 @@
     return { opening: "unknown", kind: "door", source: "" };
   }
 
+  /**
+   * Build cross-section columns: optional left façade · rooms · optional right façade.
+   * Shared orientations (e.g. kitchen+living SW) merge exterior sensors into one band.
+   */
+  function buildSectionColumns(pathIds, rooms, byId) {
+    const cols = [];
+    const first = byId[pathIds[0]];
+    const last = byId[pathIds[pathIds.length - 1]];
+    const leftKey = first ? networkFacadeKey(first) : "";
+    const rightKey = last ? networkFacadeKey(last) : "";
+
+    function facadeColumn(key, side) {
+      const facadeRooms = rooms.filter((r) => networkFacadeKey(r) === key);
+      const sensors = facadeRooms.flatMap((r) =>
+        (r.sensors || []).filter(
+          (s) => String(s.zone || "").toLowerCase() === "exterior"
+        )
+      );
+      const orients = key.split("+").map((o) => o.toUpperCase());
+      const roomLabels = facadeRooms
+        .map((r) => r.label || r.id)
+        .join(" + ");
+      // Window state: open if any attached room reports open.
+      let windowState = "unknown";
+      if (facadeRooms.some((r) => r.window_state === "open")) {
+        windowState = "open";
+      } else if (
+        facadeRooms.length &&
+        facadeRooms.every((r) => r.window_state === "closed")
+      ) {
+        windowState = "closed";
+      }
+      return {
+        kind: "facade",
+        id: `facade-${side}-${key}`,
+        label: orients[0] || "EXT",
+        sublabel: roomLabels,
+        orients,
+        sensors,
+        weight: 2.5,
+        windowState,
+        exterior: true,
+      };
+    }
+
+    if (leftKey) {
+      cols.push(facadeColumn(leftKey, "left"));
+    }
+    for (const id of pathIds) {
+      const room = byId[id];
+      if (!room) continue;
+      cols.push({
+        kind: "room",
+        id: room.id,
+        label: room.label || room.id,
+        sublabel: "",
+        sensors: (room.sensors || []).filter(
+          (s) => String(s.zone || "").toLowerCase() !== "exterior"
+        ),
+        weight: Math.max(1, Number(room.area_m2) || 1),
+        room,
+        exterior: false,
+      });
+    }
+    if (rightKey && rightKey !== leftKey) {
+      cols.push(facadeColumn(rightKey, "right"));
+    }
+    return cols;
+  }
+
   function renderOpenRoomSection(data) {
     if (!sectionSvgEl) return;
     const NS = "http://www.w3.org/2000/svg";
@@ -3751,8 +3907,15 @@
       50,
       Math.round(Number(data.ceiling_m || 2.5) * 100)
     );
-    const sectionRooms = path.map((id) => byId[id]);
-    const { tMin, tMax } = networkTempScale(sectionRooms);
+    const columns = buildSectionColumns(path, rooms, byId);
+    // Scale across interiors + façades in this cut.
+    const scaleRooms = [
+      ...path.map((id) => byId[id]),
+      ...columns
+        .filter((c) => c.kind === "facade")
+        .map((c) => ({ sensors: c.sensors })),
+    ];
+    const { tMin, tMax } = networkTempScale(scaleRooms);
     if (sectionTempScaleEl) {
       sectionTempScaleEl.hidden = false;
       if (sectionTempScaleLoEl) {
@@ -3766,16 +3929,15 @@
     const padL = 52;
     const padR = 18;
     const padT = 28;
-    const padB = 42;
-    const W = 920;
-    const H = 360;
+    const padB = 48;
+    const W = 960;
+    const H = 380;
     const plotW = W - padL - padR;
     const plotH = H - padT - padB;
-    const gap = 14;
-    const areas = sectionRooms.map((r) => Math.max(1, Number(r.area_m2) || 1));
-    const areaSum = areas.reduce((a, b) => a + b, 0);
-    const usable = plotW - gap * (sectionRooms.length - 1);
-    const widths = areas.map((a) => (a / areaSum) * usable);
+    const gap = 12;
+    const weightSum = columns.reduce((a, c) => a + c.weight, 0);
+    const usable = plotW - gap * Math.max(0, columns.length - 1);
+    const widths = columns.map((c) => (c.weight / weightSum) * usable);
 
     sectionSvgEl.setAttribute("viewBox", `0 0 ${W} ${H}`);
     sectionSvgEl.setAttribute("preserveAspectRatio", "xMidYMid meet");
@@ -3822,10 +3984,7 @@
 
     // Floor / ceiling guides
     const guides = document.createElementNS(NS, "g");
-    for (const [u, dash] of [
-      [0, ""],
-      [1, ""],
-    ]) {
+    for (const u of [0, 1]) {
       const y = padT + u * plotH;
       const line = document.createElementNS(NS, "line");
       line.setAttribute("x1", String(padL));
@@ -3834,41 +3993,48 @@
       line.setAttribute("y2", String(y));
       line.setAttribute("stroke", "var(--line)");
       line.setAttribute("stroke-width", u === 1 ? "2" : "1.25");
-      if (dash) line.setAttribute("stroke-dasharray", dash);
       line.setAttribute("opacity", "0.55");
       guides.appendChild(line);
     }
     sectionSvgEl.appendChild(guides);
 
     let x = padL;
-    const doorBits = [];
-    for (let i = 0; i < sectionRooms.length; i += 1) {
-      const room = sectionRooms[i];
+    const linkBits = [];
+    for (let i = 0; i < columns.length; i += 1) {
+      const col = columns[i];
       const w = widths[i];
-      const contLevels = networkSensorGradientLevels(
-        room.sensors || [],
-        ceilingCm,
-        { exterior: false }
-      );
-      const bands = networkInteriorTempBands(room);
-      const heightStops = networkHeightStops(bands);
+      const contLevels = networkSensorGradientLevels(col.sensors, ceilingCm, {
+        exterior: !!col.exterior,
+      });
+      // Fallback categorical bands for rooms without height_cm.
+      let fallbackStops = null;
+      if (!contLevels && col.kind === "room" && col.room) {
+        fallbackStops = networkHeightStops(networkInteriorTempBands(col.room));
+      } else if (!contLevels && col.kind === "facade") {
+        fallbackStops = networkHeightStops(
+          networkFacadeTempBands([{ sensors: col.sensors }])
+        );
+      }
       const hasTemp = !!(
         contLevels ||
-        heightStops.high != null ||
-        heightStops.mid != null ||
-        heightStops.low != null
+        (fallbackStops &&
+          (fallbackStops.high != null ||
+            fallbackStops.mid != null ||
+            fallbackStops.low != null))
       );
-      const gradId = `section-grad-${String(room.id).replace(/[^a-z0-9_-]/gi, "_")}`;
+      const gradId = `section-grad-${String(col.id).replace(/[^a-z0-9_-]/gi, "_")}`;
       const fill = hasTemp
         ? appendHeightGradient(
             defs,
             NS,
             gradId,
-            contLevels || heightStops,
+            contLevels || fallbackStops,
             tMin,
             tMax
           )
-        : "#2a3230";
+        : col.kind === "facade"
+          ? "#354860"
+          : "#2a3230";
 
       const rect = document.createElementNS(NS, "rect");
       rect.setAttribute("x", String(x));
@@ -3877,13 +4043,21 @@
       rect.setAttribute("height", String(plotH));
       rect.setAttribute("rx", "8");
       rect.setAttribute("ry", "8");
-      rect.setAttribute("class", "section-room");
+      rect.setAttribute(
+        "class",
+        col.kind === "facade" ? "section-facade" : "section-room"
+      );
       rect.setAttribute("fill", fill);
-      rect.setAttribute("stroke", "var(--line)");
-      rect.setAttribute("stroke-width", "1.5");
+      rect.setAttribute(
+        "stroke",
+        col.kind === "facade" ? "#5b8fd9" : "var(--line)"
+      );
+      rect.setAttribute("stroke-width", col.kind === "facade" ? "1.75" : "1.5");
+      if (col.kind === "facade") {
+        rect.setAttribute("stroke-dasharray", "5 3");
+      }
       const title = document.createElementNS(NS, "title");
-      const sensorBits = (room.sensors || [])
-        .filter((s) => String(s.zone || "").toLowerCase() !== "exterior")
+      const sensorBits = (col.sensors || [])
         .map((s) => {
           const cm =
             s.height_cm != null && Number.isFinite(Number(s.height_cm))
@@ -3893,14 +4067,18 @@
         })
         .join("; ");
       title.textContent =
-        `${room.label || room.id}` +
-        (sensorBits ? `\n${sensorBits}` : "\nNo interior sensors");
+        (col.kind === "facade"
+          ? `Façade ${col.label}${col.sublabel ? ` · ${col.sublabel}` : ""}`
+          : col.label) +
+        (sensorBits
+          ? `\n${sensorBits}`
+          : col.kind === "facade"
+            ? "\nNo exterior sensors"
+            : "\nNo interior sensors");
       rect.appendChild(title);
       sectionSvgEl.appendChild(rect);
 
-      // Sensor markers at exact heights
-      for (const s of room.sensors || []) {
-        if (String(s.zone || "").toLowerCase() === "exterior") continue;
+      for (const s of col.sensors || []) {
         const cm = sensorHeightCm(s, ceilingCm);
         const t = Number(s.temperature_c);
         if (cm == null || !Number.isFinite(t)) continue;
@@ -3922,42 +4100,63 @@
         lab.setAttribute("x", String(cx + 8));
         lab.setAttribute("y", String(y + 4));
         lab.setAttribute("class", "section-sensor-label");
-        lab.setAttribute("fill", t >= (tMin + tMax) / 2 ? "var(--temp)" : "var(--hum)");
+        lab.setAttribute(
+          "fill",
+          t >= (tMin + tMax) / 2 ? "var(--temp)" : "var(--hum)"
+        );
         lab.textContent = `${t.toFixed(1)}° · ${Math.round(cm)}`;
         sectionSvgEl.appendChild(lab);
       }
 
       const nameLab = document.createElementNS(NS, "text");
       nameLab.setAttribute("x", String(x + w / 2));
-      nameLab.setAttribute("y", String(H - 14));
-      nameLab.setAttribute("class", "section-room-label");
-      nameLab.textContent = room.label || room.id;
+      nameLab.setAttribute("y", String(H - 18));
+      nameLab.setAttribute(
+        "class",
+        col.kind === "facade"
+          ? "section-room-label section-facade-label"
+          : "section-room-label"
+      );
+      nameLab.textContent = col.label;
       sectionSvgEl.appendChild(nameLab);
+      if (col.kind === "facade" && col.sublabel) {
+        const sub = document.createElementNS(NS, "text");
+        sub.setAttribute("x", String(x + w / 2));
+        sub.setAttribute("y", String(H - 6));
+        sub.setAttribute("class", "section-facade-sublabel");
+        sub.textContent = col.sublabel;
+        sectionSvgEl.appendChild(sub);
+      }
 
-      if (i < sectionRooms.length - 1) {
-        const nextId = sectionRooms[i + 1].id;
-        const link = edgeOpeningBetween(edges, room.id, nextId);
+      if (i < columns.length - 1) {
+        const next = columns[i + 1];
         const doorX = x + w + gap / 2;
+        let opening = "unknown";
+        let linkTitle = "";
+        if (col.kind === "room" && next.kind === "room") {
+          const link = edgeOpeningBetween(edges, col.id, next.id);
+          opening = link.opening || "unknown";
+          linkTitle =
+            `${col.id} ↔ ${next.id}: ${link.kind} ${opening}` +
+            (link.source ? ` (${link.source})` : "");
+          linkBits.push(`${col.label}↔${next.label}: ${opening}`);
+        } else {
+          // Façade ↔ room: use window state on the façade side.
+          const facadeCol = col.kind === "facade" ? col : next;
+          opening = facadeCol.windowState || "unknown";
+          linkTitle = `Window ${facadeCol.label}: ${opening}`;
+          linkBits.push(`win ${facadeCol.label}: ${opening}`);
+        }
         const door = document.createElementNS(NS, "line");
         door.setAttribute("x1", String(doorX));
         door.setAttribute("x2", String(doorX));
         door.setAttribute("y1", String(padT + plotH * 0.18));
         door.setAttribute("y2", String(padT + plotH * 0.82));
-        door.setAttribute(
-          "class",
-          `section-door ${link.opening || "unknown"}`
-        );
+        door.setAttribute("class", `section-door ${opening}`);
         const dTitle = document.createElementNS(NS, "title");
-        dTitle.textContent =
-          `${room.id} ↔ ${nextId}: ${link.kind} ${link.opening}` +
-          (link.source ? ` (${link.source})` : "");
+        dTitle.textContent = linkTitle;
         door.appendChild(dTitle);
         sectionSvgEl.appendChild(door);
-        doorBits.push(
-          `${(byId[room.id] && byId[room.id].label) || room.id}↔${
-            (byId[nextId] && byId[nextId].label) || nextId
-          }: ${link.opening}`
-        );
         x += w + gap;
       } else {
         x += w;
@@ -3965,11 +4164,12 @@
     }
 
     if (sectionMetaEl) {
+      const labels = columns.map((c) =>
+        c.kind === "facade" ? `ext ${c.label}` : c.label
+      );
       sectionMetaEl.textContent =
-        `Ceiling ${ceilingCm} cm · ${path
-          .map((id) => (byId[id] && byId[id].label) || id)
-          .join(" → ")}` +
-        (doorBits.length ? ` · doors ${doorBits.join(", ")}` : "") +
+        `Ceiling ${ceilingCm} cm · ${labels.join(" → ")}` +
+        (linkBits.length ? ` · ${linkBits.join(", ")}` : "") +
         ` · scale ${tMin.toFixed(1)}–${tMax.toFixed(1)} °C`;
     }
   }
@@ -5589,12 +5789,25 @@
 
   function renderWindowBanner(model) {
     if (!windowBannerEl) return;
+    const toneClasses = [
+      "window-banner-tone-close",
+      "window-banner-tone-open",
+      "window-banner-tone-humid",
+      "window-banner-tone-ok",
+      "window-banner-tone-idle",
+    ];
+    if (topBarEl) {
+      topBarEl.classList.remove(...toneClasses);
+    }
     if (!model || model.hidden) {
       windowBannerEl.hidden = true;
+      windowBannerEl.className = "window-banner";
       return;
     }
     windowBannerEl.hidden = false;
-    windowBannerEl.className = `window-banner window-banner-tone-${model.tone || "idle"}`;
+    windowBannerEl.className = "window-banner";
+    const tone = `window-banner-tone-${model.tone || "idle"}`;
+    if (topBarEl) topBarEl.classList.add(tone);
     if (windowBannerTitleEl) windowBannerTitleEl.textContent = model.title || "";
     if (windowBannerDetailEl) windowBannerDetailEl.textContent = model.detail || "";
   }
@@ -6153,6 +6366,67 @@
     return wrap;
   }
 
+  function labeledDeviceNameInput(device) {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "device-name-input";
+    input.maxLength = 80;
+    input.placeholder = device.ble_name || device.address || "Name";
+    input.title = "Friendly name (saved on this node)";
+    input.value = deviceLabel(device);
+    input.dataset.address = device.address;
+    input.addEventListener("click", (ev) => ev.stopPropagation());
+    input.addEventListener("mousedown", (ev) => ev.stopPropagation());
+    input.addEventListener("keydown", (ev) => {
+      ev.stopPropagation();
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        input.blur();
+      }
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        input.value = deviceLabel(device);
+        input.blur();
+      }
+    });
+    input.addEventListener("change", async (ev) => {
+      ev.stopPropagation();
+      const raw = String(input.value || "").trim();
+      // Empty clears the override and falls back to BLE / config name.
+      const value = raw === "" ? null : raw;
+      input.disabled = true;
+      try {
+        const res = await fetch(
+          `/api/devices/${encodeURIComponent(device.address)}/categories`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ label: value }),
+          }
+        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${res.status}`);
+        }
+        const updated = await res.json();
+        const idx = devices.findIndex((d) => d.address === device.address);
+        if (idx >= 0) {
+          devices[idx] = { ...devices[idx], ...updated };
+        }
+        fillDeviceList();
+        updateOverview();
+        updateCurrent();
+      } catch (err) {
+        console.error(err);
+        input.value = deviceLabel(device);
+        overviewStatus.textContent = `Name update failed: ${err.message}`;
+      } finally {
+        input.disabled = false;
+      }
+    });
+    return input;
+  }
+
   function labeledHeightCmInput(device) {
     const wrap = document.createElement("label");
     wrap.className = "overview-cat-field overview-cat-field-cm";
@@ -6254,13 +6528,16 @@
 
       const identity = document.createElement("div");
       identity.className = "overview-card-identity";
-      identity.innerHTML = `
-        <span class="overview-name">
-          <span class="device-swatch" aria-hidden="true"></span>
-          ${escapeHtml(deviceLabel(device))}
-        </span>
-        <span class="overview-meta">${escapeHtml(device.model)} · ${escapeHtml(device.address)}</span>
-      `;
+      const nameRow = document.createElement("span");
+      nameRow.className = "overview-name";
+      const swatch = document.createElement("span");
+      swatch.className = "device-swatch";
+      swatch.setAttribute("aria-hidden", "true");
+      nameRow.append(swatch, labeledDeviceNameInput(device));
+      const meta = document.createElement("span");
+      meta.className = "overview-meta";
+      meta.textContent = `${device.model || "—"} · ${device.address}`;
+      identity.append(nameRow, meta);
 
       const readings = document.createElement("div");
       readings.className = "overview-card-readings";
@@ -7158,19 +7435,32 @@
     });
   }
 
+  function syncWindowNotifyBtn() {
+    if (!windowNotifyEl) return;
+    windowNotifyEl.setAttribute("aria-pressed", windowNotify ? "true" : "false");
+    windowNotifyEl.title = windowNotify
+      ? "Window alerts on — click to disable"
+      : "Window alerts off — click to enable";
+    windowNotifyEl.setAttribute(
+      "aria-label",
+      windowNotify ? "Disable window alerts" : "Enable window alerts"
+    );
+  }
+
   if (windowNotifyEl) {
-    windowNotifyEl.checked = windowNotify;
-    windowNotifyEl.addEventListener("change", async () => {
-      if (windowNotifyEl.checked) {
+    syncWindowNotifyBtn();
+    windowNotifyEl.addEventListener("click", async () => {
+      if (!windowNotify) {
         const perm = await ensureNotifyPermission();
         if (perm === "granted") {
           windowNotify = true;
           localStorage.setItem(WINDOW_NOTIFY_KEY, "1");
+          syncWindowNotifyBtn();
           evaluateWindowNotifications(null).catch((err) => console.warn(err));
         } else {
           windowNotify = false;
-          windowNotifyEl.checked = false;
           localStorage.setItem(WINDOW_NOTIFY_KEY, "0");
+          syncWindowNotifyBtn();
           let hint = "Notifications blocked by the browser.";
           if (perm === "unsupported") hint = "Notifications not supported.";
           if (perm === "insecure") {
@@ -7182,6 +7472,7 @@
       } else {
         windowNotify = false;
         localStorage.setItem(WINDOW_NOTIFY_KEY, "0");
+        syncWindowNotifyBtn();
       }
     });
   }
@@ -7473,7 +7764,7 @@
 
   coverageRangeButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
-      coverageHours = btn.dataset.covHours || "2160";
+      coverageHours = btn.dataset.covHours || "1";
       persistCoverageState();
       syncCoverageRangeButtons();
       loadCoverage().catch((err) => console.warn(err));
@@ -7510,7 +7801,7 @@
   }
 
   const savedCovHours = localStorage.getItem("govee-charts.coverageHours");
-  if (savedCovHours && ["336", "720", "2160", "8760", "all"].includes(savedCovHours)) {
+  if (savedCovHours && COVERAGE_RANGE_HOURS.has(savedCovHours)) {
     coverageHours = savedCovHours;
   }
   syncCoverageRangeButtons();
