@@ -44,6 +44,7 @@ make install
 make discover   # scan 30s, list detected Govee devices
 make run        # collector + web UI
 make serve      # web UI only (no BLE scanner)
+make workers    # workers only (BLE/backfill/HA/federation)
 ```
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080) (or `https://…` if SSL is enabled).
@@ -75,20 +76,29 @@ After `make install` and editing `config.toml`:
 ### Linux (systemd)
 
 ```bash
-# BLE collector + web UI (starts on boot)
+# Install split services (start on boot)
 sudo make systemd-install
 
-# Hub only (no local BLE scan)
-sudo ./scripts/install-systemd.sh --hub install
+# Restart controls
+make restart-ui
+make restart-workers
+make restart-all
 ```
 
-Logs: `journalctl -u govee-charts -f` and `govee-charts.log` in the project directory.
+Services:
+- `govee-charts-ui` runs FastAPI/UI only
+- `govee-charts-workers` runs BLE scanner, backfill, HA pollers, federation publish
 
-Remove: `sudo make systemd-uninstall`
+`restart-workers` keeps the UI available while workers restart.
 
-The unit uses `Restart=always` so the UI **Restart** button can stop the process
-and systemd brings it back. Re-install the unit after pulling this change:
-`sudo make systemd-install` (or copy the updated unit and `daemon-reload`).
+Logs: `journalctl -u govee-charts-ui -u govee-charts-workers -f` and
+`govee-charts.log` in the project directory.
+
+Remove: `sudo make systemd-uninstall` (or target only one service with
+`sudo ./scripts/install-systemd.sh --target ui uninstall` / `--target workers uninstall`)
+
+Both units use `Restart=always`. Re-install units after pulling this change:
+`sudo make systemd-install` (or copy updated units and `daemon-reload`).
 
 On Raspberry Pi, ensure the service user is in the `bluetooth` group:
 
@@ -306,7 +316,9 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `POST /api/backfill/import/preview` — parse Govee Home CSV/ZIP and compare to existing readings (form: `address`, `file`, optional `overwrite`); includes would_insert / would_overwrite + sample diffs
 - `POST /api/backfill/import` — confirm ingest (same form fields); with `overwrite=true`, updates conflicting minutes
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
-- `GET /api/health` — health + `node_id`
+- `POST /api/restart?target=ui|workers` — restart UI or workers (when available)
+- `POST /api/git/pull` — `git pull --ff-only` from the UI (does not restart services)
+- `GET /api/health` — health + `node_id` + workers heartbeat availability
 
 ## Notes
 

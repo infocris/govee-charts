@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -13,9 +14,10 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.types import Scope
 
 from govee_charts.address import register_mac, resolve_device_address
 from govee_charts.apartment import (
@@ -43,6 +45,44 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
 logger = logging.getLogger(__name__)
 
+# HTML must never stick in the browser; static assets are versioned via ?v=.
+_HTML_CACHE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
+def static_asset_version() -> str:
+    """Version token from static asset mtimes (changes after deploy / edit)."""
+    stamp = 0
+    for name in ("app.js", "style.css", "index.html"):
+        path = STATIC / name
+        try:
+            stamp = max(stamp, int(path.stat().st_mtime))
+        except OSError:
+            continue
+    return str(stamp or int(time.time()))
+
+
+def index_html_response() -> HTMLResponse:
+    """Serve index.html with no-cache headers and cache-busted asset URLs."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    ver = static_asset_version()
+    html = html.replace('href="/static/style.css"', f'href="/static/style.css?v={ver}"')
+    html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={ver}"')
+    return HTMLResponse(content=html, headers=dict(_HTML_CACHE_HEADERS))
+
+
+class VersionedStaticFiles(StaticFiles):
+    """Static files with short cache; clients bust via ?v= from index.html."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        # Versioned URLs (?v=mtime) make short caching safe across restarts.
+        response.headers["Cache-Control"] = "public, max-age=60, must-revalidate"
+        return response
+
 
 def peer_browse_url(peer: str, ssl_port: int | None) -> str:
     """HTTPS UI URL for a federation peer (same host, local ssl_port convention)."""
@@ -54,6 +94,80 @@ def peer_browse_url(peer: str, ssl_port: int | None) -> str:
     if not host:
         return peer
     return f"https://{host}:{int(ssl_port)}"
+
+
+def _git_output(cmd: list[str]) -> tuple[int, str]:
+    """Run a git command in the project root; return (returncode, combined output)."""
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except FileNotFoundError:
+        return 127, "git not found on this host"
+    except subprocess.TimeoutExpired:
+        return 124, "git command timed out"
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return int(proc.returncode), out
+
+
+def run_git_pull() -> dict[str, Any]:
+    """Fast-forward pull from the configured remote (safe for local edits)."""
+    if not (ROOT / ".git").is_dir():
+        return {
+            "ok": False,
+            "message": "Not a git repository",
+            "output": "",
+            "before": None,
+            "after": None,
+            "changed": False,
+        }
+
+    rc, before = _git_output(["git", "rev-parse", "--short", "HEAD"])
+    if rc != 0:
+        return {
+            "ok": False,
+            "message": "Could not read HEAD",
+            "output": before,
+            "before": None,
+            "after": None,
+            "changed": False,
+        }
+    before = before.strip() or None
+
+    rc, output = _git_output(["git", "pull", "--ff-only"])
+    rc2, after = _git_output(["git", "rev-parse", "--short", "HEAD"])
+    after = (after.strip() or None) if rc2 == 0 else before
+    changed = bool(before and after and before != after)
+
+    if rc != 0:
+        detail = output or "git pull --ff-only failed"
+        return {
+            "ok": False,
+            "message": detail.splitlines()[-1][:240],
+            "output": output,
+            "before": before,
+            "after": after,
+            "changed": False,
+        }
+
+    if changed:
+        message = f"Updated {before} → {after}. Restart UI/workers to load code changes."
+    else:
+        message = f"Already up to date ({after or before})."
+
+    return {
+        "ok": True,
+        "message": message,
+        "output": output,
+        "before": before,
+        "after": after,
+        "changed": changed,
+    }
 
 
 async def probe_peer_health(peer: str, *, ssl_port: int | None) -> dict[str, Any]:
@@ -293,7 +407,8 @@ def create_app(
     peers: list[str] | None = None,
     suffix_map: dict[str, str] | None = None,
     weather: WeatherService | None = None,
-    on_restart: Callable[[], None] | None = None,
+    on_restart_ui: Callable[[], None] | None = None,
+    on_restart_workers: Callable[[], tuple[bool, str]] | None = None,
     backfill: BackfillService | None = None,
     ssl_port: int | None = None,
     hvac: HvacConfig | None = None,
@@ -306,22 +421,42 @@ def create_app(
     app.state.node_id = node_id
     app.state.peers = [p.rstrip("/") for p in (peers or []) if p.strip()]
     app.state.weather = weather
-    app.state.on_restart = on_restart
+    app.state.on_restart_ui = on_restart_ui
+    app.state.on_restart_workers = on_restart_workers
     app.state.backfill = backfill
-    app.state.restart_scheduled = False
+    app.state.restart_ui_scheduled = False
+    app.state.git_pull_lock = asyncio.Lock()
     app.state.ssl_port = int(ssl_port) if ssl_port else None
     app.state.hvac = hvac or HvacConfig()
 
     @app.get("/")
-    async def index() -> FileResponse:
-        return FileResponse(STATIC / "index.html")
+    async def index() -> HTMLResponse:
+        return index_html_response()
+
+    @app.get("/overview")
+    @app.get("/compare")
+    @app.get("/facades")
+    @app.get("/map")
+    @app.get("/network")
+    @app.get("/coverage")
+    @app.get("/backfill")
+    async def index_views() -> HTMLResponse:
+        """Client-side routes for direct URL navigation."""
+        return index_html_response()
 
     @app.get("/api/health")
     async def api_health() -> dict[str, Any]:
+        hb = await db.get_runtime_heartbeat("workers")
+        now = time.time()
+        age = (now - hb) if hb is not None else None
         return {
             "ok": True,
             "node_id": app.state.node_id,
             "systemd": bool(os.environ.get("INVOCATION_ID")),
+            "asset_version": static_asset_version(),
+            "workers_last_seen": hb,
+            "workers_age_s": round(age, 2) if age is not None else None,
+            "workers_available": bool(age is not None and age <= 15.0),
         }
 
     @app.get("/api/backfill")
@@ -814,35 +949,73 @@ def create_app(
             "range": summary["range"],
         }
 
+    @app.post("/api/git/pull")
+    async def api_git_pull() -> dict[str, Any]:
+        """Pull latest commits with --ff-only (does not restart services)."""
+        lock: asyncio.Lock = app.state.git_pull_lock
+        if lock.locked():
+            raise HTTPException(status_code=409, detail="Git pull already in progress")
+        async with lock:
+            logger.warning("Git pull requested from UI")
+            result = await asyncio.to_thread(run_git_pull)
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=503,
+                detail=str(result.get("message") or "git pull failed"),
+            )
+        return result
+
     @app.post("/api/restart")
-    async def api_restart() -> dict[str, Any]:
-        if app.state.restart_scheduled:
+    async def api_restart(
+        target: str = Query(default="ui", pattern="^(ui|workers)$")
+    ) -> dict[str, Any]:
+        under_systemd = bool(os.environ.get("INVOCATION_ID"))
+        if target == "workers":
+            callback_workers = app.state.on_restart_workers
+            if callback_workers is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Workers restart not available in this runtime",
+                )
+            ok, message = callback_workers()
+            if not ok:
+                raise HTTPException(status_code=503, detail=message)
             return {
                 "ok": True,
+                "target": "workers",
                 "scheduled": True,
-                "systemd": bool(os.environ.get("INVOCATION_ID")),
-                "message": "Restart already scheduled",
+                "systemd": under_systemd,
+                "message": message,
             }
 
-        callback = app.state.on_restart
-        if callback is None:
-            raise HTTPException(status_code=503, detail="Restart not available")
+        if app.state.restart_ui_scheduled:
+            return {
+                "ok": True,
+                "target": "ui",
+                "scheduled": True,
+                "systemd": under_systemd,
+                "message": "UI restart already scheduled",
+            }
 
-        app.state.restart_scheduled = True
-        under_systemd = bool(os.environ.get("INVOCATION_ID"))
+        callback = app.state.on_restart_ui
+        if callback is None:
+            raise HTTPException(status_code=503, detail="UI restart not available")
+
+        app.state.restart_ui_scheduled = True
 
         async def _delayed() -> None:
-            await asyncio.sleep(0.6)
-            logger.warning("Restart requested from UI — stopping process")
+            await asyncio.sleep(0.15)
+            logger.warning("UI restart requested from UI — stopping process")
             callback()
 
         asyncio.create_task(_delayed())
         return {
             "ok": True,
+            "target": "ui",
             "scheduled": True,
             "systemd": under_systemd,
             "message": (
-                "Restarting via systemd…"
+                "Restarting UI via systemd…"
                 if under_systemd
                 else "Process exiting — restart manually if not under systemd"
             ),
@@ -1876,5 +2049,5 @@ def create_app(
             "node_id": app.state.node_id,
         }
 
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    app.mount("/static", VersionedStaticFiles(directory=STATIC), name="static")
     return app

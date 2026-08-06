@@ -43,17 +43,22 @@
     <p class="tagline">Temperature and humidity — local BLE scan</p>
     <p class="node-line" id="node-line" hidden></p>
     <nav class="peer-links" id="peer-links" aria-label="Federation peers" hidden></nav>
-    <nav class="views" role="tablist" aria-label="Views">
-      <button type="button" role="tab" data-view="overview" class="active" aria-selected="true">Overview</button>
-      <button type="button" role="tab" data-view="compare" aria-selected="false">Compare</button>
-      <button type="button" role="tab" data-view="facades" aria-selected="false">Facades</button>
-      <button type="button" role="tab" data-view="network" aria-selected="false">Map</button>
-      <button type="button" role="tab" data-view="coverage" aria-selected="false">Coverage</button>
-      <button type="button" role="tab" data-view="backfill" aria-selected="false">Backfill</button>
-      <button type="button" id="restart-btn" class="restart-btn" title="Restart service">Restart</button>
-    </nav>
-    <p class="restart-status" id="restart-status" hidden aria-live="polite"></p>
   </header>
+  <!-- Outside .top so sticky can span the whole page below the fixed alert bar -->
+  <nav class="views" aria-label="Views">
+    <a href="/overview" data-view="overview" class="active" aria-current="page">Overview</a>
+    <a href="/compare" data-view="compare">Compare</a>
+    <a href="/facades" data-view="facades">Facades</a>
+    <a href="/map" data-view="network">Map</a>
+    <a href="/coverage" data-view="coverage">Coverage</a>
+    <a href="/backfill" data-view="backfill">Backfill</a>
+    <span class="nav-actions">
+      <button type="button" id="git-pull-btn" class="restart-btn" title="git pull --ff-only">Git pull</button>
+      <button type="button" id="restart-ui-btn" class="restart-btn" title="Restart UI service">Restart UI</button>
+      <button type="button" id="restart-workers-btn" class="restart-btn" title="Restart workers service">Restart workers</button>
+    </span>
+  </nav>
+  <p class="restart-status" id="restart-status" hidden aria-live="polite"></p>
 
   <main>
     <section id="view-overview" class="view" role="tabpanel" aria-label="Overview">

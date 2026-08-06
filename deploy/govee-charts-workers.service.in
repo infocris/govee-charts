@@ -1,0 +1,22 @@
+[Unit]
+Description=Govee Charts workers (BLE/backfill/HA/federation)
+Documentation=https://github.com/infocris/govee-charts
+After=network-online.target bluetooth.target
+Wants=network-online.target bluetooth.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ROOT@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@ROOT@/venv/bin/python -m govee_charts.main --mode workers
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+
+# BlueZ via D-Bus (user must be in the bluetooth group on Debian / Raspberry Pi OS)
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

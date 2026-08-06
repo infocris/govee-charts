@@ -97,8 +97,12 @@
   const rangeApplyBtn = document.getElementById("range-apply");
   const rangeResetZoomBtn = document.getElementById("range-reset-zoom");
   const viewButtons = [...document.querySelectorAll(".views [data-view]")];
+  const viewsNavEl = document.querySelector(".views");
+  const topHeaderEl = document.querySelector(".top");
   const sortButtons = [...document.querySelectorAll(".sort-btn")];
-  const restartBtn = document.getElementById("restart-btn");
+  const gitPullBtn = document.getElementById("git-pull-btn");
+  const restartUiBtn = document.getElementById("restart-ui-btn");
+  const restartWorkersBtn = document.getElementById("restart-workers-btn");
   const restartStatusEl = document.getElementById("restart-status");
   const facadeBody = document.getElementById("facade-body");
   const facadeMetaEl = document.getElementById("facade-meta");
@@ -241,11 +245,52 @@
   /** @type {{zone:string[], height:string[], room:string[]}} empty array = all */
   let catFilters = loadCatFilters();
   let sortState = loadSortState();
-  let currentView = ["compare", "facades", "network", "coverage", "backfill"].includes(
-    localStorage.getItem(VIEW_KEY)
-  )
-    ? localStorage.getItem(VIEW_KEY)
-    : "overview";
+  const VALID_VIEWS = new Set([
+    "overview",
+    "compare",
+    "facades",
+    "network",
+    "coverage",
+    "backfill",
+  ]);
+  const VIEW_PATHS = {
+    overview: "/overview",
+    compare: "/compare",
+    facades: "/facades",
+    network: "/map",
+    coverage: "/coverage",
+    backfill: "/backfill",
+  };
+
+  function normalizeView(raw) {
+    const v = String(raw || "").trim().toLowerCase();
+    return VALID_VIEWS.has(v) ? v : "overview";
+  }
+
+  function pathToView(pathname) {
+    const p = String(pathname || "/").replace(/\/+$/, "") || "/";
+    if (p === "/" || p === "/index.html") return null;
+    if (p === "/overview") return "overview";
+    if (p === "/compare") return "compare";
+    if (p === "/facades") return "facades";
+    if (p === "/map" || p === "/network") return "network";
+    if (p === "/coverage") return "coverage";
+    if (p === "/backfill") return "backfill";
+    return null;
+  }
+
+  function viewToPath(view) {
+    return VIEW_PATHS[normalizeView(view)] || "/overview";
+  }
+
+  function detectInitialView() {
+    const fromPath = pathToView(window.location.pathname);
+    if (fromPath) return fromPath;
+    const saved = normalizeView(localStorage.getItem(VIEW_KEY));
+    return saved || "overview";
+  }
+
+  let currentView = detectInitialView();
   let showForecast = localStorage.getItem(FORECAST_KEY) !== "0";
   let projectionScenario = loadProjectionScenario();
   let showWindowBands = localStorage.getItem(WINDOW_BANDS_KEY) !== "0";
@@ -3305,16 +3350,42 @@
     return select;
   }
 
-  function setView(view) {
-    if (
-      !["overview", "compare", "facades", "network", "coverage", "backfill"].includes(
-        view
-      )
-    ) {
-      view = "overview";
+  function syncViewUrl(view, mode = "push") {
+    const nextPath = viewToPath(view);
+    const nowPath = window.location.pathname.replace(/\/+$/, "") || "/";
+    const normNext = nextPath.replace(/\/+$/, "") || "/";
+    if (nowPath === normNext) return;
+    const nextUrl = `${nextPath}${window.location.search || ""}${window.location.hash || ""}`;
+    if (mode === "replace") {
+      window.history.replaceState({ view }, "", nextUrl);
+    } else {
+      window.history.pushState({ view }, "", nextUrl);
     }
+  }
+
+  function refreshViewsStickyState() {
+    if (!viewsNavEl || !topBarEl) return;
+    const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    // Fixed alert bar (.top-bar) — sticky nav must stop exactly below it.
+    const topBarH = Math.max(0, Math.ceil(topBarEl.getBoundingClientRect().height));
+    document.body.style.setProperty("--topbar-offset", `${topBarH}px`);
+    const shouldStick = vh >= 760;
+    document.body.classList.toggle("sticky-views-enabled", shouldStick);
+  }
+
+  if (topBarEl && typeof ResizeObserver !== "undefined") {
+    const topBarResizeObs = new ResizeObserver(() => refreshViewsStickyState());
+    topBarResizeObs.observe(topBarEl);
+  }
+
+  function setView(view, opts = {}) {
+    const mode = opts.url || "none";
+    view = normalizeView(view);
     currentView = view;
     localStorage.setItem(VIEW_KEY, view);
+    if (mode === "push" || mode === "replace") {
+      syncViewUrl(view, mode);
+    }
     if (viewOverview) viewOverview.hidden = view !== "overview";
     if (viewCompare) viewCompare.hidden = view !== "compare";
     if (viewFacades) viewFacades.hidden = view !== "facades";
@@ -3324,7 +3395,8 @@
     viewButtons.forEach((btn) => {
       const active = btn.dataset.view === view;
       btn.classList.toggle("active", active);
-      btn.setAttribute("aria-selected", active ? "true" : "false");
+      if (active) btn.setAttribute("aria-current", "page");
+      else btn.removeAttribute("aria-current");
     });
     if (view === "compare" && !historyLoaded) {
       loadHistory().catch((err) => {
@@ -6198,6 +6270,7 @@
     if (!model || model.hidden) {
       windowBannerEl.hidden = true;
       windowBannerEl.className = "window-banner";
+      requestAnimationFrame(refreshViewsStickyState);
       return;
     }
     windowBannerEl.hidden = false;
@@ -6206,6 +6279,8 @@
     if (topBarEl) topBarEl.classList.add(tone);
     if (windowBannerTitleEl) windowBannerTitleEl.textContent = model.title || "";
     if (windowBannerDetailEl) windowBannerDetailEl.textContent = model.detail || "";
+    // Banner height changes with content — refresh sticky offset under fixed top-bar.
+    requestAnimationFrame(refreshViewsStickyState);
   }
 
   async function updateWindowBanner(forecast) {
@@ -7591,7 +7666,15 @@
   }
 
   viewButtons.forEach((btn) => {
-    btn.addEventListener("click", () => setView(btn.dataset.view));
+    btn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      setView(btn.dataset.view, { url: "push" });
+    });
+  });
+
+  window.addEventListener("popstate", () => {
+    const fromPath = pathToView(window.location.pathname) || "overview";
+    setView(fromPath, { url: "none" });
   });
 
   if (networkZoomInBtn) {
@@ -7916,33 +7999,97 @@
     return false;
   }
 
-  if (restartBtn) {
-    restartBtn.addEventListener("click", async () => {
+  function hardReload() {
+    // Bypass cached HTML/assets after UI restart (server also version-busts static URLs).
+    const url = new URL(window.location.href);
+    url.searchParams.set("_cb", String(Date.now()));
+    window.location.replace(url.pathname + url.search + url.hash);
+  }
+
+  async function waitForWorkers(timeoutMs = 45000) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        const res = await fetch("/api/health", { cache: "no-store" });
+        if (!res.ok) continue;
+        const data = await res.json().catch(() => ({}));
+        if (data.workers_available) return true;
+      } catch {
+        // still unavailable
+      }
+    }
+    return false;
+  }
+
+  if (gitPullBtn) {
+    gitPullBtn.addEventListener("click", async () => {
       if (
         !window.confirm(
-          "Restart Govee Charts now? The page will reload when the service is back."
+          "Pull latest commits (git pull --ff-only)? Restart UI/workers afterward if code changed."
         )
       ) {
         return;
       }
-      restartBtn.disabled = true;
+      gitPullBtn.disabled = true;
       if (restartStatusEl) {
         restartStatusEl.hidden = false;
-        restartStatusEl.textContent = "Restarting…";
+        restartStatusEl.textContent = "Pulling…";
       }
       try {
-        const res = await fetch("/api/restart", { method: "POST" });
+        const res = await fetch("/api/git/pull", { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const detail =
+            typeof data.detail === "string"
+              ? data.detail
+              : data.message || `HTTP ${res.status}`;
+          throw new Error(detail);
+        }
+        if (restartStatusEl) {
+          restartStatusEl.textContent = data.message || "Pull complete.";
+        }
+        if (data.changed) {
+          // Static assets may already be newer; hard-reload HTML/JS.
+          hardReload();
+        }
+      } catch (err) {
+        if (restartStatusEl) {
+          restartStatusEl.textContent = `Git pull failed: ${err.message}`;
+        }
+      } finally {
+        gitPullBtn.disabled = false;
+      }
+    });
+  }
+
+  if (restartUiBtn) {
+    restartUiBtn.addEventListener("click", async () => {
+      if (
+        !window.confirm(
+          "Restart UI now? The page will reload when the service is back."
+        )
+      ) {
+        return;
+      }
+      restartUiBtn.disabled = true;
+      if (restartStatusEl) {
+        restartStatusEl.hidden = false;
+        restartStatusEl.textContent = "UI restarting…";
+      }
+      try {
+        const res = await fetch("/api/restart?target=ui", { method: "POST" });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           throw new Error(data.detail || `HTTP ${res.status}`);
         }
         if (restartStatusEl) {
-          restartStatusEl.textContent = data.message || "Restarting…";
+          restartStatusEl.textContent = data.message || "UI restarting…";
         }
         const ok = await waitForHealth();
         if (ok) {
           if (restartStatusEl) restartStatusEl.textContent = "Back online — reloading…";
-          window.location.reload();
+          hardReload();
           return;
         }
         if (restartStatusEl) {
@@ -7956,14 +8103,53 @@
         }
         const ok = await waitForHealth();
         if (ok) {
-          window.location.reload();
+          hardReload();
           return;
         }
         if (restartStatusEl) {
           restartStatusEl.textContent = `Restart failed: ${err.message}`;
         }
       } finally {
-        restartBtn.disabled = false;
+        restartUiBtn.disabled = false;
+      }
+    });
+  }
+
+  if (restartWorkersBtn) {
+    restartWorkersBtn.addEventListener("click", async () => {
+      if (
+        !window.confirm(
+          "Restart workers now? The UI should remain available."
+        )
+      ) {
+        return;
+      }
+      restartWorkersBtn.disabled = true;
+      if (restartStatusEl) {
+        restartStatusEl.hidden = false;
+        restartStatusEl.textContent = "Workers restarting…";
+      }
+      try {
+        const res = await fetch("/api/restart?target=workers", { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        if (restartStatusEl) {
+          restartStatusEl.textContent = data.message || "Workers restarting…";
+        }
+        const ok = await waitForWorkers(30000);
+        if (restartStatusEl) {
+          restartStatusEl.textContent = ok
+            ? "Workers back online."
+            : "Workers restart requested. Waiting for heartbeat…";
+        }
+      } catch (err) {
+        if (restartStatusEl) {
+          restartStatusEl.textContent = `Workers restart failed: ${err.message}`;
+        }
+      } finally {
+        restartWorkersBtn.disabled = false;
       }
     });
   }
@@ -8244,7 +8430,19 @@
 
   loadPersistedRange();
   syncRangeControls();
-  setView(currentView);
+  refreshViewsStickyState();
+  window.addEventListener("resize", refreshViewsStickyState);
+  // Drop one-shot cache-bust query left by hardReload() after UI restart.
+  if (new URL(window.location.href).searchParams.has("_cb")) {
+    const clean = new URL(window.location.href);
+    clean.searchParams.delete("_cb");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      clean.pathname + clean.search + clean.hash
+    );
+  }
+  setView(currentView, { url: "replace" });
   refresh();
   setInterval(refresh, 30000);
 })();

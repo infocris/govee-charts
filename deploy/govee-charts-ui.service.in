@@ -1,0 +1,20 @@
+[Unit]
+Description=Govee Charts web UI and API
+Documentation=https://github.com/infocris/govee-charts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ROOT@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@ROOT@/venv/bin/python -m govee_charts.main --mode ui
+Restart=always
+RestartSec=100ms
+TimeoutStopSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

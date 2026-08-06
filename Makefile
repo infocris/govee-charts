@@ -8,10 +8,10 @@ UNAME_S     := $(shell uname -s)
 AGENT_CHAT_ID_FILE := .cursor/agent-chat-id
 AGENT_CHAT_ID ?= $(shell test -f $(AGENT_CHAT_ID_FILE) && tr -d '[:space:]' < $(AGENT_CHAT_ID_FILE))
 
-.PHONY: help install venv deps config run serve discover ssl agent agent-ls agent-new \
+.PHONY: help install venv deps config run serve workers discover ssl agent agent-ls agent-new \
 	systemd-install systemd-uninstall systemd-restart systemd-status \
 	launchd-install launchd-uninstall launchd-restart launchd-status \
-	restart service-status
+	restart restart-ui restart-workers restart-all service-status
 
 help:
 	@echo "Targets:"
@@ -19,6 +19,7 @@ help:
 	@echo "  make ssl                Generate self-signed TLS cert (data/ssl/)"
 	@echo "  make run                Run BLE collector + web UI"
 	@echo "  make serve              Run web UI only (no BLE scanner)"
+	@echo "  make workers            Run workers only (no web UI)"
 	@echo "  make discover           Scan BLE Govee devices for 30s then exit"
 	@echo "  make agent              Resume the pinned Cursor agent for this project"
 	@echo "  make agent-ls           List Cursor agent sessions"
@@ -27,7 +28,10 @@ help:
 	@echo "  make systemd-uninstall  Remove systemd service"
 	@echo "  make launchd-install    Install LaunchAgent (macOS, starts at login)"
 	@echo "  make launchd-uninstall  Remove LaunchAgent"
-	@echo "  make restart            Restart background service (systemd or launchd)"
+	@echo "  make restart-ui         Restart UI service only"
+	@echo "  make restart-workers    Restart workers service only"
+	@echo "  make restart-all        Restart both UI and workers"
+	@echo "  make restart            Default restart (workers on Linux; launchd on macOS)"
 	@echo "  make service-status     Show background service status"
 
 install: venv deps config
@@ -46,10 +50,13 @@ config:
 	fi
 
 run: deps config
-	$(PY) $(MODULE)
+	$(PY) $(MODULE) --mode all
 
 serve: deps config
-	$(PY) $(MODULE) --no-scanner
+	$(PY) $(MODULE) --mode ui
+
+workers: deps config
+	$(PY) $(MODULE) --mode workers
 
 discover: deps config
 	$(PY) $(MODULE) --discover
@@ -111,7 +118,34 @@ systemd-uninstall:
 
 systemd-restart:
 	chmod +x scripts/install-systemd.sh
-	./scripts/install-systemd.sh restart
+	./scripts/install-systemd.sh restart-all
+
+restart-ui:
+ifeq ($(UNAME_S),Darwin)
+	chmod +x scripts/install-launchd.sh
+	./scripts/install-launchd.sh restart
+else
+	chmod +x scripts/install-systemd.sh
+	./scripts/install-systemd.sh restart-ui
+endif
+
+restart-workers:
+ifeq ($(UNAME_S),Darwin)
+	chmod +x scripts/install-launchd.sh
+	./scripts/install-launchd.sh restart
+else
+	chmod +x scripts/install-systemd.sh
+	./scripts/install-systemd.sh restart-workers
+endif
+
+restart-all:
+ifeq ($(UNAME_S),Darwin)
+	chmod +x scripts/install-launchd.sh
+	./scripts/install-launchd.sh restart
+else
+	chmod +x scripts/install-systemd.sh
+	./scripts/install-systemd.sh restart-all
+endif
 
 systemd-status:
 	./scripts/install-systemd.sh status
@@ -136,6 +170,6 @@ ifeq ($(UNAME_S),Darwin)
 restart: launchd-restart
 service-status: launchd-status
 else
-restart: systemd-restart
+restart: restart-workers
 service-status: systemd-status
 endif

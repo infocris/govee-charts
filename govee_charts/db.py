@@ -142,6 +142,11 @@ class Database:
                 enabled INTEGER NOT NULL DEFAULT 0,
                 gatt_enabled INTEGER NOT NULL DEFAULT 1
             );
+
+            CREATE TABLE IF NOT EXISTS runtime_state (
+                component TEXT PRIMARY KEY,
+                heartbeat_ts REAL NOT NULL
+            );
             """
         )
         await self._migrate()
@@ -178,21 +183,29 @@ class Database:
                 "ALTER TABLE devices ADD COLUMN label TEXT"
             )
 
-        # Deduplicate before creating unique index (keep lowest id)
-        await self.db.execute(
-            """
-            DELETE FROM readings
-            WHERE id NOT IN (
-                SELECT MIN(id) FROM readings GROUP BY address, ts
+        # One-shot: only dedupe when the unique index is not present yet.
+        # Re-running this DELETE on a large readings table makes every startup slow.
+        index_rows = await (
+            await self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' "
+                "AND name='idx_readings_address_ts_unique'"
             )
-            """
-        )
-        await self.db.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_readings_address_ts_unique
-                ON readings(address, ts)
-            """
-        )
+        ).fetchall()
+        if not index_rows:
+            await self.db.execute(
+                """
+                DELETE FROM readings
+                WHERE id NOT IN (
+                    SELECT MIN(id) FROM readings GROUP BY address, ts
+                )
+                """
+            )
+            await self.db.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_readings_address_ts_unique
+                    ON readings(address, ts)
+                """
+            )
 
         state_cols = {
             row[1]
@@ -286,6 +299,29 @@ class Database:
         if self._db is not None:
             await self._db.close()
             self._db = None
+
+    async def touch_runtime_heartbeat(self, component: str) -> None:
+        """Upsert the latest heartbeat timestamp for a runtime component."""
+        ts = time.time()
+        await self.db.execute(
+            """
+            INSERT INTO runtime_state (component, heartbeat_ts)
+            VALUES (?, ?)
+            ON CONFLICT(component) DO UPDATE SET
+                heartbeat_ts = excluded.heartbeat_ts
+            """,
+            (str(component).strip().lower(), ts),
+        )
+        await self.db.commit()
+
+    async def get_runtime_heartbeat(self, component: str) -> float | None:
+        """Return last heartbeat timestamp for a runtime component."""
+        cursor = await self.db.execute(
+            "SELECT heartbeat_ts FROM runtime_state WHERE component = ?",
+            (str(component).strip().lower(),),
+        )
+        row = await cursor.fetchone()
+        return float(row[0]) if row else None
 
     @property
     def db(self) -> aiosqlite.Connection:
@@ -513,7 +549,7 @@ class Database:
         """Infer categories for devices that still have all category fields empty."""
         from govee_charts.categories import infer_from_label
 
-        devices = await self.list_devices()
+        devices = await self.list_devices(include_stats=False)
         updated = 0
         for device in devices:
             if device.get("zone") or device.get("height") or device.get("room"):

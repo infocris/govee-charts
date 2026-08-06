@@ -128,7 +128,8 @@ body {
 }
 
 .top {
-  padding: 3.85rem 1.5rem 1rem;
+  /* Top padding is synced in JS from .top-bar height (fixed alert banner). */
+  padding: calc(var(--topbar-offset, 2.85rem) + 0.5rem) 1.5rem 1rem;
   max-width: 1100px;
   margin: 0 auto;
 }
@@ -183,9 +184,22 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
-  margin-top: 1.25rem;
+  max-width: 1100px;
+  margin: 1.25rem auto 0;
+  padding: 0 1.5rem;
+  box-sizing: border-box;
 }
 
+.restart-status {
+  max-width: 1100px;
+  margin: 0.55rem auto 0;
+  padding: 0 1.5rem;
+  box-sizing: border-box;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.views a,
 .views button {
   background: transparent;
   color: var(--muted);
@@ -193,22 +207,46 @@ body {
   border-radius: 6px;
   padding: 0.5rem 0.95rem;
   font: inherit;
+  text-decoration: none;
+  line-height: 1.2;
   cursor: pointer;
 }
 
+.views a:hover,
 .views button:hover {
   color: var(--ink);
   border-color: var(--muted);
 }
 
+.views a.active,
 .views button.active {
   color: var(--bg);
   background: var(--accent);
   border-color: var(--accent);
 }
 
-.restart-btn {
+body.sticky-views-enabled .views {
+  position: sticky;
+  /* Must sit below the fixed .top-bar; offset is measured in JS. */
+  top: var(--topbar-offset, 2.85rem);
+  z-index: 40;
+  margin-top: 0.75rem;
+  padding: 0.45rem 1.5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.nav-actions {
   margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.restart-btn {
   color: var(--muted) !important;
   border-color: var(--line) !important;
   background: transparent !important;
@@ -253,12 +291,6 @@ body {
 .restart-btn:disabled {
   opacity: 0.55;
   cursor: wait;
-}
-
-.restart-status {
-  margin: 0.55rem 0 0;
-  color: var(--muted);
-  font-size: 0.9rem;
 }
 
 main {

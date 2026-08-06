@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import logging
 import socket
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -206,22 +207,42 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Start web UI only (disable local BLE scanning)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("all", "ui", "workers"),
+        default="all",
+        help="Runtime mode: all (default), ui only, or workers only",
+    )
     return parser.parse_args()
 
 
-async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> None:
+async def _init_runtime_db(
+    cfg: dict[str, Any],
+    *,
+    seed_metadata: bool = True,
+) -> tuple[Database, dict[str, str]]:
     db = Database(resolve_db_path(cfg))
     await db.connect()
-    seeded = await db.seed_categories_from_names()
-    if seeded:
-        logging.info("Inferred categories for %d device(s) from labels", seeded)
-    door_meta = await db.backfill_door_sensors()
-    if door_meta:
-        logging.info("Created metadata for %d door sensor(s)", door_meta)
+    if seed_metadata:
+        seeded = await db.seed_categories_from_names()
+        if seeded:
+            logging.info("Inferred categories for %d device(s) from labels", seeded)
+        door_meta = await db.backfill_door_sensors()
+        if door_meta:
+            logging.info("Created metadata for %d door sensor(s)", door_meta)
 
     suffix_map = build_suffix_map(cfg["labels"])
     suffix_map.update(await db.suffix_map_from_devices())
+    return db, suffix_map
 
+
+async def _start_workers(
+    cfg: dict[str, Any],
+    db: Database,
+    suffix_map: dict[str, str],
+    *,
+    enable_scanner: bool = True,
+) -> dict[str, Any]:
     fed = cfg["federation"]
     publisher = PeerPublisher(
         fed["peers"],
@@ -229,13 +250,15 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         token=fed["token"] or None,
     )
     await publisher.start()
-
     stop_event = asyncio.Event()
+
     scan_task: asyncio.Task[None] | None = None
     door_task: asyncio.Task[None] | None = None
     door_ha_task: asyncio.Task[None] | None = None
     hvac_task: asyncio.Task[None] | None = None
     backfill_task: asyncio.Task[None] | None = None
+    heartbeat_task: asyncio.Task[None] | None = None
+
     scanner_enabled = enable_scanner and bool(cfg["scanner"].get("enabled", True))
     scanner: GoveeScanner | None = None
     if scanner_enabled:
@@ -352,6 +375,55 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     else:
         logging.info("HVAC historization disabled (set hvac.enabled=true)")
 
+    async def _heartbeat() -> None:
+        while not stop_event.is_set():
+            await db.touch_runtime_heartbeat("workers")
+            await asyncio.sleep(2.0)
+
+    await db.touch_runtime_heartbeat("workers")
+    heartbeat_task = asyncio.create_task(_heartbeat(), name="workers-heartbeat")
+
+    return {
+        "stop_event": stop_event,
+        "publisher": publisher,
+        "scanner_task": scan_task,
+        "door_task": door_task,
+        "door_ha_task": door_ha_task,
+        "hvac_task": hvac_task,
+        "backfill_task": backfill_task,
+        "heartbeat_task": heartbeat_task,
+        "backfill": backfill,
+        "hvac_cfg": hvac_cfg,
+    }
+
+
+async def _stop_workers(runtime: dict[str, Any]) -> None:
+    stop_event: asyncio.Event = runtime["stop_event"]
+    stop_event.set()
+    for task, label in (
+        (runtime.get("scanner_task"), "BLE scanner"),
+        (runtime.get("door_task"), "Door MQTT"),
+        (runtime.get("door_ha_task"), "Door HA poll"),
+        (runtime.get("hvac_task"), "HVAC HA poll"),
+        (runtime.get("backfill_task"), "GATT backfill"),
+        (runtime.get("heartbeat_task"), "Workers heartbeat"),
+    ):
+        if task is None:
+            continue
+        try:
+            await asyncio.wait_for(task, timeout=15.0)
+        except asyncio.TimeoutError:
+            logging.warning("%s stop timed out — cancelling", label)
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+    publisher: PeerPublisher = runtime["publisher"]
+    await publisher.stop()
+
+
+def _build_weather(cfg: dict[str, Any]) -> WeatherService:
     weather_cfg = WeatherConfig.from_dict(cfg.get("weather"))
     apt_raw = dict(cfg.get("apartment") or {})
     if not apt_raw.get("timezone") and cfg.get("weather", {}).get("timezone"):
@@ -383,6 +455,42 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
             )
     else:
         logging.info("Weather forecast disabled (set weather.enabled=true)")
+    return weather
+
+
+def _restart_workers_via_systemd() -> tuple[bool, str]:
+    cmd = ["systemctl", "restart", "govee-charts-workers.service"]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except FileNotFoundError:
+        return False, "systemctl not found on this host"
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        if not detail:
+            detail = "permission denied or command failed"
+        return False, f"Workers restart failed: {detail}"
+    return True, "Workers restarting — UI remains available"
+
+
+async def run_ui_server(
+    cfg: dict[str, Any],
+    *,
+    workers_runtime: dict[str, Any] | None = None,
+    db_override: Database | None = None,
+    suffix_map_override: dict[str, str] | None = None,
+) -> None:
+    if db_override is None or suffix_map_override is None:
+        # Workers own one-shot metadata seeding; UI opens the DB as fast as possible.
+        db, suffix_map = await _init_runtime_db(cfg, seed_metadata=False)
+    else:
+        db = db_override
+        suffix_map = suffix_map_override
+    weather = _build_weather(cfg)
+    fed = cfg["federation"]
+    backfill = workers_runtime.get("backfill") if workers_runtime else None
+    hvac_cfg = workers_runtime.get("hvac_cfg") if workers_runtime else HvacConfig.from_dict(
+        cfg.get("hvac")
+    )
 
     servers: list[uvicorn.Server] = []
 
@@ -405,7 +513,10 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
         peers=fed["peers"],
         suffix_map=suffix_map,
         weather=weather,
-        on_restart=request_restart,
+        on_restart_ui=request_restart,
+        on_restart_workers=(
+            _restart_workers_via_systemd if workers_runtime is None else None
+        ),
         backfill=backfill,
         ssl_port=ssl_port if certfile and keyfile else None,
         hvac=hvac_cfg,
@@ -459,26 +570,19 @@ async def run_server(cfg: dict[str, Any], *, enable_scanner: bool = True) -> Non
     try:
         await asyncio.gather(*(_serve(s) for s in servers))
     finally:
-        stop_event.set()
-        for task, label in (
-            (scan_task, "BLE scanner"),
-            (door_task, "Door MQTT"),
-            (door_ha_task, "Door HA poll"),
-            (hvac_task, "HVAC HA poll"),
-            (backfill_task, "GATT backfill"),
-        ):
-            if task is None:
-                continue
-            try:
-                await asyncio.wait_for(task, timeout=15.0)
-            except asyncio.TimeoutError:
-                logging.warning("%s stop timed out — cancelling", label)
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        await publisher.stop()
+        if workers_runtime is not None:
+            await _stop_workers(workers_runtime)
+        await db.close()
+
+
+async def run_workers(cfg: dict[str, Any], *, enable_scanner: bool = True) -> None:
+    db, suffix_map = await _init_runtime_db(cfg)
+    runtime = await _start_workers(cfg, db, suffix_map, enable_scanner=enable_scanner)
+    logging.info("Workers runtime started (node_id=%s)", cfg["federation"]["node_id"])
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await _stop_workers(runtime)
         await db.close()
 
 
@@ -496,7 +600,23 @@ async def amain() -> None:
         )
         return
 
-    await run_server(cfg, enable_scanner=not args.no_scanner)
+    scanner_enabled = not args.no_scanner
+    if args.mode == "ui":
+        await run_ui_server(cfg, workers_runtime=None)
+        return
+    if args.mode == "workers":
+        await run_workers(cfg, enable_scanner=scanner_enabled)
+        return
+
+    # Compatibility mode: current single-process runtime (UI + workers).
+    db, suffix_map = await _init_runtime_db(cfg)
+    workers_runtime = await _start_workers(cfg, db, suffix_map, enable_scanner=scanner_enabled)
+    await run_ui_server(
+        cfg,
+        workers_runtime=workers_runtime,
+        db_override=db,
+        suffix_map_override=suffix_map,
+    )
 
 
 def main() -> None:
