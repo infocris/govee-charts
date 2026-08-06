@@ -163,6 +163,18 @@
   const coverageImportZigzagBodyEl = document.getElementById(
     "coverage-import-zigzag-body"
   );
+  const mailInboxAddressEl = document.getElementById("mail-inbox-address");
+  const mailInboxCopyBtn = document.getElementById("mail-inbox-copy");
+  const mailInboxNewBtn = document.getElementById("mail-inbox-new");
+  const mailInboxFetchBtn = document.getElementById("mail-inbox-fetch");
+  const mailInboxClearBtn = document.getElementById("mail-inbox-clear");
+  const mailInboxExistingEl = document.getElementById("mail-inbox-existing");
+  const mailInboxUseBtn = document.getElementById("mail-inbox-use");
+  const mailInboxStatusEl = document.getElementById("mail-inbox-status");
+  const mailInboxMessagesEl = document.getElementById("mail-inbox-messages");
+  /** @type {{address?:string, configured?:boolean}|null} */
+  let mailInboxState = null;
+  let mailInboxBusy = false;
   const coverageChartsEl = document.getElementById("coverage-charts");
   let backfillTimer = null;
   let backfillSnapshot = null;
@@ -1019,6 +1031,7 @@
       try {
         const u = new URL(peer.url);
         u.protocol = "https:";
+        // Only remap default HTTP UI port; keep explicit HTTPS ports (e.g. 8082).
         if (!u.port || u.port === "8080") u.port = "8081";
         return u.toString().replace(/\/$/, "");
       } catch {
@@ -2071,6 +2084,212 @@
     }
     renderCoverageBatch();
     analyzeCoverageBatch().catch((err) => console.warn(err));
+  }
+
+  function base64ToFile(filename, contentBase64, contentType) {
+    const bin = atob(contentBase64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+    return new File([bytes], filename, {
+      type: contentType || "application/octet-stream",
+    });
+  }
+
+  function renderMailInboxState() {
+    const address = mailInboxState && mailInboxState.address;
+    const configured = Boolean(address);
+    if (mailInboxAddressEl) {
+      mailInboxAddressEl.textContent = address || "—";
+    }
+    if (mailInboxCopyBtn) mailInboxCopyBtn.disabled = !configured || mailInboxBusy;
+    if (mailInboxFetchBtn) mailInboxFetchBtn.disabled = !configured || mailInboxBusy;
+    if (mailInboxClearBtn) mailInboxClearBtn.disabled = !configured || mailInboxBusy;
+    if (mailInboxNewBtn) mailInboxNewBtn.disabled = mailInboxBusy;
+    if (mailInboxUseBtn) mailInboxUseBtn.disabled = mailInboxBusy;
+    if (mailInboxExistingEl) mailInboxExistingEl.disabled = mailInboxBusy;
+  }
+
+  function renderMailMessages(messages) {
+    if (!mailInboxMessagesEl) return;
+    const rows = Array.isArray(messages) ? messages : [];
+    if (!rows.length) {
+      mailInboxMessagesEl.hidden = true;
+      mailInboxMessagesEl.innerHTML = "";
+      return;
+    }
+    mailInboxMessagesEl.hidden = false;
+    mailInboxMessagesEl.innerHTML = rows
+      .map((msg) => {
+        const files = (msg.attachments || [])
+          .map((a) => a.filename)
+          .filter(Boolean)
+          .join(", ");
+        const from = escapeHtml(msg.from || "—");
+        const subject = escapeHtml(msg.subject || "(no subject)");
+        const body = String(msg.text || msg.preview || "").trim();
+        const bodyHtml = body
+          ? `<span class="mail-msg-body">${escapeHtml(body.slice(0, 800))}</span>`
+          : "";
+        const codes = Array.isArray(msg.verification_codes)
+          ? msg.verification_codes
+          : [];
+        const codesHtml = codes.length
+          ? `<div class="mail-msg-code-row">${codes
+              .map(
+                (code) =>
+                  `<code class="mail-msg-code">${escapeHtml(code)}</code>` +
+                  `<button type="button" class="backfill-btn mail-copy-code" data-code="${escapeHtml(
+                    code
+                  )}">Copy code</button>`
+              )
+              .join("")}</div>`
+          : "";
+        const filesHtml = files
+          ? `<span class="mail-msg-files">Attachment: ${escapeHtml(files)}</span>`
+          : codes.length
+            ? `<span class="mail-msg-files">Verification email (no CSV yet)</span>`
+            : `<span class="mail-msg-files">No CSV/ZIP attachment</span>`;
+        return `<li><span class="mail-msg-subject">${subject}</span> · from ${from}${codesHtml}${bodyHtml}${filesHtml}</li>`;
+      })
+      .join("");
+  }
+
+  async function loadMailInbox() {
+    try {
+      const res = await fetch("/api/mail/inbox");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || `HTTP ${res.status}`);
+      }
+      mailInboxState = data;
+      renderMailInboxState();
+    } catch (err) {
+      if (mailInboxStatusEl) {
+        mailInboxStatusEl.textContent = `Inbox status failed: ${err.message}`;
+      }
+    }
+  }
+
+  async function setMailInbox(address) {
+    mailInboxBusy = true;
+    renderMailInboxState();
+    if (mailInboxStatusEl) {
+      mailInboxStatusEl.textContent = address
+        ? "Saving address…"
+        : "Creating disposable inbox…";
+    }
+    try {
+      const res = await fetch("/api/mail/inbox", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(address ? { address } : {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`
+        );
+      }
+      mailInboxState = data;
+      renderMailInboxState();
+      renderMailMessages([]);
+      if (mailInboxStatusEl) {
+        mailInboxStatusEl.textContent = address
+          ? `Using ${data.address}`
+          : `Created ${data.address} (expires ${data.expires_in || "24h"})`;
+      }
+      if (mailInboxExistingEl && data.address) {
+        mailInboxExistingEl.value = data.address;
+      }
+    } catch (err) {
+      if (mailInboxStatusEl) {
+        mailInboxStatusEl.textContent = `Inbox failed: ${err.message}`;
+      }
+    } finally {
+      mailInboxBusy = false;
+      renderMailInboxState();
+    }
+  }
+
+  async function clearMailInbox() {
+    mailInboxBusy = true;
+    renderMailInboxState();
+    try {
+      const res = await fetch("/api/mail/inbox", { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || `HTTP ${res.status}`);
+      }
+      mailInboxState = { address: null, configured: false };
+      renderMailInboxState();
+      renderMailMessages([]);
+      if (mailInboxExistingEl) mailInboxExistingEl.value = "";
+      if (mailInboxStatusEl) mailInboxStatusEl.textContent = "Inbox cleared.";
+    } catch (err) {
+      if (mailInboxStatusEl) {
+        mailInboxStatusEl.textContent = `Clear failed: ${err.message}`;
+      }
+    } finally {
+      mailInboxBusy = false;
+      renderMailInboxState();
+    }
+  }
+
+  async function fetchMailInbox() {
+    if (!mailInboxState || !mailInboxState.address) return;
+    mailInboxBusy = true;
+    renderMailInboxState();
+    if (mailInboxStatusEl) mailInboxStatusEl.textContent = "Checking mail…";
+    try {
+      const res = await fetch("/api/mail/fetch", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`
+        );
+      }
+      const messages = data.messages || [];
+      renderMailMessages(messages);
+      const codes = Array.isArray(data.verification_codes)
+        ? data.verification_codes
+        : [];
+      const files = [];
+      for (const msg of messages) {
+        for (const att of msg.attachments || []) {
+          if (!att.content_base64 || !att.filename) continue;
+          files.push(
+            base64ToFile(att.filename, att.content_base64, att.content_type)
+          );
+        }
+      }
+      const count = Number(data.attachment_count) || files.length;
+      if (mailInboxStatusEl) {
+        if (codes.length && !count) {
+          mailInboxStatusEl.textContent =
+            `Verification code: ${codes.join(", ")} — copy it into Govee, then Check mail again for the CSV.`;
+        } else if (count) {
+          mailInboxStatusEl.textContent = codes.length
+            ? `Found ${count} CSV/ZIP + code ${codes.join(", ")} — analyzing…`
+            : `Found ${count} CSV/ZIP attachment(s) — analyzing…`;
+        } else if (messages.length) {
+          mailInboxStatusEl.textContent =
+            `Found ${messages.length} message(s), no CSV/ZIP yet — open a message above for the code.`;
+        } else {
+          mailInboxStatusEl.textContent =
+            "Inbox empty — start the Govee export to this address, then check again.";
+        }
+      }
+      if (files.length) {
+        addFilesToBatch(files);
+      }
+    } catch (err) {
+      if (mailInboxStatusEl) {
+        mailInboxStatusEl.textContent = `Check mail failed: ${err.message}`;
+      }
+    } finally {
+      mailInboxBusy = false;
+      renderMailInboxState();
+    }
   }
 
   function clearCoverageBatch() {
@@ -8255,6 +8474,70 @@
       }
     });
   }
+
+  if (mailInboxNewBtn) {
+    mailInboxNewBtn.addEventListener("click", () => {
+      setMailInbox(null).catch((err) => console.warn(err));
+    });
+  }
+  if (mailInboxUseBtn) {
+    mailInboxUseBtn.addEventListener("click", () => {
+      const address = (mailInboxExistingEl && mailInboxExistingEl.value) || "";
+      if (!address.trim()) {
+        if (mailInboxStatusEl) {
+          mailInboxStatusEl.textContent = "Enter an existing inbox address first.";
+        }
+        return;
+      }
+      setMailInbox(address.trim()).catch((err) => console.warn(err));
+    });
+  }
+  if (mailInboxFetchBtn) {
+    mailInboxFetchBtn.addEventListener("click", () => {
+      fetchMailInbox().catch((err) => console.warn(err));
+    });
+  }
+  if (mailInboxClearBtn) {
+    mailInboxClearBtn.addEventListener("click", () => {
+      clearMailInbox().catch((err) => console.warn(err));
+    });
+  }
+  if (mailInboxCopyBtn) {
+    mailInboxCopyBtn.addEventListener("click", async () => {
+      const address = mailInboxState && mailInboxState.address;
+      if (!address) return;
+      try {
+        await navigator.clipboard.writeText(address);
+        if (mailInboxStatusEl) mailInboxStatusEl.textContent = "Address copied.";
+      } catch (err) {
+        if (mailInboxStatusEl) {
+          mailInboxStatusEl.textContent = `Copy failed: ${err.message}`;
+        }
+      }
+    });
+  }
+  if (mailInboxMessagesEl) {
+    mailInboxMessagesEl.addEventListener("click", async (ev) => {
+      const btn = ev.target instanceof HTMLElement
+        ? ev.target.closest("button.mail-copy-code")
+        : null;
+      if (!(btn instanceof HTMLButtonElement)) return;
+      const code = btn.dataset.code || "";
+      if (!code) return;
+      try {
+        await navigator.clipboard.writeText(code);
+        if (mailInboxStatusEl) {
+          mailInboxStatusEl.textContent = `Code ${code} copied — paste it in Govee.`;
+        }
+      } catch (err) {
+        if (mailInboxStatusEl) {
+          mailInboxStatusEl.textContent = `Copy code failed: ${err.message}`;
+        }
+      }
+    });
+  }
+  loadMailInbox().catch((err) => console.warn(err));
+
   if (coverageBatchBodyEl) {
     coverageBatchBodyEl.addEventListener("change", (ev) => {
       const t = ev.target;

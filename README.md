@@ -318,6 +318,8 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
 - `POST /api/restart?target=ui|workers` — restart UI or workers (when available)
 - `POST /api/git/pull` — `git pull --ff-only` from the UI (does not restart services)
+- `GET /api/mail/inbox` / `POST /api/mail/inbox` / `DELETE /api/mail/inbox` — disposable inbox for Govee CSV email export (myagentinbox, 24h)
+- `POST /api/mail/fetch` — poll inbox and return CSV/ZIP attachments (base64) for Coverage import
 - `GET /api/health` — health + `node_id` + workers heartbeat availability
 
 ## Notes
@@ -326,3 +328,4 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - No Govee cloud API — BLE only
 - Optional history backfill (`[backfill]`) recovers missing minute samples. Opt-in per sensor in the Backfill UI (none selected by default); a per-sensor **GATT** checkbox (default on) allows local BLE history after peer fill — uncheck it for federation-only recovery. Selection stays editable even when the worker is offline. The worker starts with a local BLE scanner **or** with `federation_pull` plus configured peers. One device at a time; lookback up to ~20 days. Prefer sensors with RSSI ≥ `min_rssi` (default −75 dBm) for GATT. With federation, the worker first pulls peer `/api/history` for the gap (`federation_pull`); only remaining holes go to GATT when enabled. Recovered GATT history is shared as `{node_id}/gatt` and the best-RSSI node does the pull.
 - Manual **Import CSV** on the Coverage tab accepts Govee Home app exports (`.csv` or `.zip`). Drop several files at once: each is matched to a sensor by filename, analyzed (samples / already present / would insert / would overwrite / zigzag risk), then imported together with checkboxes to exclude files. Optional **Overwrite existing minutes** replaces conflicting `(address, ts)` rows when temp/humidity differ (preview shows sample diffs and max |ΔT|/|ΔH|). Nearby BLE readings at a different timestamp within ±60s that disagree (|ΔT|≥1°C or |ΔH|≥5%) are flagged as zigzag; insert-only is blocked until overwrite is enabled. Imports store samples as `{node_id}/csv` (local only, no federation push). The Coverage view also shows full/partial/missing timelines plus temperature/humidity charts for the selected sensor.
+- **Email import (experimental):** Coverage → Import CSV can create a disposable `myagentinbox.com` address (no signup, ~24h TTL). Paste it into Govee Home’s export-to-email, **Check mail** for the verification code (Copy code), confirm in the app, then **Check mail** again for the CSV/ZIP. Govee may reject some disposable domains — if delivery fails, use a normal mailbox and drop the file manually.

@@ -39,6 +39,7 @@ from govee_charts.decode import Reading
 from govee_charts.federation import csv_source
 from govee_charts.energy import build_energy_summary, estimate_live_ac_watts
 from govee_charts.hvac import HvacConfig, hvac_active_bands, is_hvac_active
+from govee_charts import mail_inbox
 from govee_charts.weather import WeatherService
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -85,15 +86,29 @@ class VersionedStaticFiles(StaticFiles):
 
 
 def peer_browse_url(peer: str, ssl_port: int | None) -> str:
-    """HTTPS UI URL for a federation peer (same host, local ssl_port convention)."""
+    """Browser UI URL for a federation peer.
+
+    Keep an explicit HTTPS peer port (e.g. :8082). Only rewrite plain HTTP
+    peers to HTTPS on *this* node's ssl_port when TLS is enabled locally.
+    """
     peer = peer.rstrip("/")
-    if not ssl_port:
-        return peer
     parsed = urlparse(peer)
     host = parsed.hostname
     if not host:
         return peer
-    return f"https://{host}:{int(ssl_port)}"
+    scheme = (parsed.scheme or "http").lower()
+    port = parsed.port
+
+    # Already HTTPS: respect the configured port (do not force local ssl_port).
+    if scheme == "https":
+        if port:
+            return f"https://{host}:{int(port)}"
+        return f"https://{host}"
+
+    # HTTP peer used for federation API — offer HTTPS UI when we have ssl_port.
+    if ssl_port:
+        return f"https://{host}:{int(ssl_port)}"
+    return peer
 
 
 def _git_output(cmd: list[str]) -> tuple[int, str]:
@@ -253,6 +268,14 @@ class BackfillDevicePatch(BaseModel):
     address: str = Field(min_length=1)
     enabled: bool | None = None
     gatt_enabled: bool | None = None
+
+    model_config = {"extra": "forbid"}
+
+
+class MailInboxSet(BaseModel):
+    """Create a new disposable inbox, or register an existing address."""
+
+    address: str | None = None
 
     model_config = {"extra": "forbid"}
 
@@ -426,6 +449,7 @@ def create_app(
     app.state.backfill = backfill
     app.state.restart_ui_scheduled = False
     app.state.git_pull_lock = asyncio.Lock()
+    app.state.mail_fetch_lock = asyncio.Lock()
     app.state.ssl_port = int(ssl_port) if ssl_port else None
     app.state.hvac = hvac or HvacConfig()
 
@@ -947,6 +971,94 @@ def create_app(
             "skipped": skipped,
             "overwrite": overwrite_flag,
             "range": summary["range"],
+        }
+
+    @app.get("/api/mail/inbox")
+    async def api_mail_inbox_get() -> dict[str, Any]:
+        """Current disposable inbox used for Govee CSV email export."""
+        state = mail_inbox.load_state()
+        if not state:
+            return {"address": None, "provider": mail_inbox.PROVIDER, "configured": False}
+        return {**state, "configured": True}
+
+    @app.post("/api/mail/inbox")
+    async def api_mail_inbox_set(body: MailInboxSet = MailInboxSet()) -> dict[str, Any]:
+        """Create a new disposable inbox, or save an existing address."""
+        existing = (body.address or "").strip()
+        try:
+            if existing:
+                if "@" not in existing:
+                    raise HTTPException(status_code=400, detail="Invalid email address")
+                meta = await mail_inbox.get_inbox(existing)
+                state = {
+                    "address": meta["address"],
+                    "created_at": meta.get("created_at"),
+                    "expires_in": None,
+                    "provider": mail_inbox.PROVIDER,
+                }
+            else:
+                state = await mail_inbox.create_inbox()
+        except mail_inbox.MailInboxError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"Inbox provider unreachable: {exc}"
+            ) from exc
+        mail_inbox.save_state(state)
+        logger.info("Disposable mail inbox set to %s", state["address"])
+        return {**state, "configured": True}
+
+    @app.delete("/api/mail/inbox")
+    async def api_mail_inbox_clear() -> dict[str, Any]:
+        mail_inbox.clear_state()
+        return {"ok": True, "address": None, "configured": False}
+
+    @app.post("/api/mail/fetch")
+    async def api_mail_fetch() -> dict[str, Any]:
+        """Poll disposable inbox and return CSV/ZIP attachments (base64)."""
+        state = mail_inbox.load_state()
+        if not state or not state.get("address"):
+            raise HTTPException(
+                status_code=400,
+                detail="No inbox configured — create or set an address first",
+            )
+        lock: asyncio.Lock = app.state.mail_fetch_lock
+        if lock.locked():
+            raise HTTPException(status_code=409, detail="Mail fetch already in progress")
+        async with lock:
+            try:
+                result = await mail_inbox.fetch_csv_attachments(str(state["address"]))
+            except mail_inbox.MailInboxError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=503, detail=f"Inbox provider unreachable: {exc}"
+                ) from exc
+        # Drop oversized payloads early (same limit as upload import).
+        kept_messages: list[dict[str, Any]] = []
+        codes_all: list[str] = []
+        codes_seen: set[str] = set()
+        for msg in result.get("messages") or []:
+            files = []
+            for att in msg.get("attachments") or []:
+                size = int(att.get("size") or 0)
+                if size > MAX_UPLOAD_BYTES:
+                    continue
+                files.append(att)
+            kept = {**msg, "attachments": files}
+            kept_messages.append(kept)
+            for code in kept.get("verification_codes") or []:
+                code_s = str(code)
+                if code_s and code_s not in codes_seen:
+                    codes_seen.add(code_s)
+                    codes_all.append(code_s)
+        attachment_count = sum(len(m.get("attachments") or []) for m in kept_messages)
+        return {
+            "address": result.get("address") or state["address"],
+            "provider": result.get("provider") or mail_inbox.PROVIDER,
+            "messages": kept_messages,
+            "attachment_count": attachment_count,
+            "verification_codes": codes_all,
         }
 
     @app.post("/api/git/pull")

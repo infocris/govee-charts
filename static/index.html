@@ -415,6 +415,37 @@
                 Drop several Govee exports — each file is matched to a sensor by name, then imported together
               </p>
             </div>
+            <div class="mail-inbox-panel" id="mail-inbox-panel">
+              <h3 class="mail-inbox-title">Email import (experimental)</h3>
+              <p class="overview-hint mail-inbox-hint">
+                Disposable inbox (myagentinbox, 24h) — paste into Govee export, Check mail for the
+                verification code, then again for the CSV
+              </p>
+              <div class="mail-inbox-row">
+                <code class="mail-inbox-address" id="mail-inbox-address">—</code>
+                <button type="button" class="backfill-btn" id="mail-inbox-copy" disabled>Copy</button>
+              </div>
+              <div class="mail-inbox-row mail-inbox-actions">
+                <button type="button" class="backfill-btn" id="mail-inbox-new">New inbox</button>
+                <button type="button" class="backfill-btn" id="mail-inbox-fetch" disabled>Check mail</button>
+                <button type="button" class="backfill-btn" id="mail-inbox-clear" disabled>Clear</button>
+              </div>
+              <div class="mail-inbox-row">
+                <label class="mail-inbox-existing-label" for="mail-inbox-existing">
+                  Or use existing address
+                </label>
+                <input
+                  type="email"
+                  id="mail-inbox-existing"
+                  class="mail-inbox-existing"
+                  placeholder="name@myagentinbox.com"
+                  autocomplete="off"
+                />
+                <button type="button" class="backfill-btn" id="mail-inbox-use">Use</button>
+              </div>
+              <p class="backfill-import-status" id="mail-inbox-status" aria-live="polite"></p>
+              <ul class="mail-inbox-messages" id="mail-inbox-messages" hidden></ul>
+            </div>
             <div
               class="coverage-dropzone"
               id="coverage-dropzone"

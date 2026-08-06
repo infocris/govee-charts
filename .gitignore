@@ -11,4 +11,6 @@ data/ssl/
 data/apartment_overrides.json
 data/apartment_overrides.tmp
 data/secrets/
+data/mail_inbox.json
+data/mail_inbox.tmp
 config.toml
