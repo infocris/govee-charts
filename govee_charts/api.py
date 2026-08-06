@@ -1288,7 +1288,8 @@ def create_app(
 
     @app.get("/api/apartment")
     async def api_apartment(
-        hours: float = Query(24.0, gt=0, le=168),
+        hours: float = Query(24.0, gt=0, le=384),
+        future_hours: float | None = Query(default=None, gt=0, le=384),
         latitude: float | None = Query(default=None, ge=-90, le=90),
         longitude: float | None = Query(default=None, ge=-180, le=180),
     ) -> dict[str, Any]:
@@ -1297,7 +1298,10 @@ def create_app(
             return {"enabled": False, "rooms": [], "orientations": []}
         layout = weather_svc.apartment
         payload = layout.summary()
-        payload["hours"] = hours
+        past_h = float(hours)
+        fut_h = float(future_hours) if future_hours is not None else past_h
+        payload["hours"] = past_h
+        payload["future_hours"] = fut_h
 
         # Attach sensors grouped by room category
         labels: dict[str, str] = app.state.labels
@@ -1345,7 +1349,9 @@ def create_app(
         if weather_svc.enabled:
             try:
                 forecast = await weather_svc.fetch_forecast(
-                    latitude=latitude, longitude=longitude
+                    latitude=latitude,
+                    longitude=longitude,
+                    horizon_hours=fut_h,
                 )
             except Exception as exc:
                 solar = {"available": False, "error": str(exc)}
@@ -1353,8 +1359,8 @@ def create_app(
 
         if forecast and forecast.get("enabled") and forecast.get("outdoor"):
             now = time.time()
-            since = now - hours * 3600.0
-            until = now + hours * 3600.0
+            since = now - past_h * 3600.0
+            until = now + fut_h * 3600.0
             window = [
                 p
                 for p in forecast["outdoor"]
@@ -1385,7 +1391,8 @@ def create_app(
                 wd_now = outdoor_now.get("wind_direction_deg")
                 outdoor_summary = {
                     "available": True,
-                    "hours": hours,
+                    "hours": past_h,
+                    "future_hours": fut_h,
                     "temp_now": round(float(outdoor_now["temperature_c"]), 2),
                     "temp_min": round(min(temps), 2),
                     "temp_max": round(max(temps), 2),
@@ -1472,7 +1479,8 @@ def create_app(
                         "temp_now": round(
                             float(outdoor_now["temperature_c"]) + bias_now, 2
                         ),
-                        "hours": hours,
+                        "hours": past_h,
+                        "future_hours": fut_h,
                         "points": points,
                     }
                 else:
@@ -1516,7 +1524,8 @@ def create_app(
                 try:
                     proj_resp = await weather_svc.build_response(
                         db,
-                        hours=hours,
+                        hours=past_h,
+                        future_hours=fut_h,
                         addresses=addresses,
                         latitude=latitude,
                         longitude=longitude,
@@ -1537,7 +1546,8 @@ def create_app(
                             "temp_min": summary.get("temp_min"),
                             "temp_max": summary.get("temp_max"),
                             "bias_temp": proj.get("bias_temp"),
-                            "hours": hours,
+                            "hours": past_h,
+                            "future_hours": fut_h,
                             "points": proj.get("points") or [],
                         }
                 except Exception as exc:
@@ -1566,7 +1576,7 @@ def create_app(
                     break
             if addr:
                 try:
-                    hist = await db.history(addr, hours)
+                    hist = await db.history(addr, past_h)
                 except Exception:
                     hist = []
                 if hist:
@@ -1593,7 +1603,7 @@ def create_app(
                     break
             if facade_addr:
                 try:
-                    fhist = await db.history(facade_addr, hours)
+                    fhist = await db.history(facade_addr, past_h)
                 except Exception:
                     fhist = []
                 if fhist:
@@ -1806,7 +1816,7 @@ def create_app(
         payload["temp_couple"] = {
             "open_threshold_c": TEMP_COUPLE_OPEN_C,
             "closed_threshold_c": TEMP_COUPLE_CLOSED_C,
-            "hours": hours,
+            "hours": past_h,
         }
 
         outdoor = payload.get("outdoor") or {}
@@ -2069,7 +2079,8 @@ def create_app(
 
     @app.get("/api/forecast")
     async def api_forecast(
-        hours: float = Query(24.0, gt=0, le=168),
+        hours: float = Query(24.0, gt=0, le=384),
+        future_hours: float | None = Query(default=None, gt=0, le=384),
         address: list[str] | None = Query(default=None),
         latitude: float | None = Query(default=None, ge=-90, le=90),
         longitude: float | None = Query(default=None, ge=-180, le=180),
@@ -2079,6 +2090,7 @@ def create_app(
             return {
                 "enabled": False,
                 "hours": hours,
+                "future_hours": future_hours if future_hours is not None else hours,
                 "location": None,
                 "outdoor": [],
                 "projections": {},
@@ -2092,6 +2104,7 @@ def create_app(
         return await weather_svc.build_response(
             db,
             hours=hours,
+            future_hours=future_hours,
             addresses=addresses,
             latitude=latitude,
             longitude=longitude,

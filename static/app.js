@@ -38,12 +38,20 @@
   const networkZoomInBtn = document.getElementById("network-zoom-in");
   const networkZoomOutBtn = document.getElementById("network-zoom-out");
   const networkZoomResetBtn = document.getElementById("network-zoom-reset");
+  const mapRoomChartsEl = document.getElementById("map-room-charts");
+  const mapRoomChartsTitleEl = document.getElementById("map-room-charts-title");
+  const mapRoomChartsMetaEl = document.getElementById("map-room-charts-meta");
+  const mapRoomChartsStatusEl = document.getElementById("map-room-charts-status");
+  const mapRoomChartsCloseBtn = document.getElementById("map-room-charts-close");
+  const mapRoomTempCanvas = document.getElementById("map-room-temp-chart");
+  const mapRoomChartCaptionEl = document.getElementById("map-room-chart-caption");
+  const mapRoomRangeButtons = [
+    ...document.querySelectorAll(".map-room-ranges > button[data-map-hours]"),
+  ];
   const networkMetricButtons = [
     ...document.querySelectorAll(".network-metric-ranges > button[data-map-metric]"),
   ];
-  const sectionWingButtons = [
-    ...document.querySelectorAll(".section-wing-ranges > button[data-section-wing]"),
-  ];
+  const sectionShowSmallEl = document.getElementById("section-show-small");
   const sectionPathClearBtn = document.getElementById("section-path-clear");
   const NETWORK_VB_W = 920;
   const NETWORK_VB_H = 640;
@@ -55,12 +63,24 @@
   let networkPan = { x: 0, y: 0 };
   /** @type {{x:number,y:number}|null} */
   let networkPanDrag = null;
-  /** @type {"temp"|"humidity"} */
+  /** @type {"temp"|"humidity"|"both"} */
   let networkMapMetric = "temp";
-  /** @type {"kitchen"|"living"} left wing preset when no custom waypoints */
-  let sectionWing = "kitchen";
+  /** Include bathroom / WC (area < 3.5 m²) in the cross-section. */
+  let sectionShowSmall = false;
   /** Ordered room ids clicked on the topology graph (section waypoints). */
   let sectionWaypoints = [];
+  /** Room id selected on the map for temperature charts. */
+  let selectedMapRoomId = null;
+  let mapRoomHours = 24;
+  /** @type {import('chart.js').Chart | null} */
+  let mapRoomTempChart = null;
+  /** Chart.js instance embedded in the cross-section room volume. */
+  let sectionRoomChart = null;
+  /** @type {HTMLCanvasElement | null} */
+  let sectionRoomChartCanvas = null;
+  /** Cached series so section re-renders can repaint without refetch. */
+  let mapRoomChartSeriesCache = null;
+  let mapRoomChartsBusy = false;
   /** @type {any} */
   let networkLastData = null;
   const selectAllBtn = document.getElementById("select-all");
@@ -216,6 +236,7 @@
   const MODEL_KEY = "govee-charts.model";
   const SORT_KEY = "govee-charts.sort";
   const FORECAST_KEY = "govee-charts.forecast";
+  const FORECAST_FUTURE_KEY = "govee-charts.forecastFutureHours";
   const PROJECTION_SCENARIO_KEY = "govee-charts.projectionScenario";
   const WINDOW_BANDS_KEY = "govee-charts.windowBands";
   const HVAC_KEY = "govee-charts.hvac";
@@ -304,6 +325,8 @@
 
   let currentView = detectInitialView();
   let showForecast = localStorage.getItem(FORECAST_KEY) !== "0";
+  /** Future horizon for forecast / projection charts (hours from now). */
+  let forecastFutureHours = loadForecastFutureHours();
   let projectionScenario = loadProjectionScenario();
   let showWindowBands = localStorage.getItem(WINDOW_BANDS_KEY) !== "0";
   let showHvac = localStorage.getItem(HVAC_KEY) !== "0";
@@ -666,6 +689,46 @@
     return "closed";
   }
 
+  function loadForecastFutureHours() {
+    const n = Number(localStorage.getItem(FORECAST_FUTURE_KEY));
+    if (n === 12 || n === 24 || n === 72 || n === 168 || n === 384) return n;
+    return 24;
+  }
+
+  function syncForecastFutureButtons() {
+    const btns = document.querySelectorAll(
+      ".forecast-future-ranges > button[data-forecast-future]"
+    );
+    btns.forEach((btn) => {
+      const h = Number(btn.dataset.forecastFuture);
+      btn.classList.toggle("active", h === forecastFutureHours);
+    });
+  }
+
+  function setForecastFutureHours(h) {
+    const next = Number(h);
+    if (![12, 24, 72, 168, 384].includes(next)) return;
+    if (next === forecastFutureHours) return;
+    forecastFutureHours = next;
+    try {
+      localStorage.setItem(FORECAST_FUTURE_KEY, String(forecastFutureHours));
+    } catch (_) {
+      /* ignore */
+    }
+    syncForecastFutureButtons();
+    if (currentView === "compare") {
+      loadHistory().catch((err) => {
+        if (statusEl) statusEl.textContent = `Error: ${err.message}`;
+      });
+    } else if (currentView === "facades") {
+      loadFacades().catch((err) => {
+        if (facadeStatusEl) {
+          facadeStatusEl.textContent = `Error: ${err.message}`;
+        }
+      });
+    }
+  }
+
   function syncProjectionScenarioControl() {
     if (!projectionScenarioEl) return;
     projectionScenarioEl.value = projectionScenario;
@@ -822,11 +885,13 @@
         xMax: customUntil * 1000,
       };
     }
-    const xMax = Date.now();
-    return {
-      xMin: xMax - Number(hours) * 3600 * 1000,
-      xMax,
-    };
+    const now = Date.now();
+    const xMin = now - Number(hours) * 3600 * 1000;
+    let xMax = now;
+    if (showForecast || showWindowBands) {
+      xMax = now + Number(forecastFutureHours) * 3600 * 1000;
+    }
+    return { xMin, xMax };
   }
 
   function formatRangeLabel() {
@@ -3656,7 +3721,10 @@
     if (!facadeBody) return;
     if (facadeStatusEl) facadeStatusEl.textContent = "Loading…";
     await requestBrowserGeo(false);
-    const params = new URLSearchParams({ hours: "24" });
+    const params = new URLSearchParams({
+      hours: "24",
+      future_hours: String(forecastFutureHours),
+    });
     if (browserGeo) {
       params.set("latitude", String(browserGeo.latitude));
       params.set("longitude", String(browserGeo.longitude));
@@ -3685,12 +3753,21 @@
   }
 
   function networkMetricField() {
+    // Color scale + primary metric: temperature wins in "both".
     return networkMapMetric === "humidity" ? "humidity" : "temperature_c";
   }
 
-  function networkSensorMetric(sensor) {
-    const v = Number(sensor && sensor[networkMetricField()]);
+  function networkShowsBothMetrics() {
+    return networkMapMetric === "both";
+  }
+
+  function networkSensorFieldValue(sensor, field) {
+    const v = Number(sensor && sensor[field]);
     return Number.isFinite(v) ? v : NaN;
+  }
+
+  function networkSensorMetric(sensor) {
+    return networkSensorFieldValue(sensor, networkMetricField());
   }
 
   function networkMetricUnit() {
@@ -3699,6 +3776,12 @@
 
   function networkMetricUnitShort() {
     return networkMapMetric === "humidity" ? "%" : "°";
+  }
+
+  function networkMetricLabel() {
+    if (networkMapMetric === "humidity") return "humidity";
+    if (networkMapMetric === "both") return "temp + humidity";
+    return "temperature";
   }
 
   function syncNetworkMetricButtons() {
@@ -3711,7 +3794,8 @@
   }
 
   function setNetworkMapMetric(metric) {
-    const next = metric === "humidity" ? "humidity" : "temp";
+    const next =
+      metric === "humidity" ? "humidity" : metric === "both" ? "both" : "temp";
     if (next === networkMapMetric) return;
     networkMapMetric = next;
     try {
@@ -3720,7 +3804,26 @@
       /* ignore */
     }
     syncNetworkMetricButtons();
+    // Axis layout changes in "both" — rebuild panel chart on next paint.
+    if (mapRoomTempChart) {
+      try {
+        mapRoomTempChart.destroy();
+      } catch {
+        /* ignore */
+      }
+      mapRoomTempChart = null;
+    }
     if (networkLastData) renderNetwork(networkLastData);
+    if (selectedMapRoomId && mapRoomChartSeriesCache) {
+      paintMapRoomChartDatasets(mapRoomChartSeriesCache.series || []);
+      const series = mapRoomChartSeriesCache.series || [];
+      const totalPts = countMapRoomChartPoints(series);
+      if (mapRoomChartsStatusEl) {
+        mapRoomChartsStatusEl.textContent = totalPts
+          ? `${series.length} series · ${totalPts} point(s) · ${networkMetricLabel()}`
+          : `No ${networkMetricLabel()} samples in this range.`;
+      }
+    }
   }
 
   function networkExteriorOffset(room, p) {
@@ -3753,23 +3856,7 @@
 
   /** High / low exterior sensors for a façade group (all rooms on that face). */
   function networkFacadeTempBands(groupRooms) {
-    const high = [];
-    const low = [];
-    const mid = [];
-    const other = [];
-    for (const room of groupRooms) {
-      for (const s of room.sensors || []) {
-        if (String(s.zone || "").toLowerCase() !== "exterior") continue;
-        const t = networkSensorMetric(s);
-        if (!Number.isFinite(t)) continue;
-        const h = String(s.height || "").toLowerCase();
-        if (h === "high") high.push(t);
-        else if (h === "low") low.push(t);
-        else if (h === "mid") mid.push(t);
-        else other.push(t);
-      }
-    }
-    return { high, mid, low, other };
+    return networkFacadeFieldBands(groupRooms, networkMetricField());
   }
 
   /**
@@ -3913,33 +4000,83 @@
     return `${Number(temp).toFixed(1)}${networkMetricUnit()}`;
   }
 
-  function formatNetworkTempBand(temps) {
+  function formatNetworkBandWithUnit(temps, unit) {
     const vals = (temps || [])
       .map((t) => Number(t))
       .filter((t) => Number.isFinite(t));
     if (!vals.length) return null;
     const lo = Math.min(...vals);
     const hi = Math.max(...vals);
-    const u = networkMetricUnit();
-    if (Math.abs(hi - lo) < 0.05) return `${lo.toFixed(1)}${u}`;
-    return `${lo.toFixed(1)}–${hi.toFixed(1)}${u}`;
+    if (Math.abs(hi - lo) < 0.05) return `${lo.toFixed(1)}${unit}`;
+    return `${lo.toFixed(1)}–${hi.toFixed(1)}${unit}`;
   }
 
-  /** Split interior sensors by height for map pill layout. */
-  function networkInteriorTempBands(room) {
+  function formatNetworkTempBand(temps) {
+    return formatNetworkBandWithUnit(temps, networkMetricUnit());
+  }
+
+  function formatNetworkBothBand(tempVals, humVals) {
+    const t = formatNetworkBandWithUnit(tempVals, "°C");
+    const h = formatNetworkBandWithUnit(humVals, "%");
+    if (t && h) return `${t} · ${h}`;
+    return t || h;
+  }
+
+  function formatNetworkSensorReading(sensor) {
+    const t = networkSensorFieldValue(sensor, "temperature_c");
+    const h = networkSensorFieldValue(sensor, "humidity");
+    if (networkShowsBothMetrics()) {
+      const parts = [];
+      if (Number.isFinite(t)) parts.push(`${t.toFixed(1)}°`);
+      if (Number.isFinite(h)) parts.push(`${Math.round(h)}%`);
+      return parts.join(" · ") || "—";
+    }
+    if (networkMapMetric === "humidity") {
+      return Number.isFinite(h) ? `${h.toFixed(1)}%` : "—";
+    }
+    return Number.isFinite(t) ? `${t.toFixed(1)}°C` : "—";
+  }
+
+  /** Split sensors by height for a given metric field. */
+  function networkInteriorFieldBands(room, field) {
     const high = [];
     const low = [];
     const mid = [];
     const other = [];
     for (const s of room.sensors || []) {
       if (String(s.zone || "").toLowerCase() === "exterior") continue;
-      const t = networkSensorMetric(s);
+      const t = networkSensorFieldValue(s, field);
       if (!Number.isFinite(t)) continue;
       const h = String(s.height || "").toLowerCase();
       if (h === "high") high.push(t);
       else if (h === "low") low.push(t);
       else if (h === "mid") mid.push(t);
       else other.push(t);
+    }
+    return { high, mid, low, other };
+  }
+
+  /** Split interior sensors by height for map pill layout (active metric). */
+  function networkInteriorTempBands(room) {
+    return networkInteriorFieldBands(room, networkMetricField());
+  }
+
+  function networkFacadeFieldBands(groupRooms, field) {
+    const high = [];
+    const low = [];
+    const mid = [];
+    const other = [];
+    for (const room of groupRooms) {
+      for (const s of room.sensors || []) {
+        if (String(s.zone || "").toLowerCase() !== "exterior") continue;
+        const t = networkSensorFieldValue(s, field);
+        if (!Number.isFinite(t)) continue;
+        const h = String(s.height || "").toLowerCase();
+        if (h === "high") high.push(t);
+        else if (h === "low") low.push(t);
+        else if (h === "mid") mid.push(t);
+        else other.push(t);
+      }
     }
     return { high, mid, low, other };
   }
@@ -4225,7 +4362,7 @@
     return score;
   }
 
-  function pickFacadeEndpoints(rooms, waypoints, wing) {
+  function pickFacadeEndpoints(rooms, waypoints) {
     /** @type {Map<string, any[]>} */
     const byKey = new Map();
     for (const room of rooms || []) {
@@ -4242,12 +4379,7 @@
     const rightKey = keys[keys.length - 1];
     if (leftKey === rightKey) return null;
 
-    const preferLeft = [
-      ...waypoints,
-      wing === "living" ? "living" : "kitchen",
-      "kitchen",
-      "living",
-    ];
+    const preferLeft = [...waypoints, "kitchen", "living"];
     const preferRight = [...waypoints, "bedroom"];
 
     const pick = (key, prefers) => {
@@ -4290,9 +4422,58 @@
     return ordered;
   }
 
+  /** Rooms smaller than this (m²) are hidden unless "Small rooms" is checked. */
+  const SECTION_SMALL_AREA_M2 = 3.5;
+
+  function isSectionSmallRoom(room) {
+    const area = Number(room && room.area_m2);
+    return Number.isFinite(area) && area > 0 && area < SECTION_SMALL_AREA_M2;
+  }
+
+  /**
+   * Default façade→façade cut. Preferred order keeps SW rooms, hub, then NE;
+   * small rooms (bathroom, WC) slot in when enabled.
+   */
+  function defaultSectionPathIds(data) {
+    const rooms = (data && data.rooms) || [];
+    const byId = Object.fromEntries(rooms.map((r) => [r.id, r]));
+    const preferred = [
+      "kitchen",
+      "living",
+      "wc",
+      "corridor",
+      "bathroom",
+      "bedroom",
+    ];
+    const path = preferred.filter((id) => {
+      const room = byId[id];
+      if (!room) return false;
+      if (!sectionShowSmall && isSectionSmallRoom(room)) return false;
+      return true;
+    });
+    // Any other non-small (or all, if enabled) rooms not in the preferred list.
+    for (const room of rooms) {
+      if (path.includes(room.id)) continue;
+      if (!sectionShowSmall && isSectionSmallRoom(room)) continue;
+      // Keep extras before the last façade room when possible.
+      const last = path[path.length - 1];
+      const lastRoom = last ? byId[last] : null;
+      const lastIsFacade = !!(lastRoom && (lastRoom.exterior || []).length);
+      if (lastIsFacade && path.length >= 2) {
+        path.splice(path.length - 1, 0, room.id);
+      } else {
+        path.push(room.id);
+      }
+    }
+    return path;
+  }
+
   function persistSectionPathState() {
     try {
-      localStorage.setItem("govee-charts.sectionWing", sectionWing);
+      localStorage.setItem(
+        "govee-charts.sectionShowSmall",
+        sectionShowSmall ? "1" : "0"
+      );
       localStorage.setItem(
         "govee-charts.sectionWaypoints",
         JSON.stringify(sectionWaypoints)
@@ -4302,12 +4483,11 @@
     }
   }
 
-  function syncSectionWingButtons() {
+  function syncSectionPathControls() {
+    if (sectionShowSmallEl) {
+      sectionShowSmallEl.checked = !!sectionShowSmall;
+    }
     const custom = sectionWaypoints.length > 0;
-    sectionWingButtons.forEach((btn) => {
-      const wing = btn.dataset.sectionWing;
-      btn.classList.toggle("active", !custom && wing === sectionWing);
-    });
     if (sectionPathClearBtn) {
       sectionPathClearBtn.disabled = !custom;
       sectionPathClearBtn.classList.toggle("active", custom);
@@ -4316,11 +4496,11 @@
 
   /**
    * Room sequence for the open-room cross-section.
-   * Preset wing when no clicks; otherwise façade → waypoints → façade via graph.
+   * Default: all façade→façade rooms (small rooms optional).
+   * Shift-click waypoints override via graph stitching.
    */
   function sectionPathIds(data) {
-    const wing = sectionWing === "living" ? "living" : "kitchen";
-    const preset = [wing, "corridor", "bedroom"];
+    const preset = defaultSectionPathIds(data);
     if (!data || !data.enabled) return preset;
     const rooms = data.rooms || [];
     const byId = Object.fromEntries(rooms.map((r) => [r.id, r]));
@@ -4329,7 +4509,7 @@
       return preset.filter((id) => byId[id]);
     }
     const waypoints = sectionWaypoints.filter((id) => byId[id]);
-    const ends = pickFacadeEndpoints(rooms, waypoints, wing);
+    const ends = pickFacadeEndpoints(rooms, waypoints);
     let stops;
     if (ends) {
       const mid = orderWaypointsGreedy(adj, ends.left, ends.right, waypoints);
@@ -4345,16 +4525,26 @@
     if (!path || path.length < 2) {
       return preset.filter((id) => byId[id]);
     }
-    // Collapse consecutive duplicates only (keep intentional revisits).
-    return path.filter((id, i) => i === 0 || id !== path[i - 1]);
+    const waypointSet = new Set(waypoints);
+    return path.filter((id, i) => {
+      if (i > 0 && id === path[i - 1]) return false;
+      const room = byId[id];
+      if (
+        !sectionShowSmall &&
+        room &&
+        isSectionSmallRoom(room) &&
+        !waypointSet.has(id)
+      ) {
+        return false;
+      }
+      return true;
+    });
   }
 
-  function setSectionWing(wing) {
-    const next = wing === "living" ? "living" : "kitchen";
-    sectionWing = next;
-    sectionWaypoints = [];
+  function setSectionShowSmall(on) {
+    sectionShowSmall = !!on;
     persistSectionPathState();
-    syncSectionWingButtons();
+    syncSectionPathControls();
     if (networkLastData) renderNetwork(networkLastData);
   }
 
@@ -4362,8 +4552,391 @@
     if (!sectionWaypoints.length) return;
     sectionWaypoints = [];
     persistSectionPathState();
-    syncSectionWingButtons();
+    syncSectionPathControls();
     if (networkLastData) renderNetwork(networkLastData);
+  }
+
+  function destroySectionRoomChart() {
+    if (sectionRoomChart) {
+      try {
+        sectionRoomChart.destroy();
+      } catch {
+        /* ignore */
+      }
+      sectionRoomChart = null;
+    }
+    sectionRoomChartCanvas = null;
+  }
+
+  function clearMapRoomSelection() {
+    selectedMapRoomId = null;
+    mapRoomChartSeriesCache = null;
+    if (mapRoomChartsEl) mapRoomChartsEl.hidden = true;
+    if (mapRoomChartsStatusEl) mapRoomChartsStatusEl.textContent = "";
+    if (mapRoomChartsMetaEl) mapRoomChartsMetaEl.textContent = "";
+    if (mapRoomTempChart) {
+      try {
+        mapRoomTempChart.destroy();
+      } catch {
+        /* ignore */
+      }
+      mapRoomTempChart = null;
+    }
+    destroySectionRoomChart();
+    if (networkLastData) renderNetwork(networkLastData);
+  }
+
+  function selectMapRoom(roomId) {
+    const id = String(roomId || "");
+    if (!id) return;
+    if (selectedMapRoomId === id) {
+      clearMapRoomSelection();
+      return;
+    }
+    selectedMapRoomId = id;
+    mapRoomChartSeriesCache = null;
+    if (networkLastData) renderNetwork(networkLastData);
+    loadMapRoomCharts().catch((err) => {
+      if (mapRoomChartsStatusEl) {
+        mapRoomChartsStatusEl.textContent = `Error: ${err.message}`;
+      }
+    });
+  }
+
+  function mapRoomChartOptions(compact) {
+    const opts = structuredClone(chartDefaults);
+    if (opts.plugins && opts.plugins.zoom) delete opts.plugins.zoom;
+    if (opts.plugins && opts.plugins.legend) {
+      opts.plugins.legend.display = true;
+      opts.plugins.legend.position = "bottom";
+      if (compact) {
+        opts.plugins.legend.labels = {
+          boxWidth: 8,
+          boxHeight: 8,
+          font: { size: 9 },
+          color: "rgba(255,255,255,0.92)",
+          padding: 4,
+        };
+      }
+    }
+    if (compact) {
+      opts.maintainAspectRatio = false;
+      opts.layout = { padding: { top: 4, right: 4, bottom: 0, left: 2 } };
+      if (opts.scales) {
+        for (const axis of Object.values(opts.scales)) {
+          if (!axis || typeof axis !== "object") continue;
+          if (!axis.ticks) axis.ticks = {};
+          axis.ticks.maxTicksLimit = 4;
+          axis.ticks.font = { size: 9 };
+          axis.ticks.color = "rgba(255,255,255,0.75)";
+          if (axis.grid) {
+            axis.grid.color = "rgba(255,255,255,0.12)";
+          }
+        }
+      }
+    }
+    return opts;
+  }
+
+  function ensureMapRoomTempChart() {
+    if (mapRoomTempChart || !mapRoomTempCanvas || typeof Chart === "undefined") {
+      return mapRoomTempChart;
+    }
+    mapRoomTempChart = new Chart(mapRoomTempCanvas.getContext("2d"), {
+      type: "line",
+      data: { datasets: [] },
+      options: mapRoomChartOptions(false),
+    });
+    return mapRoomTempChart;
+  }
+
+  function ensureSectionRoomChart() {
+    if (sectionRoomChart || !sectionRoomChartCanvas || typeof Chart === "undefined") {
+      return sectionRoomChart;
+    }
+    sectionRoomChart = new Chart(sectionRoomChartCanvas.getContext("2d"), {
+      type: "line",
+      data: { datasets: [] },
+      options: mapRoomChartOptions(true),
+    });
+    return sectionRoomChart;
+  }
+
+  function syncMapRoomChartLabels() {
+    if (mapRoomChartCaptionEl) {
+      if (networkMapMetric === "humidity") {
+        mapRoomChartCaptionEl.textContent = "Humidity (detail)";
+      } else if (networkMapMetric === "both") {
+        mapRoomChartCaptionEl.textContent = "Temperature + humidity (detail)";
+      } else {
+        mapRoomChartCaptionEl.textContent = "Temperature (detail)";
+      }
+    }
+    if (mapRoomChartsCloseBtn) {
+      mapRoomChartsCloseBtn.title =
+        networkMapMetric === "humidity"
+          ? "Close humidity charts"
+          : networkMapMetric === "both"
+            ? "Close temperature and humidity charts"
+            : "Close temperature charts";
+    }
+  }
+
+  function mapRoomPointSeries(points, field) {
+    return (points || [])
+      .filter(
+        (p) =>
+          p &&
+          p.ts != null &&
+          p[field] != null &&
+          Number.isFinite(Number(p[field]))
+      )
+      .map((p) => ({ x: p.ts * 1000, y: Number(p[field]) }));
+  }
+
+  function countMapRoomChartPoints(series) {
+    if (networkShowsBothMetrics()) {
+      return series.reduce((n, s) => {
+        const pts = s.points || [];
+        return (
+          n +
+          pts.filter(
+            (p) => p.temperature_c != null && Number.isFinite(Number(p.temperature_c))
+          ).length +
+          pts.filter(
+            (p) => p.humidity != null && Number.isFinite(Number(p.humidity))
+          ).length
+        );
+      }, 0);
+    }
+    const field = networkMetricField();
+    return series.reduce(
+      (n, s) =>
+        n +
+        (s.points || []).filter(
+          (p) => p[field] != null && Number.isFinite(Number(p[field]))
+        ).length,
+      0
+    );
+  }
+
+  function configureMapRoomChartAxes(chart, compact) {
+    if (!chart || !chart.options) return;
+    if (!chart.options.scales) chart.options.scales = {};
+    const tickBase = compact
+      ? {
+          maxTicksLimit: 4,
+          font: { size: 9 },
+          color: "rgba(255,255,255,0.75)",
+        }
+      : { color: "#8a9a88" };
+    const gridColor = compact
+      ? "rgba(255,255,255,0.12)"
+      : "rgba(42,53,44,0.7)";
+    if (networkShowsBothMetrics()) {
+      chart.options.scales.y = {
+        type: "linear",
+        position: "left",
+        title: compact
+          ? undefined
+          : { display: true, text: "°C", color: "#c4782a" },
+        ticks: { ...tickBase, color: compact ? tickBase.color : "#c4782a" },
+        grid: { color: gridColor },
+      };
+      chart.options.scales.y1 = {
+        type: "linear",
+        position: "right",
+        title: compact
+          ? undefined
+          : { display: true, text: "% RH", color: "#5b8fd9" },
+        ticks: { ...tickBase, color: compact ? "rgba(180,210,255,0.85)" : "#5b8fd9" },
+        grid: { drawOnChartArea: false },
+      };
+    } else {
+      delete chart.options.scales.y1;
+      chart.options.scales.y = {
+        ticks: tickBase,
+        grid: { color: gridColor },
+      };
+    }
+  }
+
+  function paintMapRoomChartDatasets(series) {
+    const multi = series.length > 1;
+    const build = () => {
+      if (!networkShowsBothMetrics()) {
+        const field = networkMetricField();
+        return series.map((s) =>
+          makeDataset(
+            s.label,
+            s.color,
+            mapRoomPointSeries(s.points, field),
+            !multi
+          )
+        );
+      }
+      const out = [];
+      for (const s of series) {
+        out.push(
+          makeDataset(
+            `${s.label} °C`,
+            s.color,
+            mapRoomPointSeries(s.points, "temperature_c"),
+            false,
+            { yAxisID: "y" }
+          )
+        );
+        out.push(
+          makeDataset(
+            `${s.label} RH`,
+            s.color,
+            mapRoomPointSeries(s.points, "humidity"),
+            false,
+            {
+              yAxisID: "y1",
+              borderDash: [5, 3],
+              borderWidth: 1.5,
+            }
+          )
+        );
+      }
+      return out;
+    };
+    syncMapRoomChartLabels();
+    const panelChart = ensureMapRoomTempChart();
+    if (panelChart) {
+      configureMapRoomChartAxes(panelChart, false);
+      panelChart.data.datasets = build();
+      panelChart.update();
+    }
+    const sectionChart = ensureSectionRoomChart();
+    if (sectionChart) {
+      configureMapRoomChartAxes(sectionChart, true);
+      sectionChart.data.datasets = build();
+      sectionChart.update();
+    }
+  }
+
+  function resolveMapChartTarget() {
+    const id = String(selectedMapRoomId || "");
+    if (!id || !networkLastData) return null;
+    const rooms = networkLastData.rooms || [];
+    const room = rooms.find((r) => String(r.id) === id);
+    if (room) {
+      return {
+        kind: "room",
+        id: String(room.id),
+        label: room.label || room.id,
+        sensors: (room.sensors || []).filter(
+          (s) => String(s.zone || "").toLowerCase() !== "exterior"
+        ),
+        sensorKind: "indoor",
+      };
+    }
+    const byId = Object.fromEntries(rooms.map((r) => [r.id, r]));
+    const path = sectionPathIds(networkLastData).filter((rid) => byId[rid]);
+    if (path.length < 2) return null;
+    const columns = buildSectionColumns(path, rooms, byId);
+    const col = columns.find(
+      (c) => c.kind === "facade" && String(c.id) === id
+    );
+    if (!col) return null;
+    // Deduplicate exterior sensors shared across rooms on the same face.
+    const seen = new Set();
+    const sensors = [];
+    for (const s of col.sensors || []) {
+      const address = String(s.address || "").toUpperCase();
+      const key = address || `${s.name || ""}|${s.height_cm || s.height || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      sensors.push(s);
+    }
+    const orient = col.label || "EXT";
+    return {
+      kind: "facade",
+      id: String(col.id),
+      label: col.sublabel
+        ? `Façade ${orient} · ${col.sublabel}`
+        : `Façade ${orient}`,
+      sensors,
+      sensorKind: "exterior",
+    };
+  }
+
+  async function loadMapRoomCharts() {
+    if (!selectedMapRoomId || !mapRoomChartsEl) return;
+    const target = resolveMapChartTarget();
+    if (!target) {
+      clearMapRoomSelection();
+      return;
+    }
+    mapRoomChartsEl.hidden = false;
+    if (mapRoomChartsTitleEl) {
+      mapRoomChartsTitleEl.textContent = target.label;
+    }
+    const sensors = target.sensors || [];
+    const kindLabel =
+      target.sensorKind === "exterior" ? "exterior" : "indoor";
+    if (mapRoomChartsMetaEl) {
+      mapRoomChartsMetaEl.textContent = sensors.length
+        ? `${sensors.length} ${kindLabel} sensor(s) · last ${mapRoomHours} h`
+        : `No ${kindLabel} sensors on this ${target.kind === "facade" ? "façade" : "room"}`;
+    }
+    if (!sensors.length) {
+      mapRoomChartSeriesCache = { roomId: target.id, series: [] };
+      paintMapRoomChartDatasets([]);
+      if (mapRoomChartsStatusEl) {
+        mapRoomChartsStatusEl.textContent = `No ${kindLabel} sensors to chart.`;
+      }
+      return;
+    }
+    if (mapRoomChartsStatusEl) mapRoomChartsStatusEl.textContent = "Loading…";
+    mapRoomChartsBusy = true;
+    try {
+      const results = await Promise.all(
+        sensors.map(async (sensor, idx) => {
+          const address = String(sensor.address || "").toUpperCase();
+          if (!address) return null;
+          const params = new URLSearchParams({
+            address,
+            hours: String(mapRoomHours),
+          });
+          const res = await fetch(`/api/history?${params}`);
+          if (!res.ok) throw new Error(`history HTTP ${res.status}`);
+          const payload = await res.json();
+          const height = String(sensor.height || "").trim();
+          const cm =
+            sensor.height_cm != null && Number.isFinite(Number(sensor.height_cm))
+              ? `${Math.round(Number(sensor.height_cm))} cm`
+              : "";
+          const heightBit = [height, cm].filter(Boolean).join(" · ");
+          const name = sensor.name || address;
+          return {
+            label: heightBit ? `${name} (${heightBit})` : name,
+            color: roomColor(`${target.id}-${address}`, idx),
+            points: payload.points || [],
+          };
+        })
+      );
+      if (String(selectedMapRoomId) !== String(target.id)) return;
+      const series = results.filter(Boolean);
+      mapRoomChartSeriesCache = { roomId: target.id, series };
+      if (typeof Chart === "undefined") {
+        if (mapRoomChartsStatusEl) {
+          mapRoomChartsStatusEl.textContent = "Chart.js unavailable.";
+        }
+        return;
+      }
+      paintMapRoomChartDatasets(series);
+      const totalPts = countMapRoomChartPoints(series);
+      if (mapRoomChartsStatusEl) {
+        mapRoomChartsStatusEl.textContent = totalPts
+          ? `${series.length} series · ${totalPts} point(s) · updated ${new Date().toLocaleTimeString("en-GB")}`
+          : `No ${networkMetricLabel()} samples in this range.`;
+      }
+    } finally {
+      mapRoomChartsBusy = false;
+    }
   }
 
   function toggleSectionWaypoint(roomId) {
@@ -4376,7 +4949,7 @@
       sectionWaypoints = [...sectionWaypoints, id];
     }
     persistSectionPathState();
-    syncSectionWingButtons();
+    syncSectionPathControls();
     if (networkLastData) renderNetwork(networkLastData);
   }
 
@@ -4472,6 +5045,7 @@
   function renderOpenRoomSection(data) {
     if (!sectionSvgEl) return;
     const NS = "http://www.w3.org/2000/svg";
+    destroySectionRoomChart();
     sectionSvgEl.replaceChildren();
     if (!data || !data.enabled) {
       if (sectionTempScaleEl) sectionTempScaleEl.hidden = true;
@@ -4523,7 +5097,7 @@
     const padT = 28;
     const padB = 48;
     const W = 960;
-    const H = 380;
+    const H = 420;
     const plotW = W - padL - padR;
     const plotH = H - padT - padB;
     const gap = 12;
@@ -4628,6 +5202,26 @@
           ? "#354860"
           : "#2a3230";
 
+      const isMapSelected =
+        String(selectedMapRoomId || "") === String(col.id);
+      const roomGroup = document.createElementNS(NS, "g");
+      if (col.kind === "room" || col.kind === "facade") {
+        roomGroup.setAttribute(
+          "class",
+          col.kind === "facade" ? "section-room-hit section-facade-hit" : "section-room-hit"
+        );
+        roomGroup.style.cursor = "pointer";
+        roomGroup.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (col.kind === "room" && ev.shiftKey) {
+            toggleSectionWaypoint(col.id);
+          } else {
+            selectMapRoom(col.id);
+          }
+        });
+      }
+
       const rect = document.createElementNS(NS, "rect");
       rect.setAttribute("x", String(x));
       rect.setAttribute("y", String(padT));
@@ -4635,18 +5229,28 @@
       rect.setAttribute("height", String(plotH));
       rect.setAttribute("rx", "8");
       rect.setAttribute("ry", "8");
-      rect.setAttribute(
-        "class",
-        col.kind === "facade" ? "section-facade" : "section-room"
-      );
+      let roomClass =
+        col.kind === "facade" ? "section-facade" : "section-room";
+      if (isMapSelected) roomClass += " is-map-selected";
+      rect.setAttribute("class", roomClass);
       rect.setAttribute("fill", fill);
       rect.setAttribute(
         "stroke",
-        col.kind === "facade" ? "#5b8fd9" : "var(--line)"
+        isMapSelected
+          ? "#6fbf73"
+          : col.kind === "facade"
+            ? "#5b8fd9"
+            : "var(--line)"
       );
-      rect.setAttribute("stroke-width", col.kind === "facade" ? "1.75" : "1.5");
-      if (col.kind === "facade") {
+      rect.setAttribute(
+        "stroke-width",
+        isMapSelected ? "3" : col.kind === "facade" ? "1.75" : "1.5"
+      );
+      if (col.kind === "facade" && !isMapSelected) {
         rect.setAttribute("stroke-dasharray", "5 3");
+      }
+      if (isMapSelected) {
+        rect.setAttribute("opacity", "0.42");
       }
       const title = document.createElementNS(NS, "title");
       const sensorBits = (col.sensors || [])
@@ -4655,49 +5259,98 @@
             s.height_cm != null && Number.isFinite(Number(s.height_cm))
               ? `${Math.round(Number(s.height_cm))} cm`
               : String(s.height || "?");
-          return `${s.name} @ ${cm}: ${formatNetworkTemp(networkSensorMetric(s))}`;
+          return `${s.name} @ ${cm}: ${formatNetworkSensorReading(s)}`;
         })
         .join("; ");
       title.textContent =
         (col.kind === "facade"
-          ? `Façade ${col.label}${col.sublabel ? ` · ${col.sublabel}` : ""}`
-          : col.label) +
+          ? `Façade ${col.label}${col.sublabel ? ` · ${col.sublabel}` : ""} — click for temperature charts`
+          : `${col.label} — click for temperature charts`) +
         (sensorBits
           ? `\n${sensorBits}`
           : col.kind === "facade"
             ? "\nNo exterior sensors"
             : "\nNo interior sensors");
       rect.appendChild(title);
-      sectionSvgEl.appendChild(rect);
+      roomGroup.appendChild(rect);
 
-      for (const s of col.sensors || []) {
-        const cm = sensorHeightCm(s, ceilingCm);
-        const t = networkSensorMetric(s);
-        if (cm == null || !Number.isFinite(t)) continue;
-        const y = padT + ((ceilingCm - cm) / ceilingCm) * plotH;
-        const cx = x + w * 0.5;
-        const dot = document.createElementNS(NS, "circle");
-        dot.setAttribute("cx", String(cx));
-        dot.setAttribute("cy", String(y));
-        dot.setAttribute("r", "5");
-        dot.setAttribute("fill", networkTempColor(t, tMin, tMax));
-        dot.setAttribute("stroke", "#fff");
-        dot.setAttribute("stroke-width", "1.5");
-        const tip = document.createElementNS(NS, "title");
-        tip.textContent = `${s.name}: ${formatNetworkTemp(t)} @ ${Math.round(cm)} cm`;
-        dot.appendChild(tip);
-        sectionSvgEl.appendChild(dot);
+      if (!isMapSelected) {
+        for (const s of col.sensors || []) {
+          const cm = sensorHeightCm(s, ceilingCm);
+          const t = networkSensorMetric(s);
+          if (cm == null || !Number.isFinite(t)) continue;
+          const y = padT + ((ceilingCm - cm) / ceilingCm) * plotH;
+          const cx = x + w * 0.5;
+          const dot = document.createElementNS(NS, "circle");
+          dot.setAttribute("cx", String(cx));
+          dot.setAttribute("cy", String(y));
+          dot.setAttribute("r", "5");
+          dot.setAttribute("fill", networkTempColor(t, tMin, tMax));
+          dot.setAttribute("stroke", "#fff");
+          dot.setAttribute("stroke-width", "1.5");
+          dot.setAttribute("pointer-events", "none");
+          const tip = document.createElementNS(NS, "title");
+          tip.textContent = `${s.name}: ${formatNetworkSensorReading(s)} @ ${Math.round(cm)} cm`;
+          dot.appendChild(tip);
+          roomGroup.appendChild(dot);
 
-        const lab = document.createElementNS(NS, "text");
-        lab.setAttribute("x", String(cx + 8));
-        lab.setAttribute("y", String(y + 4));
-        lab.setAttribute("class", "section-sensor-label");
-        lab.setAttribute(
-          "fill",
-          t >= (tMin + tMax) / 2 ? "var(--temp)" : "var(--hum)"
+          const lab = document.createElementNS(NS, "text");
+          lab.setAttribute("x", String(cx + 8));
+          lab.setAttribute("y", String(y + 4));
+          lab.setAttribute("class", "section-sensor-label");
+          lab.setAttribute(
+            "fill",
+            t >= (tMin + tMax) / 2 ? "var(--temp)" : "var(--hum)"
+          );
+          lab.textContent = networkShowsBothMetrics()
+            ? `${formatNetworkSensorReading(s)} · ${Math.round(cm)}`
+            : `${t.toFixed(1)}${networkMetricUnitShort()} · ${Math.round(cm)}`;
+          roomGroup.appendChild(lab);
+        }
+      } else if (w >= 72) {
+        const fo = document.createElementNS(NS, "foreignObject");
+        fo.setAttribute("x", String(x + 5));
+        fo.setAttribute("y", String(padT + 6));
+        fo.setAttribute("width", String(Math.max(40, w - 10)));
+        fo.setAttribute("height", String(Math.max(40, plotH - 12)));
+        fo.setAttribute("class", "section-room-chart-fo");
+        const host = document.createElementNS(
+          "http://www.w3.org/1999/xhtml",
+          "div"
         );
-        lab.textContent = `${t.toFixed(1)}${networkMetricUnitShort()} · ${Math.round(cm)}`;
-        sectionSvgEl.appendChild(lab);
+        host.className = "section-room-chart-host";
+        const toolbar = document.createElementNS(
+          "http://www.w3.org/1999/xhtml",
+          "div"
+        );
+        toolbar.className = "section-room-chart-toolbar";
+        const closeBtn = document.createElementNS(
+          "http://www.w3.org/1999/xhtml",
+          "button"
+        );
+        closeBtn.type = "button";
+        closeBtn.className = "section-room-chart-close";
+        closeBtn.title = "Close temperature charts";
+        closeBtn.setAttribute("aria-label", "Close temperature charts");
+        closeBtn.textContent = "Close";
+        closeBtn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          clearMapRoomSelection();
+        });
+        toolbar.appendChild(closeBtn);
+        const canvas = document.createElementNS(
+          "http://www.w3.org/1999/xhtml",
+          "canvas"
+        );
+        canvas.className = "section-room-temp-chart";
+        host.appendChild(toolbar);
+        host.appendChild(canvas);
+        fo.appendChild(host);
+        // Chart clicks should not toggle selection; use Close.
+        fo.addEventListener("click", (ev) => ev.stopPropagation());
+        roomGroup.appendChild(fo);
+        sectionRoomChartCanvas = canvas;
       }
 
       const nameLab = document.createElementNS(NS, "text");
@@ -4710,15 +5363,16 @@
           : "section-room-label"
       );
       nameLab.textContent = col.label;
-      sectionSvgEl.appendChild(nameLab);
+      roomGroup.appendChild(nameLab);
       if (col.kind === "facade" && col.sublabel) {
         const sub = document.createElementNS(NS, "text");
         sub.setAttribute("x", String(x + w / 2));
         sub.setAttribute("y", String(H - 6));
         sub.setAttribute("class", "section-facade-sublabel");
         sub.textContent = col.sublabel;
-        sectionSvgEl.appendChild(sub);
+        roomGroup.appendChild(sub);
       }
+      sectionSvgEl.appendChild(roomGroup);
 
       if (i < columns.length - 1) {
         const next = columns[i + 1];
@@ -4780,6 +5434,24 @@
         `Ceiling ${ceilingCm} cm · ${labels.join(" → ")}` +
         (linkBits.length ? ` · ${linkBits.join(", ")}` : "") +
         ` · scale ${tMin.toFixed(1)}–${tMax.toFixed(1)} ${networkMetricUnit()}`;
+    }
+
+    if (
+      sectionRoomChartCanvas &&
+      mapRoomChartSeriesCache &&
+      selectedMapRoomId &&
+      String(mapRoomChartSeriesCache.roomId) === String(selectedMapRoomId)
+    ) {
+      const series = mapRoomChartSeriesCache.series || [];
+      requestAnimationFrame(() => {
+        if (
+          sectionRoomChartCanvas &&
+          mapRoomChartSeriesCache &&
+          String(mapRoomChartSeriesCache.roomId) === String(selectedMapRoomId)
+        ) {
+          paintMapRoomChartDatasets(series);
+        }
+      });
     }
   }
 
@@ -5028,9 +5700,18 @@
       }
 
       const bands = networkFacadeTempBands(group.rooms);
-      const highTxt = formatNetworkTempBand(bands.high);
-      const lowTxt = formatNetworkTempBand(bands.low);
-      const otherTxt = formatNetworkTempBand(bands.other);
+      const humBands = networkShowsBothMetrics()
+        ? networkFacadeFieldBands(group.rooms, "humidity")
+        : null;
+      const highTxt = networkShowsBothMetrics()
+        ? formatNetworkBothBand(bands.high, humBands.high)
+        : formatNetworkTempBand(bands.high);
+      const lowTxt = networkShowsBothMetrics()
+        ? formatNetworkBothBand(bands.low, humBands.low)
+        : formatNetworkTempBand(bands.low);
+      const otherTxt = networkShowsBothMetrics()
+        ? formatNetworkBothBand(bands.other, humBands.other)
+        : formatNetworkTempBand(bands.other);
       const roomLabels = group.rooms
         .map((r) => r.label || r.id)
         .join(" + ");
@@ -5100,8 +5781,8 @@
               ? `${Math.round(Number(s.height_cm))} cm`
               : "";
           const hBit = [h, cm].filter(Boolean).join(" · ");
-          return `${s.name}${hBit ? ` [${hBit}]` : ""}: ${formatNetworkTemp(
-            networkSensorMetric(s)
+          return `${s.name}${hBit ? ` [${hBit}]` : ""}: ${formatNetworkSensorReading(
+            s
           )}`;
         })
         .join("; ");
@@ -5173,6 +5854,9 @@
       const isHottest = hottestIds.has(room.id);
       const hasAc = hvacRoomId && room.id === hvacRoomId;
       const bands = networkInteriorTempBands(room);
+      const humBands = networkShowsBothMetrics()
+        ? networkInteriorFieldBands(room, "humidity")
+        : null;
       const contLevels = networkSensorGradientLevels(
         room.sensors || [],
         ceilingCm,
@@ -5198,6 +5882,7 @@
         : roomColor(room.id, 0) + "44";
       const isOnPath = sectionPathSet.has(room.id);
       const isWaypoint = waypointSet.has(room.id);
+      const isMapSelected = String(selectedMapRoomId || "") === String(room.id);
       const waypointIdx = sectionWaypoints.indexOf(room.id);
       const node = document.createElementNS(NS, "rect");
       node.setAttribute("x", String(xy.x - ROOM_W / 2));
@@ -5212,19 +5897,25 @@
           isHottest ? " is-hottest" : ""
         }${hasAc ? " has-ac" : ""}${isOnPath ? " is-section-path" : ""}${
           isWaypoint ? " is-section-waypoint" : ""
-        }`
+        }${isMapSelected ? " is-map-selected" : ""}`
       );
       node.style.cursor = "pointer";
       node.addEventListener("pointerdown", (ev) => {
-        // Keep room clicks from starting a canvas pan.
         ev.stopPropagation();
       });
       node.addEventListener("click", (ev) => {
         ev.stopPropagation();
-        toggleSectionWaypoint(room.id);
+        if (ev.shiftKey) {
+          toggleSectionWaypoint(room.id);
+        } else {
+          selectMapRoom(room.id);
+        }
       });
       node.setAttribute("fill", fill);
-      if (isWaypoint) {
+      if (isMapSelected) {
+        node.setAttribute("stroke", "#6fbf73");
+        node.setAttribute("stroke-width", "3.5");
+      } else if (isWaypoint) {
         node.setAttribute("stroke", "#1f8a70");
         node.setAttribute("stroke-width", "3");
       } else if (isOnPath) {
@@ -5235,11 +5926,20 @@
       } else if (hasAc) {
         node.setAttribute("stroke", "#2b7bbf");
       }
-      const highTxt = formatNetworkTempBand(bands.high);
-      const lowTxt = formatNetworkTempBand(bands.low);
-      const otherTxt = formatNetworkTempBand(
-        [...(bands.mid || []), ...(bands.other || [])]
-      );
+      const highTxt = networkShowsBothMetrics()
+        ? formatNetworkBothBand(bands.high, humBands.high)
+        : formatNetworkTempBand(bands.high);
+      const lowTxt = networkShowsBothMetrics()
+        ? formatNetworkBothBand(bands.low, humBands.low)
+        : formatNetworkTempBand(bands.low);
+      const otherTxt = networkShowsBothMetrics()
+        ? formatNetworkBothBand(
+            [...(bands.mid || []), ...(bands.other || [])],
+            [...(humBands.mid || []), ...(humBands.other || [])]
+          )
+        : formatNetworkTempBand(
+            [...(bands.mid || []), ...(bands.other || [])]
+          );
       const title = document.createElementNS(NS, "title");
       const sensorBits = (room.sensors || [])
         .map((s) => {
@@ -5249,8 +5949,8 @@
               ? `${Math.round(Number(s.height_cm))} cm`
               : "";
           const hBit = [h, cm].filter(Boolean).join(" · ");
-          return `${s.name}${hBit ? ` [${hBit}]` : ""}: ${formatNetworkTemp(
-            networkSensorMetric(s)
+          return `${s.name}${hBit ? ` [${hBit}]` : ""}: ${formatNetworkSensorReading(
+            s
           )}`;
         })
         .join("; ");
@@ -5270,7 +5970,8 @@
           (mode ? ` (${mode})` : "") +
           ` · ${setBit} · ${powBit}`;
       }
-      const peakLabel = networkMapMetric === "humidity" ? "most humid" : "hottest";
+      const peakLabel =
+        networkMapMetric === "humidity" ? "most humid" : "hottest";
       const pathBit = isWaypoint
         ? `\nSection waypoint #${waypointIdx + 1} (click to remove)`
         : isOnPath
@@ -5320,14 +6021,21 @@
       lab.textContent = room.label || room.id;
       gLabels.appendChild(lab);
 
-      const roomFallback =
-        networkMapMetric === "temp"
+      const indoorSensors = (room.sensors || []).filter(
+        (s) => String(s.zone || "").toLowerCase() !== "exterior"
+      );
+      const roomFallback = networkShowsBothMetrics()
+        ? formatNetworkBothBand(
+            indoorSensors.map((s) =>
+              networkSensorFieldValue(s, "temperature_c")
+            ),
+            indoorSensors.map((s) => networkSensorFieldValue(s, "humidity"))
+          )
+        : networkMapMetric === "temp"
           ? formatNetworkTemp(room.temp_c)
           : formatNetworkTemp(
               networkAvgTemp(
-                (room.sensors || [])
-                  .filter((s) => String(s.zone || "").toLowerCase() !== "exterior")
-                  .map((s) => networkSensorMetric(s))
+                indoorSensors.map((s) => networkSensorMetric(s))
               )
             );
       const bottomTxt =
@@ -5781,7 +6489,8 @@
     const rooms = data.rooms || [];
     const groups = groupRoomsByFacade(rooms);
     const outdoorPoints = outdoor.points || [];
-    const hours = data.hours || 24;
+    const pastHours = data.hours || 24;
+    const futureHours = data.future_hours != null ? data.future_hours : pastHours;
 
     if (!groups.length || !outdoor.available || !outdoorPoints.length) {
       facadeChartsEl.hidden = true;
@@ -5789,6 +6498,9 @@
     }
 
     facadeChartsEl.hidden = false;
+    const nowMs = Date.now();
+    const xMin = nowMs - pastHours * 3600 * 1000;
+    const xMax = nowMs + futureHours * 3600 * 1000;
     groups.forEach((group, gIdx) => {
       const figure = document.createElement("figure");
       figure.className = "chart-block facade-chart-block";
@@ -5796,7 +6508,7 @@
       const caption = document.createElement("figcaption");
       const roomNames = group.rooms.map((r) => r.label || r.id).join(", ");
       caption.innerHTML = `${escapeHtml(group.label)} façade
-        <span class="overview-meta">${escapeHtml(roomNames)} · ±${hours} h</span>`;
+        <span class="overview-meta">${escapeHtml(roomNames)} · −${pastHours} h / +${futureHours} h</span>`;
 
       const canvas = document.createElement("canvas");
       canvas.id = `facade-chart-${gIdx}`;
@@ -5918,6 +6630,10 @@
       opts.plugins.legend.display = datasets.length > 1;
       // Compare-only: no drag-zoom on façade overview charts.
       if (opts.plugins.zoom) delete opts.plugins.zoom;
+      if (!opts.scales) opts.scales = {};
+      if (!opts.scales.x) opts.scales.x = {};
+      opts.scales.x.min = xMin;
+      opts.scales.x.max = xMax;
 
       const chart = new Chart(canvas, {
         type: "line",
@@ -5950,7 +6666,7 @@
             <h3>${escapeHtml(where)}</h3>
             <p>
               Now <strong>${Number(outdoor.temp_now).toFixed(1)} °C</strong>
-              · ±${hours} h
+              · −${data.hours || hours} h / +${data.future_hours != null ? data.future_hours : hours} h
               <strong>${fmtRangeC(outdoor.temp_min, outdoor.temp_max)}</strong>
               ${
                 outdoor.cloud_cover != null
@@ -6888,14 +7604,57 @@
 
   function renderProjections(forecast) {
     if (!projectionsEl) return;
-    if (!showForecast || !forecast || !forecast.enabled) {
+    const stationBlock = (forecast && forecast.station) || {};
+    const stationList = (
+      Array.isArray(stationBlock.stations) && stationBlock.stations.length
+        ? stationBlock.stations
+        : stationBlock.enabled
+          ? [stationBlock]
+          : []
+    ).filter(
+      (s) => s && s.enabled && (s.latest || (s.points || []).length)
+    );
+    const hasStation = stationList.length > 0;
+    if ((!showForecast || !forecast || !forecast.enabled) && !hasStation) {
       clearProjections();
       return;
     }
 
     const cards = [];
-    const loc = forecast.location;
-    if (loc && (forecast.outdoor || []).length) {
+    for (const station of stationList) {
+      const latest =
+        station.latest ||
+        (station.points || []).slice().sort((a, b) => a.ts - b.ts).pop();
+      const name = station.station_name || station.station_id || "Station";
+      const t =
+        latest && latest.temperature_c != null
+          ? `${Number(latest.temperature_c).toFixed(1)} °C`
+          : "—";
+      const h =
+        latest && latest.humidity != null
+          ? `${Number(latest.humidity).toFixed(0)} %`
+          : "—";
+      const when =
+        latest && latest.ts
+          ? new Date(latest.ts * 1000).toLocaleTimeString("en-GB", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "";
+      cards.push(`
+        <article class="projection-card projection-weather">
+          <h4>Station · ${escapeHtml(name)}</h4>
+          <p class="projection-meta">
+            Now <strong>${escapeHtml(t)}</strong>
+            · RH <strong>${escapeHtml(h)}</strong>
+            ${when ? ` · ${escapeHtml(when)}` : ""}
+            · Météo-France
+          </p>
+        </article>
+      `);
+    }
+    const loc = forecast && forecast.location;
+    if (showForecast && forecast && forecast.enabled && loc && (forecast.outdoor || []).length) {
       const temps = forecast.outdoor.map((p) => p.temperature_c);
       const hums = forecast.outdoor.map((p) => p.humidity);
       const where = [loc.name, loc.admin1].filter(Boolean).join(", ");
@@ -6921,9 +7680,9 @@
       `);
     }
 
-    const projections = forecast.projections || {};
+    const projections = (forecast && forecast.projections) || {};
     let projCount = 0;
-    for (const device of selectedDevices()) {
+    for (const device of showForecast ? selectedDevices() : []) {
       const proj = projections[device.address];
       if (!proj || !proj.summary) continue;
       projCount += 1;
@@ -7001,20 +7760,26 @@
     if (foldProjectionsEl) foldProjectionsEl.hidden = false;
     if (foldProjectionsMetaEl) {
       const bits = [];
-      if (loc && (forecast.outdoor || []).length) bits.push("weather");
+      if (hasStation) {
+        bits.push(
+          stationList.length === 1
+            ? stationList[0].station_name || "station"
+            : `${stationList.length} stations`
+        );
+      }
+      if (showForecast && loc && (forecast.outdoor || []).length) bits.push("weather");
       if (projCount) bits.push(`${projCount} sensor${projCount === 1 ? "" : "s"}`);
       foldProjectionsMetaEl.textContent = bits.length ? `· ${bits.join(" · ")}` : "";
     }
   }
 
   async function fetchForecast(addresses) {
-    if (!showForecast && !showWindowBands && !windowNotify) {
-      return { enabled: false, outdoor: [], projections: {} };
-    }
     await requestBrowserGeo(false);
     const params = new URLSearchParams({
-      // Forecast API caps at 168 h; chart history may be longer.
-      hours: String(Math.min(rangeSpanHours(), 168)),
+      // Past outdoor for bands / alignment; future horizon is independent.
+      // Open-Meteo forecast max is 16 d (384 h).
+      hours: String(Math.min(rangeSpanHours(), 384)),
+      future_hours: String(forecastFutureHours),
     });
     for (const address of addresses) {
       params.append("address", address);
@@ -7556,8 +8321,15 @@
       );
     });
 
-    if (forecast && forecast.enabled) {
-      const outdoor = forecast.outdoor || [];
+    if (
+      (forecast && forecast.enabled) ||
+      (forecast &&
+        forecast.station &&
+        (forecast.station.enabled ||
+          (Array.isArray(forecast.station.stations) &&
+            forecast.station.stations.some((s) => s && s.enabled))))
+    ) {
+      const outdoor = (forecast && forecast.outdoor) || [];
       if (outdoor.length && (showForecast || showWindowBands)) {
         const weatherColor = "#c5c9c4";
         const locName = (forecast.location && forecast.location.name) || "Weather";
@@ -7594,7 +8366,61 @@
         }
       }
 
-      if (showForecast) {
+      const stationBlock = forecast.station || {};
+      const stationList =
+        Array.isArray(stationBlock.stations) && stationBlock.stations.length
+          ? stationBlock.stations
+          : stationBlock.enabled
+            ? [stationBlock]
+            : [];
+      const stationColors = ["#6fbf73", "#e8a838", "#5dade2", "#af7ac5"];
+      stationList.forEach((station, idx) => {
+        const stationPts = (station && station.points) || [];
+        if (!station || !station.enabled || !stationPts.length) return;
+        const stName = station.station_name || station.station_id || "Station";
+        const stColor = stationColors[idx % stationColors.length];
+        tempDatasets.push(
+          makeDataset(
+            `${stName} (station)`,
+            stColor,
+            stationPts
+              .filter((p) => p.temperature_c != null)
+              .map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+            false,
+            { borderWidth: 2.25, pointRadius: 2 }
+          )
+        );
+        const humPts = stationPts.filter(
+          (p) => p.humidity != null && Number.isFinite(Number(p.humidity))
+        );
+        if (humPts.length) {
+          humDatasets.push(
+            makeDataset(
+              `${stName} (station)`,
+              stColor,
+              humPts.map((p) => ({ x: p.ts * 1000, y: p.humidity })),
+              false,
+              { borderWidth: 2.25, pointRadius: 2 }
+            )
+          );
+          dewDatasets.push(
+            makeDataset(
+              `${stName} (station)`,
+              stColor,
+              humPts
+                .filter((p) => p.temperature_c != null && p.humidity > 0)
+                .map((p) => ({
+                  x: p.ts * 1000,
+                  y: dewPoint(p.temperature_c, p.humidity),
+                })),
+              false,
+              { borderWidth: 2.25, pointRadius: 2 }
+            )
+          );
+        }
+      });
+
+      if (showForecast && forecast.enabled) {
         const projections = forecast.projections || {};
         const showAuto = projectionScenario === "auto";
         const showClosed =
@@ -7815,11 +8641,7 @@
     tempChart.update();
     humChart.update();
     dewChart.update();
-    if (showForecast) {
-      renderProjections(forecast);
-    } else {
-      clearProjections();
-    }
+    renderProjections(forecast);
     historyLoaded = true;
     evaluateWindowNotifications(forecast).catch((err) => console.warn(err));
     updateWindowBanner(forecast).catch((err) => console.warn(err));
@@ -7918,57 +8740,40 @@
       setNetworkMapMetric(btn.dataset.mapMetric);
     });
   });
-  sectionWingButtons.forEach((btn) => {
-    btn.addEventListener("click", () => {
-      setSectionWing(btn.dataset.sectionWing);
+  if (sectionShowSmallEl) {
+    sectionShowSmallEl.addEventListener("change", () => {
+      setSectionShowSmall(sectionShowSmallEl.checked);
     });
-  });
+  }
   if (sectionPathClearBtn) {
     sectionPathClearBtn.addEventListener("click", () => {
       clearSectionWaypoints();
     });
   }
-  if (networkCanvasWrapEl && networkSvgEl) {
-    networkCanvasWrapEl.addEventListener(
-      "wheel",
-      (ev) => {
-        if (currentView !== "network") return;
-        ev.preventDefault();
-        const factor = ev.deltaY < 0 ? 1.12 : 1 / 1.12;
-        setNetworkZoom(networkZoom * factor, ev.clientX, ev.clientY);
-      },
-      { passive: false }
-    );
-    networkCanvasWrapEl.addEventListener("pointerdown", (ev) => {
-      if (currentView !== "network" || ev.button !== 0) return;
-      networkPanDrag = { x: ev.clientX, y: ev.clientY };
-      networkCanvasWrapEl.classList.add("is-panning");
-      networkCanvasWrapEl.setPointerCapture(ev.pointerId);
-    });
-    networkCanvasWrapEl.addEventListener("pointermove", (ev) => {
-      if (!networkPanDrag) return;
-      const rect = networkCanvasWrapEl.getBoundingClientRect();
-      const dx = ev.clientX - networkPanDrag.x;
-      const dy = ev.clientY - networkPanDrag.y;
-      networkPanDrag = { x: ev.clientX, y: ev.clientY };
-      const vw = NETWORK_VB_W / networkZoom;
-      const vh = NETWORK_VB_H / networkZoom;
-      networkPan.x -= (dx / Math.max(rect.width, 1)) * vw;
-      networkPan.y -= (dy / Math.max(rect.height, 1)) * vh;
-      applyNetworkViewBox();
-    });
-    const endPan = (ev) => {
-      if (!networkPanDrag) return;
-      networkPanDrag = null;
-      networkCanvasWrapEl.classList.remove("is-panning");
-      try {
-        networkCanvasWrapEl.releasePointerCapture(ev.pointerId);
-      } catch {
-        /* ignore */
+  mapRoomRangeButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const h = Number(btn.dataset.mapHours);
+      if (!Number.isFinite(h) || h <= 0) return;
+      mapRoomHours = h;
+      mapRoomRangeButtons.forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      if (selectedMapRoomId) {
+        loadMapRoomCharts().catch((err) => {
+          if (mapRoomChartsStatusEl) {
+            mapRoomChartsStatusEl.textContent = `Error: ${err.message}`;
+          }
+        });
       }
-    };
-    networkCanvasWrapEl.addEventListener("pointerup", endPan);
-    networkCanvasWrapEl.addEventListener("pointercancel", endPan);
+    });
+  });
+  if (mapRoomChartsCloseBtn) {
+    mapRoomChartsCloseBtn.addEventListener("click", () => {
+      clearMapRoomSelection();
+    });
+  }
+  if (networkCanvasWrapEl && networkSvgEl) {
+    // Drag-pan and wheel-zoom disabled: keep the map fixed.
+    // Use the +/- / reset buttons to change zoom.
   }
 
   deviceList.addEventListener("change", onSelectionChange);
@@ -8083,6 +8888,7 @@
       localStorage.setItem(FORECAST_KEY, showForecast ? "1" : "0");
       if (!showForecast) clearProjections();
       syncProjectionScenarioControl();
+      syncForecastFutureButtons();
       updateGeoStatus();
       if (currentView === "compare") {
         loadHistory().catch((err) => {
@@ -8091,6 +8897,15 @@
       }
     });
   }
+
+  document
+    .querySelectorAll(".forecast-future-ranges > button[data-forecast-future]")
+    .forEach((btn) => {
+      btn.addEventListener("click", () => {
+        setForecastFutureHours(btn.dataset.forecastFuture);
+      });
+    });
+  syncForecastFutureButtons();
 
   if (projectionScenarioEl) {
     syncProjectionScenarioControl();
@@ -8122,6 +8937,7 @@
     showWindowBandsEl.addEventListener("change", () => {
       showWindowBands = showWindowBandsEl.checked;
       localStorage.setItem(WINDOW_BANDS_KEY, showWindowBands ? "1" : "0");
+      syncForecastFutureButtons();
       if (currentView === "compare") {
         loadHistory().catch((err) => {
           statusEl.textContent = `Error: ${err.message}`;
@@ -8687,14 +9503,20 @@
   syncCoverageRangeButtons();
 
   const savedMapMetric = localStorage.getItem("govee-charts.mapMetric");
-  if (savedMapMetric === "humidity" || savedMapMetric === "temp") {
+  if (
+    savedMapMetric === "humidity" ||
+    savedMapMetric === "temp" ||
+    savedMapMetric === "both"
+  ) {
     networkMapMetric = savedMapMetric;
   }
   syncNetworkMetricButtons();
 
-  const savedSectionWing = localStorage.getItem("govee-charts.sectionWing");
-  if (savedSectionWing === "living" || savedSectionWing === "kitchen") {
-    sectionWing = savedSectionWing;
+  const savedSectionShowSmall = localStorage.getItem(
+    "govee-charts.sectionShowSmall"
+  );
+  if (savedSectionShowSmall === "1" || savedSectionShowSmall === "0") {
+    sectionShowSmall = savedSectionShowSmall === "1";
   }
   try {
     const rawWp = localStorage.getItem("govee-charts.sectionWaypoints");
@@ -8709,7 +9531,7 @@
   } catch (_) {
     sectionWaypoints = [];
   }
-  syncSectionWingButtons();
+  syncSectionPathControls();
 
   loadPersistedRange();
   syncRangeControls();

@@ -1316,6 +1316,54 @@ main {
   font-size: 0.95rem;
 }
 
+.map-click-help {
+  list-style: none;
+  margin: 0.65rem 0 0;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-elev) 60%, transparent);
+  display: grid;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+.map-click-help li {
+  display: grid;
+  grid-template-columns: minmax(9.5rem, auto) 1fr;
+  gap: 0.55rem 0.85rem;
+  align-items: baseline;
+}
+
+.map-click-keys {
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.map-click-help kbd {
+  display: inline-block;
+  margin: 0 0.05rem;
+  padding: 0.08rem 0.38rem;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg) 80%, var(--bg-elev));
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+@media (max-width: 640px) {
+  .map-click-help li {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+  }
+}
+
 .model-filters {
   display: flex;
   flex-wrap: wrap;
@@ -2073,6 +2121,46 @@ main {
   accent-color: var(--accent);
 }
 
+.forecast-future-ranges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.forecast-future-label {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin-right: 0.1rem;
+}
+
+.forecast-future-ranges button {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.35rem 0.55rem;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.forecast-future-ranges button:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+.forecast-future-ranges button.active {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.forecast-future-ranges button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .projection-scenario-toggle select {
   margin: 0;
   padding: 0.2rem 0.4rem;
@@ -2659,6 +2747,51 @@ main {
   gap: 0.55rem 0.85rem;
 }
 
+.section-small-rooms {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--ink);
+  font-size: 0.88rem;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+
+.section-small-rooms input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.section-path-clear {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.4rem 0.75rem;
+  font: inherit;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.section-path-clear:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+.section-path-clear.active {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.section-path-clear:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .section-meta {
   margin: 0 0 0.55rem;
   color: var(--muted);
@@ -2674,8 +2807,81 @@ main {
   display: block;
   width: 100%;
   height: auto;
-  min-height: 280px;
-  max-height: 420px;
+  min-height: 300px;
+  max-height: 480px;
+}
+
+.section-room-hit .section-room {
+  transition: stroke-width 0.12s ease, opacity 0.12s ease;
+}
+
+.section-room-hit:hover .section-room:not(.is-map-selected),
+.section-room-hit:hover .section-facade:not(.is-map-selected) {
+  stroke: #8fd48a;
+  stroke-width: 2.25;
+}
+
+.section-room.is-map-selected,
+.section-facade.is-map-selected {
+  stroke: #6fbf73;
+}
+
+.section-room-hit .section-room-label,
+.section-room-hit .section-facade-sublabel {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.section-room-chart-fo {
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.section-room-chart-host {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 0.25rem;
+  gap: 0.2rem;
+  border-radius: 6px;
+  background: rgba(10, 16, 14, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.section-room-chart-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+}
+
+.section-room-chart-close {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 5px;
+  background: rgba(20, 28, 24, 0.92);
+  color: #f2f6f1;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 0.22rem 0.55rem;
+  cursor: pointer;
+}
+
+.section-room-chart-close:hover {
+  background: rgba(40, 52, 44, 0.98);
+  border-color: rgba(255, 255, 255, 0.55);
+}
+
+.section-room-chart-host canvas,
+.section-room-temp-chart {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100% !important;
+  height: 100% !important;
 }
 
 .section-room-label {
@@ -2803,18 +3009,14 @@ main {
   width: 100%;
   margin-top: 0.85rem;
   overflow: hidden;
-  touch-action: none;
+  touch-action: auto;
   border: 1px solid var(--line);
   border-radius: 6px;
   background:
     radial-gradient(ellipse at 20% 10%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 55%),
     radial-gradient(ellipse at 80% 90%, color-mix(in srgb, #5b8fd9 10%, transparent), transparent 50%),
     color-mix(in srgb, var(--bg) 92%, #dfe4e0);
-  cursor: grab;
-}
-
-.network-canvas-wrap.is-panning {
-  cursor: grabbing;
+  cursor: default;
 }
 
 .network-svg {
@@ -2823,6 +3025,75 @@ main {
   min-height: 520px;
   height: min(78vh, 760px);
   user-select: none;
+}
+
+.map-room-charts {
+  margin-top: 0.85rem;
+  padding: 0.85rem 1rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-elev) 55%, transparent);
+}
+
+.map-room-charts-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 1rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.35rem;
+}
+
+.map-room-charts-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.65rem;
+  align-items: center;
+}
+
+.map-room-charts-close {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, #c45c5c);
+  border-radius: 6px;
+  background: color-mix(in srgb, #3a2222 55%, var(--bg-elev));
+  color: #f3dede;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+}
+
+.map-room-charts-close:hover {
+  background: color-mix(in srgb, #5a2e2e 65%, var(--bg-elev));
+  border-color: #d88;
+  color: #fff;
+}
+
+.map-room-charts-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.map-room-charts-meta {
+  margin: 0 0 0.65rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.map-room-chart-block {
+  margin: 0;
+}
+
+.map-room-chart-block figcaption {
+  margin-bottom: 0.35rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.network-node-room.is-map-selected {
+  stroke: #6fbf73 !important;
+  stroke-width: 3.5 !important;
 }
 
 .network-edge {

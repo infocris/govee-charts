@@ -192,6 +192,14 @@
           <input type="checkbox" id="show-forecast" checked>
           <span>Forecast &amp; projections</span>
         </label>
+        <div class="ranges forecast-future-ranges" role="group" aria-label="Forecast horizon">
+          <span class="forecast-future-label">Future</span>
+          <button type="button" data-forecast-future="12">+12 h</button>
+          <button type="button" data-forecast-future="24" class="active">+1 d</button>
+          <button type="button" data-forecast-future="72">+3 d</button>
+          <button type="button" data-forecast-future="168">+7 d</button>
+          <button type="button" data-forecast-future="384">+16 d</button>
+        </div>
         <label class="forecast-toggle projection-scenario-toggle" for="projection-scenario">
           <span>Scenario</span>
           <select id="projection-scenario" title="Which window scenario to plot">
@@ -271,6 +279,14 @@
           Set which compass orientations each room faces outdoors.
           Empty = no exterior contact (e.g. corridor). Saved immediately.
         </p>
+        <div class="ranges forecast-future-ranges" role="group" aria-label="Forecast horizon">
+          <span class="forecast-future-label">Future</span>
+          <button type="button" data-forecast-future="12">+12 h</button>
+          <button type="button" data-forecast-future="24" class="active">+1 d</button>
+          <button type="button" data-forecast-future="72">+3 d</button>
+          <button type="button" data-forecast-future="168">+7 d</button>
+          <button type="button" data-forecast-future="384">+16 d</button>
+        </div>
       </div>
       <p class="facade-meta" id="facade-meta" aria-live="polite">Loading…</p>
       <div class="facade-outdoor" id="facade-outdoor" hidden aria-live="polite"></div>
@@ -306,15 +322,41 @@
       <div class="overview-head">
         <h2>Apartment map</h2>
         <p class="overview-hint">
-          Cross-section follows a path from one façade to the other through
-          rooms you click on the topology graph (Kitchen / Living presets available).
-          Colored by temperature or humidity at each sensor height.
+          Topology and open-room cross-section, colored by temperature or humidity
+          at each sensor height.
         </p>
+        <ul class="map-click-help" aria-label="Click actions">
+          <li>
+            <span class="map-click-keys"><kbd>Click</kbd></span>
+            room (map or section) or façade (section) — open charts (metric: Temp / Humidity / Both)
+          </li>
+          <li>
+            <span class="map-click-keys"><kbd>Shift</kbd>+<kbd>Click</kbd></span>
+            room — add / remove a cross-section path waypoint
+          </li>
+          <li>
+            <span class="map-click-keys"><kbd>Close</kbd> / <kbd>Close charts</kbd></span>
+            — leave the graph and clear selection
+          </li>
+          <li>
+            <span class="map-click-keys"><kbd>Clear</kbd></span>
+            — reset custom section waypoints
+          </li>
+          <li>
+            <span class="map-click-keys"><kbd>Small rooms</kbd></span>
+            — include bathroom / WC in the cross-section (off by default)
+          </li>
+          <li>
+            <span class="map-click-keys"><kbd>+</kbd> · <kbd>−</kbd> · <kbd>100%</kbd></span>
+            — zoom the topology map
+          </li>
+        </ul>
       </div>
       <div class="network-metric-bar">
         <div class="ranges network-metric-ranges" role="group" aria-label="Map metric">
           <button type="button" data-map-metric="temp" class="active">Temperature</button>
           <button type="button" data-map-metric="humidity">Humidity</button>
+          <button type="button" data-map-metric="both">Both</button>
         </div>
       </div>
       <p class="network-meta" id="network-meta" aria-live="polite">Loading…</p>
@@ -323,11 +365,11 @@
         <div class="section-head">
           <h3>Open-room cross-section</h3>
           <div class="section-head-right">
-            <div class="ranges section-wing-ranges" role="group" aria-label="Cross-section wing">
-              <button type="button" data-section-wing="kitchen" class="active">Kitchen</button>
-              <button type="button" data-section-wing="living">Living</button>
-              <button type="button" id="section-path-clear" title="Clear clicked rooms">Clear</button>
-            </div>
+            <label class="section-small-rooms" title="Bathroom, WC, and other rooms under 3.5 m²">
+              <input type="checkbox" id="section-show-small" />
+              Small rooms
+            </label>
+            <button type="button" id="section-path-clear" class="section-path-clear" title="Clear clicked rooms">Clear</button>
             <span class="net-temp-scale" id="section-temp-scale" hidden>
               <span class="net-temp-scale-lo" id="section-temp-scale-lo">—</span>
               <span class="net-temp-scale-bar" aria-hidden="true"></span>
@@ -338,6 +380,32 @@
         <p class="section-meta" id="section-meta" aria-live="polite"></p>
         <div class="section-canvas-wrap" id="section-canvas-wrap">
           <svg id="section-svg" class="section-svg" role="img" aria-label="Apartment cross-section"></svg>
+        </div>
+        <div class="map-room-charts" id="map-room-charts" hidden>
+          <div class="map-room-charts-head">
+            <h3 id="map-room-charts-title">Room temperatures</h3>
+            <div class="map-room-charts-actions">
+              <div class="ranges map-room-ranges" role="group" aria-label="Room chart range">
+                <button type="button" data-map-hours="6">6 h</button>
+                <button type="button" data-map-hours="24" class="active">24 h</button>
+                <button type="button" data-map-hours="168">7 d</button>
+              </div>
+              <button
+                type="button"
+                id="map-room-charts-close"
+                class="map-room-charts-close"
+                title="Close temperature charts"
+              >
+                Close charts
+              </button>
+            </div>
+          </div>
+          <p class="map-room-charts-meta" id="map-room-charts-meta" aria-live="polite"></p>
+          <figure class="chart-block map-room-chart-block map-room-chart-block-panel">
+            <figcaption id="map-room-chart-caption">Temperature (detail)</figcaption>
+            <canvas id="map-room-temp-chart" height="200"></canvas>
+          </figure>
+          <p class="status" id="map-room-charts-status" aria-live="polite"></p>
         </div>
       </div>
 

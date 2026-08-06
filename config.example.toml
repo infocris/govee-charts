@@ -53,6 +53,25 @@ tau_min_hours = 0.5
 tau_max_hours = 24
 tau_default_hours = 3
 
+# Optional Météo-France in-situ stations (real measurements, ~24 h retention).
+# basic_auth_file: Base64 "client_id:secret" from portail-api.meteofrance.fr
+# (same value as Authorization Basic … without the "Basic " prefix).
+# Prefer [[weather.meteofrance.stations]]; legacy station_id / station_name still work.
+[weather.meteofrance]
+enabled = false
+basic_auth_file = "data/secrets/meteofrance_basic.b64"
+cache_seconds = 300
+
+# [[weather.meteofrance.stations]]
+# id = "92073001"
+# name = "Suresnes"
+# [[weather.meteofrance.stations]]
+# id = "75107005"
+# name = "Tour Eiffel"
+# [[weather.meteofrance.stations]]
+# id = "75116008"
+# name = "Longchamp"
+
 # Multi-room RC network (corridor hub). Maps device.room → node.
 # Set enabled = true when sensors have room categories assigned.
 [apartment]

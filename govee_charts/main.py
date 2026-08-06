@@ -75,6 +75,14 @@ DEFAULTS: dict[str, Any] = {
         "tau_max_hours": 24,
         "tau_default_hours": 3,
         "cache_path": "data/weather_cache.json",
+        "meteofrance": {
+            "enabled": False,
+            "station_id": "",
+            "station_name": "",
+            "stations": [],
+            "basic_auth_file": "data/secrets/meteofrance_basic.b64",
+            "cache_seconds": 300,
+        },
     },
     "apartment": default_apartment_dict(),
     "doors": {
@@ -453,6 +461,12 @@ def _build_weather(cfg: dict[str, Any]) -> WeatherService:
                 apartment.floor,
                 apartment.floors_total,
             )
+        mf = weather_cfg.meteofrance
+        if mf.ready:
+            names = ", ".join(
+                f"{st.name or st.id} ({st.id})" for st in mf.station_list
+            )
+            logging.info("Météo-France stations enabled: %s", names)
     else:
         logging.info("Weather forecast disabled (set weather.enabled=true)")
     return weather

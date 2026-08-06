@@ -21,6 +21,7 @@ from govee_charts.apartment import (
     solar_bias_c,
 )
 from govee_charts.db import Database
+from govee_charts.meteofrance import MeteoFranceClient, MeteoFranceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,9 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CACHE_PATH = ROOT / "data" / "weather_cache.json"
+# Open-Meteo /v1/forecast: forecast_days 0–16.
+FORECAST_MAX_DAYS = 16
+FORECAST_MAX_HOURS = FORECAST_MAX_DAYS * 24
 
 # Minimum aligned hourly pairs before RC fit is trusted.
 _MIN_ALIGNED = 12
@@ -55,6 +59,7 @@ class WeatherConfig:
     tau_max_hours: float = 24.0
     tau_default_hours: float = 3.0
     cache_path: str = "data/weather_cache.json"
+    meteofrance: MeteoFranceConfig = MeteoFranceConfig()
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> WeatherConfig:
@@ -69,6 +74,9 @@ class WeatherConfig:
             longitude = float(lon) if lon not in (None, "") else None
         except (TypeError, ValueError):
             longitude = None
+        mf_raw = raw.get("meteofrance")
+        if not isinstance(mf_raw, dict):
+            mf_raw = {}
         return cls(
             enabled=bool(raw.get("enabled", False)),
             place=str(raw.get("place") or "").strip(),
@@ -83,6 +91,7 @@ class WeatherConfig:
             tau_max_hours=float(raw.get("tau_max_hours") or 24.0),
             tau_default_hours=float(raw.get("tau_default_hours") or 3.0),
             cache_path=str(raw.get("cache_path") or "data/weather_cache.json"),
+            meteofrance=MeteoFranceConfig.from_dict(mf_raw),
         )
 
     @property
@@ -538,6 +547,7 @@ class WeatherService:
                 path = ROOT / path
         self._disk_path = path
         self._disk: dict[str, Any] = self._load_disk()
+        self._meteofrance = MeteoFranceClient(cfg.meteofrance, root=ROOT)
 
     @property
     def enabled(self) -> bool:
@@ -549,6 +559,49 @@ class WeatherService:
         return bool(self.cfg.place) or (
             self.cfg.latitude is not None and self.cfg.longitude is not None
         )
+
+    async def _station_payload(self, past_h: float) -> dict[str, Any]:
+        if not self.cfg.meteofrance.ready:
+            return {
+                "enabled": False,
+                "points": [],
+                "latest": None,
+                "stations": [],
+            }
+        try:
+            return await self._meteofrance.fetch_series(hours=min(past_h, 24.0))
+        except Exception as exc:
+            logger.warning("Météo-France station series failed: %s", exc)
+            mf = self.cfg.meteofrance
+            empties = [
+                {
+                    "enabled": True,
+                    "error": str(exc),
+                    "station_id": st.id,
+                    "station_name": st.name or st.id,
+                    "points": [],
+                    "latest": None,
+                }
+                for st in mf.station_list
+            ]
+            primary = empties[0] if empties else None
+            return {
+                "enabled": True,
+                "error": str(exc),
+                "station_id": mf.station_id,
+                "station_name": mf.station_name or mf.station_id,
+                "points": [],
+                "latest": None,
+                "stations": empties,
+                **(
+                    {
+                        "station_id": primary["station_id"],
+                        "station_name": primary["station_name"],
+                    }
+                    if primary
+                    else {}
+                ),
+            }
 
     def _open_outdoor_for_room(
         self,
@@ -712,16 +765,27 @@ class WeatherService:
             }
         return await self._resolve_config_location(client)
 
-    def _make_cache_key(self, lat: float, lon: float) -> str:
+    def _make_cache_key(self, lat: float, lon: float, horizon_hours: int) -> str:
         return _cache_key(
-            lat, lon, self.cfg.forecast_hours, self.cfg.past_days
+            lat, lon, horizon_hours, self.cfg.past_days
         )
+
+    def _horizon_hours(self, requested: float | None = None) -> int:
+        """Hours of future weather to fetch (Open-Meteo day budget, max 16 d)."""
+        need = max(int(self.cfg.forecast_hours), 24)
+        if requested is not None:
+            try:
+                need = max(need, int(math.ceil(float(requested))))
+            except (TypeError, ValueError):
+                pass
+        return max(24, min(FORECAST_MAX_HOURS, need))
 
     async def fetch_forecast(
         self,
         *,
         latitude: float | None = None,
         longitude: float | None = None,
+        horizon_hours: float | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
             return {"enabled": False, "outdoor": [], "location": None}
@@ -736,6 +800,8 @@ class WeatherService:
                 "outdoor": [],
                 "location": None,
             }
+
+        need_h = self._horizon_hours(horizon_hours)
 
         async with self._lock:
             # Resolve key: for config location we need coords first (may use cache)
@@ -758,7 +824,7 @@ class WeatherService:
                     key_lat = key_lon = None
 
             if key_lat is not None and key_lon is not None:
-                key = self._make_cache_key(key_lat, key_lon)
+                key = self._make_cache_key(key_lat, key_lon, need_h)
                 cached = self._get_cached(key, now)
                 if cached is not None:
                     out = dict(cached)
@@ -775,6 +841,7 @@ class WeatherService:
                     key = self._make_cache_key(
                         float(loc["latitude"]),
                         float(loc["longitude"]),
+                        need_h,
                     )
                     # Re-check cache after resolve
                     cached = self._get_cached(key, now)
@@ -783,7 +850,7 @@ class WeatherService:
                         out["cache_hit"] = True
                         return out
 
-                    days = max(1, min(16, (self.cfg.forecast_hours + 23) // 24))
+                    days = max(1, min(FORECAST_MAX_DAYS, (need_h + 23) // 24))
                     past_days = self.cfg.past_days
                     tz_param = loc.get("timezone") or self.cfg.timezone or "auto"
                     resp = await client.get(
@@ -1314,47 +1381,64 @@ class WeatherService:
         db: Database,
         *,
         hours: float = 24.0,
+        future_hours: float | None = None,
         addresses: list[str] | None = None,
         latitude: float | None = None,
         longitude: float | None = None,
     ) -> dict[str, Any]:
+        past_h = max(1.0 / 60.0, min(float(FORECAST_MAX_HOURS), float(hours)))
+        if future_hours is None:
+            fut_h = past_h
+        else:
+            fut_h = max(1.0 / 60.0, min(float(FORECAST_MAX_HOURS), float(future_hours)))
+
         if not self.enabled:
             return {
                 "enabled": False,
-                "hours": hours,
+                "hours": past_h,
+                "future_hours": fut_h,
                 "location": None,
                 "outdoor": [],
                 "projections": {},
+                "station": {"enabled": False, "points": [], "latest": None},
             }
 
         try:
             forecast = await self.fetch_forecast(
-                latitude=latitude, longitude=longitude
+                latitude=latitude,
+                longitude=longitude,
+                horizon_hours=fut_h,
             )
         except Exception as exc:
             logger.warning("Weather forecast failed: %s", exc)
+            station = await self._station_payload(past_h)
             return {
                 "enabled": False,
                 "error": str(exc),
-                "hours": hours,
+                "hours": past_h,
+                "future_hours": fut_h,
                 "location": None,
                 "outdoor": [],
                 "projections": {},
+                "station": station,
             }
 
         if not forecast.get("enabled"):
+            station = await self._station_payload(past_h)
             return {
                 "enabled": False,
                 "error": forecast.get("error"),
-                "hours": hours,
+                "hours": past_h,
+                "future_hours": fut_h,
                 "location": None,
                 "outdoor": [],
                 "projections": {},
+                "station": station,
             }
 
         now = time.time()
-        since = now - hours * 3600.0
-        until = now + hours * 3600.0
+        since = now - past_h * 3600.0
+        until = now + fut_h * 3600.0
         outdoor = [
             p for p in forecast["outdoor"] if since <= p["ts"] <= until
         ]
@@ -1398,9 +1482,12 @@ class WeatherService:
             "enabled": False
         }
 
+        station = await self._station_payload(past_h)
+
         return {
             "enabled": True,
-            "hours": hours,
+            "hours": past_h,
+            "future_hours": fut_h,
             "location": forecast.get("location"),
             "generated_at": forecast.get("generated_at"),
             "cache_hit": bool(forecast.get("cache_hit")),
@@ -1408,6 +1495,7 @@ class WeatherService:
             "outdoor": outdoor,
             "projections": projections,
             "apartment": apt_meta,
+            "station": station,
         }
 
 
