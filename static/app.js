@@ -350,6 +350,8 @@
   let localNodeId = "";
   /** @type {Map<string, string>} node_id → url */
   let peerByNodeId = new Map();
+  /** @type {Array<{url?: string, node_id?: string, online?: boolean}>} */
+  let federationPeers = [];
   const showForecastEl = document.getElementById("show-forecast");
   const projectionScenarioEl = document.getElementById("projection-scenario");
   const showWindowBandsEl = document.getElementById("show-window-bands");
@@ -1114,8 +1116,9 @@
   }
 
   function renderPeers(peers) {
+    federationPeers = Array.isArray(peers) ? peers : [];
     peerByNodeId = new Map();
-    for (const peer of peers) {
+    for (const peer of federationPeers) {
       if (peer.node_id) {
         peerByNodeId.set(peer.node_id, peerLinkUrl(peer));
       }
@@ -7921,6 +7924,61 @@
     return String(v);
   }
 
+  function makeFedPushMetaBtn(device) {
+    if (!federationPeers.length) return null;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "restart-btn overview-fed-push";
+    btn.textContent = "Push meta";
+    btn.title =
+      "Push name, zone, height, height cm, and room to federation peers";
+    btn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      btn.disabled = true;
+      const prev = btn.textContent;
+      btn.textContent = "Pushing…";
+      try {
+        const res = await fetch(
+          `/api/devices/${encodeURIComponent(device.address)}/push-meta`,
+          { method: "POST" }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(
+            typeof data.detail === "string"
+              ? data.detail
+              : `HTTP ${res.status}`
+          );
+        }
+        const peers = Array.isArray(data.peers) ? data.peers : [];
+        const okN = peers.filter((p) => p.ok).length;
+        const fail = peers.filter((p) => !p.ok);
+        if (fail.length) {
+          const bits = fail.map(
+            (p) =>
+              `${p.url || "peer"}: ${p.detail || p.status || "failed"}`
+          );
+          overviewStatus.textContent =
+            `Meta pushed to ${okN}/${peers.length} peer(s). Failed: ${bits.join("; ")}`;
+        } else {
+          overviewStatus.textContent =
+            `Meta pushed to ${okN} peer(s) for ${deviceLabel(device)}.`;
+        }
+        btn.textContent = okN === peers.length ? "Pushed" : "Partial";
+        setTimeout(() => {
+          btn.textContent = prev;
+          btn.disabled = false;
+        }, 1500);
+      } catch (err) {
+        console.error(err);
+        overviewStatus.textContent = `Meta push failed: ${err.message}`;
+        btn.textContent = prev;
+        btn.disabled = false;
+      }
+    });
+    return btn;
+  }
+
   function labeledCategorySelect(device, field, options, label) {
     const wrap = document.createElement("label");
     wrap.className = "overview-cat-field";
@@ -8123,6 +8181,15 @@
         labeledHeightCmInput(device),
         labeledCategorySelect(device, "room", taxonomyData.rooms, "Room")
       );
+      const fedPush = makeFedPushMetaBtn(device);
+      if (fedPush) {
+        const pushWrap = document.createElement("div");
+        pushWrap.className = "overview-cat-field overview-cat-field-push";
+        const caption = document.createElement("span");
+        caption.textContent = "Federation";
+        pushWrap.append(caption, fedPush);
+        place.appendChild(pushWrap);
+      }
 
       const foot = document.createElement("div");
       foot.className = "overview-card-foot";

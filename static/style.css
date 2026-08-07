@@ -1683,6 +1683,15 @@ main {
   outline-offset: 1px;
 }
 
+.overview-cat-field-push .overview-fed-push {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-size: 0.8rem;
+  padding: 0.25rem 0.55rem;
+  width: 100%;
+}
+
 .overview-card-foot {
   display: flex;
   flex-wrap: wrap;

@@ -31,6 +31,7 @@ Chat replies to the repository owner may follow their preferred language; projec
 - Ingested readings are **not** re-forwarded (no loops). Per-reading optional `source` is accepted on ingest (defaults to the peer `node_id`).
 - Shared optional `federation.token` sent as `X-Govee-Token`.
 - Dedup key: unique `(address, ts)` in SQLite.
+- Device metadata (label, zone, height, height_cm, room) can be pushed to peers via Overview **Push meta** (`POST /api/devices/{address}/push-meta` → peer `POST /api/devices/meta`).
 - Before GATT, backfill may **GET** peer `/api/history` for the gap window (`backfill.federation_pull`); pulled samples keep peer provenance and are not re-published. Remaining holes still use BLE GATT.
 - GATT backfill prefers the federation node with the **best recent RSSI** for a device; weaker nodes defer and wait for ingested history.
 

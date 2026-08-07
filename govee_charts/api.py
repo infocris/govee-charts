@@ -250,6 +250,21 @@ class CategoryPatch(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class DeviceMetaIngest(BaseModel):
+    """Federation payload to sync device label / placement fields."""
+
+    node_id: str = Field(default="peer", min_length=1, max_length=64)
+    address: str = Field(min_length=1)
+    name: str | None = None
+    label: str | None = None
+    zone: str | None = None
+    height: str | None = None
+    height_cm: float | None = None
+    room: str | None = None
+
+    model_config = {"extra": "forbid"}
+
+
 class DoorPatch(BaseModel):
     room: str | None = None
     kind: str | None = None
@@ -1940,6 +1955,137 @@ def create_app(
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         return enrich_device(updated, app.state.labels)
+
+    def _check_federation_token(
+        request: Request,
+        x_govee_token: str | None,
+    ) -> None:
+        expected = app.state.federation_token
+        if not expected:
+            return
+        provided = x_govee_token or request.headers.get("Authorization", "").removeprefix(
+            "Bearer "
+        ).strip()
+        if provided != expected:
+            raise HTTPException(status_code=401, detail="Invalid federation token")
+
+    @app.post("/api/devices/meta")
+    async def api_ingest_device_meta(
+        payload: DeviceMetaIngest,
+        request: Request,
+        x_govee_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Apply label/placement fields pushed by a federation peer."""
+        _check_federation_token(request, x_govee_token)
+        if payload.node_id == app.state.node_id:
+            raise HTTPException(status_code=400, detail="Refusing meta from self")
+
+        ble_name = (payload.name or "").strip()
+        address = resolve_device_address(
+            payload.address,
+            ble_name,
+            suffix_map=app.state.suffix_map,
+        )
+        register_mac(app.state.suffix_map, address)
+
+        try:
+            patch = normalize_patch(
+                zone=payload.zone,
+                height=payload.height,
+                height_cm=payload.height_cm,
+                room=payload.room,
+                label=payload.label,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        updated = await db.update_device_categories(address, **patch)
+        if updated is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Unknown device {address} (peer must already know this sensor)",
+            )
+        logger.info(
+            "Federation meta from %s → %s (%s)",
+            payload.node_id,
+            address,
+            device_display_name(updated, app.state.labels),
+        )
+        return {
+            "ok": True,
+            "node_id": app.state.node_id,
+            "device": enrich_device(updated, app.state.labels),
+        }
+
+    @app.post("/api/devices/{address}/push-meta")
+    async def api_push_device_meta(address: str) -> dict[str, Any]:
+        """Push this device's label/placement fields to all federation peers."""
+        peers: list[str] = list(app.state.peers or [])
+        if not peers:
+            raise HTTPException(status_code=400, detail="No federation peers configured")
+
+        device = await db.get_device(address)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+
+        body = {
+            "node_id": app.state.node_id,
+            "address": str(device.get("address") or address).upper(),
+            "name": str(device.get("name") or "").strip() or None,
+            "label": device.get("label"),
+            "zone": device.get("zone"),
+            "height": device.get("height"),
+            "height_cm": device.get("height_cm"),
+            "room": device.get("room"),
+        }
+
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        token = app.state.federation_token
+        if token:
+            headers["X-Govee-Token"] = token
+
+        async def _one(peer: str) -> dict[str, Any]:
+            try:
+                async with httpx.AsyncClient(
+                    timeout=10.0,
+                    verify=False,
+                    headers=headers,
+                ) as client:
+                    res = await client.post(f"{peer}/api/devices/meta", json=body)
+                detail = ""
+                try:
+                    data = res.json()
+                    if isinstance(data, dict):
+                        detail = str(data.get("detail") or data.get("ok") or "")
+                except Exception:
+                    detail = (res.text or "")[:200]
+                return {
+                    "url": peer,
+                    "ok": res.status_code < 400,
+                    "status": res.status_code,
+                    "detail": detail,
+                }
+            except Exception as exc:
+                return {
+                    "url": peer,
+                    "ok": False,
+                    "status": 0,
+                    "detail": str(exc),
+                }
+
+        results = await asyncio.gather(*(_one(p) for p in peers))
+        ok_n = sum(1 for r in results if r.get("ok"))
+        logger.info(
+            "Pushed device meta for %s to %d/%d peer(s)",
+            body["address"],
+            ok_n,
+            len(peers),
+        )
+        return {
+            "ok": ok_n == len(peers),
+            "address": body["address"],
+            "peers": list(results),
+        }
 
     @app.get("/api/history")
     async def api_history(
