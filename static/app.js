@@ -133,6 +133,9 @@
   const topBarEl = document.getElementById("top-bar");
   const windowBannerTitleEl = document.getElementById("window-banner-title");
   const windowBannerDetailEl = document.getElementById("window-banner-detail");
+  const systemBannerEl = document.getElementById("system-banner");
+  const systemBannerTitleEl = document.getElementById("system-banner-title");
+  const systemBannerDetailEl = document.getElementById("system-banner-detail");
   const backfillPanelEl = document.getElementById("backfill-panel");
   const backfillCurrentEl = document.getElementById("backfill-current");
   const backfillQueueEl = document.getElementById("backfill-queue");
@@ -331,6 +334,10 @@
   let showWindowBands = localStorage.getItem(WINDOW_BANDS_KEY) !== "0";
   let showHvac = localStorage.getItem(HVAC_KEY) !== "0";
   let windowNotify = localStorage.getItem(WINDOW_NOTIFY_KEY) === "1";
+  /** @type {{hidden?: boolean, tone?: string, title?: string, detail?: string} | null} */
+  let windowBannerModel = null;
+  /** @type {{hidden?: boolean, tone?: string, title?: string, detail?: string} | null} */
+  let systemBannerModel = null;
   /** @type {{latitude:number, longitude:number, accuracy?:number, at?:number}|null} */
   let browserGeo = loadStoredGeo();
   let geoStatus = browserGeo ? "cached" : "idle";
@@ -7192,30 +7199,132 @@
 
   function renderWindowBanner(model) {
     if (!windowBannerEl) return;
+    if (!model || model.hidden) {
+      windowBannerEl.hidden = true;
+      windowBannerEl.className = "window-banner";
+      windowBannerModel = null;
+      syncTopBarTones();
+      requestAnimationFrame(refreshViewsStickyState);
+      return;
+    }
+    windowBannerEl.hidden = false;
+    windowBannerEl.className = "window-banner";
+    windowBannerModel = model;
+    if (windowBannerTitleEl) windowBannerTitleEl.textContent = model.title || "";
+    if (windowBannerDetailEl) windowBannerDetailEl.textContent = model.detail || "";
+    syncTopBarTones();
+    // Banner height changes with content — refresh sticky offset under fixed top-bar.
+    requestAnimationFrame(refreshViewsStickyState);
+  }
+
+  function formatDuration(seconds) {
+    const s = Math.max(0, Math.round(Number(seconds) || 0));
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m} min`;
+    const h = Math.floor(m / 60);
+    const rem = m % 60;
+    return rem ? `${h}h ${rem}m` : `${h}h`;
+  }
+
+  function buildSystemBannerModel(health) {
+    if (!health) return { hidden: true };
+    if (!health.workers_available) {
+      const age = health.workers_age_s;
+      const ageBit =
+        age == null ? "no heartbeat" : `last seen ${formatDuration(age)} ago`;
+      return {
+        hidden: false,
+        tone: "crit",
+        title: "Workers offline",
+        detail: `BLE collector / workers not responding (${ageBit}). Restart workers if this persists.`,
+      };
+    }
+    const ble = health.ble || {};
+    if (ble.enabled === false || ble.ok !== false) {
+      return { hidden: true };
+    }
+    if (ble.paused_for_gatt) {
+      return { hidden: true };
+    }
+    const ageBit =
+      ble.age_s == null
+        ? "no advertisements since start"
+        : `no advertisements for ${formatDuration(ble.age_s)}`;
+    return {
+      hidden: false,
+      tone: "warn",
+      title: "BLE scan stalled",
+      detail: `${ageBit}. Check the USB Bluetooth dongle / BlueZ, then restart workers.`,
+    };
+  }
+
+  function renderSystemBanner(model) {
+    if (!systemBannerEl) return;
+    if (!model || model.hidden) {
+      systemBannerEl.hidden = true;
+      systemBannerEl.className = "window-banner system-banner";
+      systemBannerModel = null;
+      syncTopBarTones();
+      requestAnimationFrame(refreshViewsStickyState);
+      return;
+    }
+    systemBannerEl.hidden = false;
+    systemBannerEl.className = "window-banner system-banner";
+    systemBannerModel = model;
+    if (systemBannerTitleEl) systemBannerTitleEl.textContent = model.title || "";
+    if (systemBannerDetailEl) systemBannerDetailEl.textContent = model.detail || "";
+    syncTopBarTones();
+    requestAnimationFrame(refreshViewsStickyState);
+  }
+
+  function syncTopBarTones() {
+    if (!topBarEl) return;
     const toneClasses = [
+      "system-banner-tone-crit",
+      "system-banner-tone-warn",
       "window-banner-tone-close",
       "window-banner-tone-open",
       "window-banner-tone-humid",
       "window-banner-tone-ok",
       "window-banner-tone-idle",
     ];
-    if (topBarEl) {
-      topBarEl.classList.remove(...toneClasses);
-    }
-    if (!model || model.hidden) {
-      windowBannerEl.hidden = true;
-      windowBannerEl.className = "window-banner";
-      requestAnimationFrame(refreshViewsStickyState);
+    topBarEl.classList.remove(...toneClasses);
+    if (systemBannerModel && !systemBannerModel.hidden) {
+      topBarEl.classList.add(
+        `system-banner-tone-${systemBannerModel.tone || "warn"}`
+      );
       return;
     }
-    windowBannerEl.hidden = false;
-    windowBannerEl.className = "window-banner";
-    const tone = `window-banner-tone-${model.tone || "idle"}`;
-    if (topBarEl) topBarEl.classList.add(tone);
-    if (windowBannerTitleEl) windowBannerTitleEl.textContent = model.title || "";
-    if (windowBannerDetailEl) windowBannerDetailEl.textContent = model.detail || "";
-    // Banner height changes with content — refresh sticky offset under fixed top-bar.
-    requestAnimationFrame(refreshViewsStickyState);
+    if (windowBannerModel && !windowBannerModel.hidden) {
+      topBarEl.classList.add(
+        `window-banner-tone-${windowBannerModel.tone || "idle"}`
+      );
+    }
+  }
+
+  async function updateSystemHealth() {
+    try {
+      const res = await fetch("/api/health", { cache: "no-store" });
+      if (!res.ok) {
+        renderSystemBanner({
+          hidden: false,
+          tone: "crit",
+          title: "UI unreachable",
+          detail: `Health check failed (HTTP ${res.status}).`,
+        });
+        return;
+      }
+      const data = await res.json();
+      renderSystemBanner(buildSystemBannerModel(data));
+    } catch (err) {
+      renderSystemBanner({
+        hidden: false,
+        tone: "crit",
+        title: "UI unreachable",
+        detail: err.message || "Could not reach /api/health.",
+      });
+    }
   }
 
   async function updateWindowBanner(forecast) {
@@ -8665,6 +8774,7 @@
 
   async function refresh() {
     try {
+      await updateSystemHealth();
       await loadFederation();
       await loadDevices();
       if (currentView === "compare") {

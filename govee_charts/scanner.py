@@ -134,6 +134,10 @@ class GoveeScanner:
         self._gatt_pause = asyncio.Event()
         self._gatt_pause_depth = 0
         self._gatt_pause_lock = asyncio.Lock()
+        # Wall-clock last BLE advertisement (any device) for UI health alerts.
+        self._last_adv_wall: float | None = None
+        self._last_ble_hb_write: float = 0.0
+        self._ble_hb_interval: float = 5.0
 
     def remember_ble_device(self, address: str, device: BLEDevice) -> None:
         self._ble_devices[address.strip().upper()] = (device, time.time())
@@ -150,12 +154,30 @@ class GoveeScanner:
             return None
         return device
 
+    def _note_ble_activity(self) -> None:
+        """Record that the adapter delivered an advertisement (throttled DB write)."""
+        now = time.time()
+        self._last_adv_wall = now
+        if now - self._last_ble_hb_write < self._ble_hb_interval:
+            return
+        self._last_ble_hb_write = now
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.db.touch_runtime_heartbeat("ble"))
+
+    @property
+    def gatt_paused(self) -> bool:
+        return self._gatt_pause.is_set()
+
     async def pause_for_gatt(self) -> None:
         """Temporarily stop BLE scanning (nested-safe) for a GATT session."""
         async with self._gatt_pause_lock:
             self._gatt_pause_depth += 1
             if self._gatt_pause_depth == 1:
                 self._gatt_pause.set()
+                await self.db.touch_runtime_heartbeat("ble_pause")
         # Give BlueZ / adapter loops time to stop.
         await asyncio.sleep(1.0)
 
@@ -252,13 +274,18 @@ class GoveeScanner:
             nonlocal last_adv
             # Any advertisement proves the backend is still delivering events.
             last_adv = time.monotonic()
+            self._note_ble_activity()
             self.on_advertisement(device, adv, adapter=adapter)
 
         while not stop_event.is_set():
             # Yield the adapter while GATT backfill needs an exclusive connect.
             while self._gatt_pause.is_set() and not stop_event.is_set():
                 try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=0.5)
+                    await self.db.touch_runtime_heartbeat("ble_pause")
+                except Exception:
+                    logger.debug("ble_pause heartbeat failed", exc_info=True)
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
                     pass
             if stop_event.is_set():
@@ -384,6 +411,13 @@ class GoveeScanner:
             else "off",
             f"{self.recycle_after:.0f}s" if self.recycle_after > 0 else "off",
         )
+        # Baseline so UI can alert if no ads arrive after start.
+        self._last_adv_wall = time.time()
+        self._last_ble_hb_write = self._last_adv_wall
+        try:
+            await self.db.touch_runtime_heartbeat("ble")
+        except Exception:
+            logger.debug("Initial BLE heartbeat failed", exc_info=True)
         pruned = await self.db.prune(self.retention_days)
         if pruned:
             logger.info("Pruned %d old reading(s)", pruned)

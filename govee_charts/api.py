@@ -435,6 +435,8 @@ def create_app(
     backfill: BackfillService | None = None,
     ssl_port: int | None = None,
     hvac: HvacConfig | None = None,
+    scanner_enabled: bool = True,
+    ble_alert_stale_after: float = 300.0,
 ) -> FastAPI:
     app = FastAPI(title="Govee Charts", docs_url=None, redoc_url=None)
     app.state.db = db
@@ -452,6 +454,8 @@ def create_app(
     app.state.mail_fetch_lock = asyncio.Lock()
     app.state.ssl_port = int(ssl_port) if ssl_port else None
     app.state.hvac = hvac or HvacConfig()
+    app.state.scanner_enabled = bool(scanner_enabled)
+    app.state.ble_alert_stale_after = max(0.0, float(ble_alert_stale_after))
 
     @app.get("/")
     async def index() -> HTMLResponse:
@@ -471,8 +475,26 @@ def create_app(
     @app.get("/api/health")
     async def api_health() -> dict[str, Any]:
         hb = await db.get_runtime_heartbeat("workers")
+        ble_hb = await db.get_runtime_heartbeat("ble")
+        pause_hb = await db.get_runtime_heartbeat("ble_pause")
         now = time.time()
         age = (now - hb) if hb is not None else None
+        workers_available = bool(age is not None and age <= 15.0)
+        stale_after = float(app.state.ble_alert_stale_after)
+        scanner_enabled = bool(app.state.scanner_enabled)
+        ble_age = (now - ble_hb) if ble_hb is not None else None
+        pause_age = (now - pause_hb) if pause_hb is not None else None
+        paused_for_gatt = bool(pause_age is not None and pause_age <= 20.0)
+        if not scanner_enabled or stale_after <= 0:
+            ble_ok = True
+        elif paused_for_gatt:
+            ble_ok = True
+        elif ble_age is None:
+            # Scanner enabled but never reported — treat as not ok once workers
+            # are clearly up (avoids a flash on cold start).
+            ble_ok = not workers_available
+        else:
+            ble_ok = ble_age <= stale_after
         return {
             "ok": True,
             "node_id": app.state.node_id,
@@ -480,7 +502,15 @@ def create_app(
             "asset_version": static_asset_version(),
             "workers_last_seen": hb,
             "workers_age_s": round(age, 2) if age is not None else None,
-            "workers_available": bool(age is not None and age <= 15.0),
+            "workers_available": workers_available,
+            "ble": {
+                "enabled": scanner_enabled,
+                "paused_for_gatt": paused_for_gatt,
+                "last_adv_ts": ble_hb,
+                "age_s": round(ble_age, 2) if ble_age is not None else None,
+                "stale_after_s": stale_after,
+                "ok": ble_ok,
+            },
         }
 
     @app.get("/api/backfill")

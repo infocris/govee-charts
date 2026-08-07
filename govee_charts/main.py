@@ -24,6 +24,7 @@ from govee_charts.backfill import BackfillConfig, BackfillService
 from govee_charts.db import Database
 from govee_charts.doors import DoorHaPoller, DoorMqttListener, DoorsConfig, import_ha_door_history
 from govee_charts.federation import PeerPublisher
+from govee_charts.ha_th import HaThConfig, HaThPoller
 from govee_charts.hvac import HvacConfig, HvacHaPoller, import_ha_hvac_history
 from govee_charts.scanner import GoveeScanner, discover_once
 from govee_charts.apartment import (
@@ -55,6 +56,8 @@ DEFAULTS: dict[str, Any] = {
         "log_file": "govee-charts.log",
         # Empty = default adapter. Example: ["hci0", "hci1"]
         "adapters": [],
+        # UI alert when no BLE ads for this long (seconds). 0 = disable alert.
+        "alert_stale_after": 300.0,
     },
     "database": {"path": "data/readings.db"},
     "federation": {
@@ -117,11 +120,20 @@ DEFAULTS: dict[str, Any] = {
         "water_heater_indoor_fraction": 0.30,
         "other_loads_indoor_fraction": 0.90,
         "ac_cop": 3.0,
-        "ac_idle_floor_w": 150,
+        "ac_idle_floor_w": 150.0,
         "timezone": "Europe/Paris",
-        "poll_seconds": 15,
-        "retention_days": 365,
+        "poll_seconds": 15.0,
+        "retention_days": 365.0,
         "ha_db_path": "",
+    },
+    "ha_th": {
+        "enabled": False,
+        "ha_url": "http://127.0.0.1:8123",
+        "ha_token": "",
+        "ha_token_file": "",
+        "poll_seconds": 60.0,
+        "sample_interval": 60.0,
+        "devices": [],
     },
     "backfill": {
         "enabled": True,
@@ -264,6 +276,7 @@ async def _start_workers(
     door_task: asyncio.Task[None] | None = None
     door_ha_task: asyncio.Task[None] | None = None
     hvac_task: asyncio.Task[None] | None = None
+    ha_th_task: asyncio.Task[None] | None = None
     backfill_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
 
@@ -383,6 +396,26 @@ async def _start_workers(
     else:
         logging.info("HVAC historization disabled (set hvac.enabled=true)")
 
+    ha_th_cfg = HaThConfig.from_dict(cfg.get("ha_th"))
+    if ha_th_cfg.ready:
+        ha_th_poller = HaThPoller(db, ha_th_cfg, node_id=fed["node_id"])
+        ha_th_task = asyncio.create_task(
+            ha_th_poller.run(stop_event), name="ha-th-poll"
+        )
+        logging.info(
+            "HA T/H poll enabled (%d device%s via %s)",
+            len(ha_th_cfg.devices),
+            "" if len(ha_th_cfg.devices) == 1 else "s",
+            ha_th_cfg.ha_url,
+        )
+    elif ha_th_cfg.enabled:
+        logging.warning(
+            "HA T/H enabled but missing token or devices "
+            "(set ha_th.ha_token_file and [[ha_th.devices]])"
+        )
+    else:
+        logging.info("HA T/H poll disabled (set ha_th.enabled=true)")
+
     async def _heartbeat() -> None:
         while not stop_event.is_set():
             await db.touch_runtime_heartbeat("workers")
@@ -398,6 +431,7 @@ async def _start_workers(
         "door_task": door_task,
         "door_ha_task": door_ha_task,
         "hvac_task": hvac_task,
+        "ha_th_task": ha_th_task,
         "backfill_task": backfill_task,
         "heartbeat_task": heartbeat_task,
         "backfill": backfill,
@@ -413,6 +447,7 @@ async def _stop_workers(runtime: dict[str, Any]) -> None:
         (runtime.get("door_task"), "Door MQTT"),
         (runtime.get("door_ha_task"), "Door HA poll"),
         (runtime.get("hvac_task"), "HVAC HA poll"),
+        (runtime.get("ha_th_task"), "HA T/H poll"),
         (runtime.get("backfill_task"), "GATT backfill"),
         (runtime.get("heartbeat_task"), "Workers heartbeat"),
     ):
@@ -534,6 +569,8 @@ async def run_ui_server(
         backfill=backfill,
         ssl_port=ssl_port if certfile and keyfile else None,
         hvac=hvac_cfg,
+        scanner_enabled=bool(cfg["scanner"].get("enabled", True)),
+        ble_alert_stale_after=float(cfg["scanner"].get("alert_stale_after", 300.0)),
     )
 
     http_config = uvicorn.Config(

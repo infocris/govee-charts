@@ -22,6 +22,8 @@ log_file = "govee-charts.log"
 # Plug a 2nd USB dongle near distant sensors → it appears as hci1:
 # adapters = ["hci0", "hci1"]
 adapters = []
+# UI banner when no BLE advertisements for this long (seconds). 0 = off.
+alert_stale_after = 300.0
 
 [database]
 path = "data/readings.db"
@@ -212,6 +214,23 @@ poll_seconds = 15
 retention_days = 365
 # Optional one-shot import from HA recorder SQLite on startup:
 # ha_db_path = "/path/to/home-assistant_v2.db"
+
+# Optional HA temperature / humidity sensors (Tuya T&H, …) stored like Govee devices.
+# [ha_th]
+# enabled = true
+# ha_url = "http://127.0.0.1:8123"
+# ha_token_file = "/path/to/.ha_token"
+# poll_seconds = 60
+# sample_interval = 60
+# [[ha_th.devices]]
+# address = "HA:SEJOUR-EXT"
+# label = "Séjour Ext"
+# temperature_entity = "sensor.capteur_t_h_temperature"
+# humidity_entity = "sensor.capteur_t_h_humidite"
+# battery_entity = "sensor.capteur_t_h_etat_batterie"
+# model = "tuya-th"
+# zone = "exterior"
+# room = "living"
 
 # Recover missing minute history: federation peers first, then optional GATT.
 # Single worker; newest windows first (1 h → 24 h → 7 d → deeper day chunks).

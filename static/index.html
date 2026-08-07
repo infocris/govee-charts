@@ -13,11 +13,20 @@
 <body>
   <aside id="top-bar" class="top-bar" aria-label="Alerts">
     <div class="top-bar-inner">
-      <div id="window-banner" class="window-banner" hidden aria-live="polite">
-        <span class="window-banner-swatch" aria-hidden="true"></span>
-        <div class="window-banner-copy">
-          <strong class="window-banner-title" id="window-banner-title"></strong>
-          <span class="window-banner-detail" id="window-banner-detail"></span>
+      <div class="top-bar-banners">
+        <div id="system-banner" class="window-banner system-banner" hidden aria-live="assertive">
+          <span class="window-banner-swatch" aria-hidden="true"></span>
+          <div class="window-banner-copy">
+            <strong class="window-banner-title" id="system-banner-title"></strong>
+            <span class="window-banner-detail" id="system-banner-detail"></span>
+          </div>
+        </div>
+        <div id="window-banner" class="window-banner" hidden aria-live="polite">
+          <span class="window-banner-swatch" aria-hidden="true"></span>
+          <div class="window-banner-copy">
+            <strong class="window-banner-title" id="window-banner-title"></strong>
+            <span class="window-banner-detail" id="window-banner-detail"></span>
+          </div>
         </div>
       </div>
       <button
