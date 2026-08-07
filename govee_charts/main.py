@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+import signal
 import socket
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     import tomllib
@@ -439,10 +441,15 @@ async def _start_workers(
     }
 
 
-async def _stop_workers(runtime: dict[str, Any]) -> None:
+async def _stop_workers(
+    runtime: dict[str, Any],
+    *,
+    grace_seconds: float = 3.0,
+) -> None:
+    """Signal workers to stop, wait briefly, then cancel stragglers in parallel."""
     stop_event: asyncio.Event = runtime["stop_event"]
     stop_event.set()
-    for task, label in (
+    labeled = [
         (runtime.get("scanner_task"), "BLE scanner"),
         (runtime.get("door_task"), "Door MQTT"),
         (runtime.get("door_ha_task"), "Door HA poll"),
@@ -450,20 +457,60 @@ async def _stop_workers(runtime: dict[str, Any]) -> None:
         (runtime.get("ha_th_task"), "HA T/H poll"),
         (runtime.get("backfill_task"), "GATT backfill"),
         (runtime.get("heartbeat_task"), "Workers heartbeat"),
-    ):
-        if task is None:
-            continue
-        try:
-            await asyncio.wait_for(task, timeout=15.0)
-        except asyncio.TimeoutError:
-            logging.warning("%s stop timed out — cancelling", label)
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+    ]
+    pending_pairs = [
+        (task, label)
+        for task, label in labeled
+        if task is not None and not task.done()
+    ]
+    if pending_pairs:
+        tasks = [task for task, _ in pending_pairs]
+        _done, pending = await asyncio.wait(tasks, timeout=grace_seconds)
+        timed_out = set(pending)
+        for task, label in pending_pairs:
+            if task in timed_out:
+                logging.warning("%s stop timed out — cancelling", label)
+                task.cancel()
+        if timed_out:
+            await asyncio.wait(timed_out, timeout=2.0)
     publisher: PeerPublisher = runtime["publisher"]
     await publisher.stop()
+
+
+class _ShutdownServer(uvicorn.Server):
+    """uvicorn.Server that also wakes local workers on the first Ctrl+C."""
+
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        *,
+        on_signal: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(config)
+        self._on_signal = on_signal
+
+    def handle_exit(self, sig: int, frame: Any) -> None:
+        if self._on_signal is not None:
+            try:
+                self._on_signal()
+            except Exception:
+                logging.exception("Shutdown signal hook failed")
+        super().handle_exit(sig, frame)
+
+
+def _install_stop_signals(stop_event: asyncio.Event) -> None:
+    """Make SIGINT/SIGTERM set stop_event (workers-only mode)."""
+    loop = asyncio.get_running_loop()
+
+    def _stop() -> None:
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _stop)
+        except (NotImplementedError, RuntimeError):
+            # Windows / embedded loops: KeyboardInterrupt still unwinds finally.
+            pass
 
 
 def _build_weather(cfg: dict[str, Any]) -> WeatherService:
@@ -543,6 +590,13 @@ async def run_ui_server(
 
     servers: list[uvicorn.Server] = []
 
+    def request_shutdown() -> None:
+        """First Ctrl+C: stop workers immediately, then HTTP listeners."""
+        if workers_runtime is not None:
+            workers_runtime["stop_event"].set()
+        for server in servers:
+            server.should_exit = True
+
     def request_restart() -> None:
         logging.warning("Stopping HTTP listeners for restart")
         for server in servers:
@@ -580,8 +634,7 @@ async def run_ui_server(
         log_level="info",
         access_log=False,
     )
-    http_server = uvicorn.Server(http_config)
-    servers.append(http_server)
+    servers.append(_ShutdownServer(http_config, on_signal=request_shutdown))
 
     logging.info(
         "Web UI on http://%s:%d (node_id=%s)",
@@ -600,7 +653,7 @@ async def run_ui_server(
             ssl_certfile=str(certfile),
             ssl_keyfile=str(keyfile),
         )
-        servers.append(uvicorn.Server(https_config))
+        servers.append(_ShutdownServer(https_config, on_signal=request_shutdown))
         logging.info(
             "Web UI on https://%s:%d (TLS self-signed)",
             display_host,
@@ -614,9 +667,8 @@ async def run_ui_server(
         try:
             await server.serve()
         finally:
-            # If one listener stops, tear down the other(s)
-            for other in servers:
-                other.should_exit = True
+            # If one listener stops, tear down the other(s) + workers.
+            request_shutdown()
 
     try:
         await asyncio.gather(*(_serve(s) for s in servers))
@@ -630,8 +682,10 @@ async def run_workers(cfg: dict[str, Any], *, enable_scanner: bool = True) -> No
     db, suffix_map = await _init_runtime_db(cfg)
     runtime = await _start_workers(cfg, db, suffix_map, enable_scanner=enable_scanner)
     logging.info("Workers runtime started (node_id=%s)", cfg["federation"]["node_id"])
+    stop_event: asyncio.Event = runtime["stop_event"]
+    _install_stop_signals(stop_event)
     try:
-        await asyncio.Event().wait()
+        await stop_event.wait()
     finally:
         await _stop_workers(runtime)
         await db.close()
@@ -675,7 +729,10 @@ def main() -> None:
         asyncio.run(amain())
     except KeyboardInterrupt:
         print()
-        logging.info("Stopped")
+    logging.info("Stopped")
+    # Bleak/CoreBluetooth leaves non-daemon threads that block interpreter
+    # shutdown (especially on macOS) — without this, a second Ctrl+C is needed.
+    os._exit(0)
 
 
 if __name__ == "__main__":
