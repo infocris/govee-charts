@@ -3590,6 +3590,21 @@
     }
   }
 
+  function suppressScrollValueChange(el) {
+    // Focused <select>/<input type=number> change value on wheel — easy to
+    // edit a category by accident while scrolling the overview.
+    el.addEventListener(
+      "wheel",
+      (ev) => {
+        if (document.activeElement === el) {
+          ev.preventDefault();
+          el.blur();
+        }
+      },
+      { passive: false }
+    );
+  }
+
   function makeCategorySelect(device, field, options) {
     const select = document.createElement("select");
     select.className = "cat-select";
@@ -3606,11 +3621,14 @@
       select.appendChild(option);
     }
     select.value = device[field] || "";
+    suppressScrollValueChange(select);
     select.addEventListener("click", (ev) => ev.stopPropagation());
     select.addEventListener("mousedown", (ev) => ev.stopPropagation());
     select.addEventListener("change", async (ev) => {
       ev.stopPropagation();
+      const previous = device[field] || "";
       const value = select.value === "" ? null : select.value;
+      if ((value || "") === previous) return;
       select.disabled = true;
       try {
         const res = await fetch(
@@ -3635,7 +3653,7 @@
         updateCurrent();
       } catch (err) {
         console.error(err);
-        select.value = device[field] || "";
+        select.value = previous;
         overviewStatus.textContent = `Category update failed: ${err.message}`;
       } finally {
         select.disabled = false;
@@ -8069,6 +8087,7 @@
     } else {
       input.value = "";
     }
+    suppressScrollValueChange(input);
     input.addEventListener("click", (ev) => ev.stopPropagation());
     input.addEventListener("mousedown", (ev) => ev.stopPropagation());
     input.addEventListener("keydown", (ev) => ev.stopPropagation());
@@ -8076,12 +8095,14 @@
       ev.stopPropagation();
       const raw = String(input.value || "").trim();
       const value = raw === "" ? null : Number(raw);
+      const previous =
+        device.height_cm != null && Number.isFinite(Number(device.height_cm))
+          ? Math.round(Number(device.height_cm))
+          : null;
+      if (value === previous || (value == null && previous == null)) return;
       if (value != null && (!Number.isFinite(value) || value < 0 || value > 600)) {
         overviewStatus.textContent = "Height cm must be 0–600";
-        input.value =
-          device.height_cm != null && Number.isFinite(Number(device.height_cm))
-            ? String(Math.round(Number(device.height_cm)))
-            : "";
+        input.value = previous != null ? String(previous) : "";
         return;
       }
       input.disabled = true;
