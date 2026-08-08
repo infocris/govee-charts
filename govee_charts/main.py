@@ -23,7 +23,8 @@ import uvicorn
 from govee_charts.address import build_suffix_map
 from govee_charts.api import create_app
 from govee_charts.backfill import BackfillConfig, BackfillService
-from govee_charts.db import Database
+from govee_charts.compaction import CompactionConfig, CompactionService
+from govee_charts.db import Database, is_db_locked
 from govee_charts.doors import DoorHaPoller, DoorMqttListener, DoorsConfig, import_ha_door_history
 from govee_charts.federation import PeerPublisher
 from govee_charts.ha_th import HaThConfig, HaThPoller
@@ -39,6 +40,12 @@ from govee_charts.weather import WeatherConfig, WeatherService
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.toml"
+
+# SQLite watchdog (workers heartbeat loop)
+_HEARTBEAT_INTERVAL_S = 2.0
+_HEARTBEAT_FAIL_EXIT_S = 60.0
+_WAL_CHECKPOINT_INTERVAL_S = 60.0
+_WAL_TRUNCATE_BYTES = 64 * 1024 * 1024
 
 DEFAULTS: dict[str, Any] = {
     "server": {
@@ -149,6 +156,14 @@ DEFAULTS: dict[str, Any] = {
         "rssi_prefer_margin_db": 3,
         "peer_signal_cache_seconds": 45,
         "rebuild_seconds": 900,
+    },
+    "compaction": {
+        # Workers job: roll up old raw readings into min/max/avg buckets.
+        "enabled": True,
+        "interval_s": 3600.0,
+        # Default for devices without an explicit policy row: none (opt-in).
+        "default_policy": "none",
+        "max_delete_per_device": 50000,
     },
     "labels": {},
 }
@@ -280,6 +295,7 @@ async def _start_workers(
     hvac_task: asyncio.Task[None] | None = None
     ha_th_task: asyncio.Task[None] | None = None
     backfill_task: asyncio.Task[None] | None = None
+    compaction_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
 
     scanner_enabled = enable_scanner and bool(cfg["scanner"].get("enabled", True))
@@ -329,6 +345,15 @@ async def _start_workers(
         )
     else:
         logging.info("GATT history backfill disabled (set backfill.enabled=true)")
+
+    compaction_cfg = CompactionConfig.from_dict(cfg.get("compaction"))
+    if compaction_cfg.enabled:
+        compaction = CompactionService(db, compaction_cfg)
+        compaction_task = asyncio.create_task(
+            compaction.run(stop_event), name="readings-compaction"
+        )
+    else:
+        logging.info("Readings compaction disabled (set compaction.enabled=true)")
 
     doors_cfg = DoorsConfig.from_dict(cfg.get("doors"))
     if doors_cfg.enabled:
@@ -419,9 +444,72 @@ async def _start_workers(
         logging.info("HA T/H poll disabled (set ha_th.enabled=true)")
 
     async def _heartbeat() -> None:
+        """Keep workers heartbeat alive; checkpoint WAL; exit if DB stuck."""
+        consecutive_fail_s = 0.0
+        last_checkpoint = 0.0
+        last_size_day = ""
         while not stop_event.is_set():
-            await db.touch_runtime_heartbeat("workers")
-            await asyncio.sleep(2.0)
+            try:
+                await db.touch_runtime_heartbeat("workers")
+                consecutive_fail_s = 0.0
+            except Exception as exc:
+                consecutive_fail_s += _HEARTBEAT_INTERVAL_S
+                if is_db_locked(exc):
+                    logging.warning(
+                        "Workers heartbeat blocked (DB locked), %.0fs so far",
+                        consecutive_fail_s,
+                    )
+                else:
+                    logging.exception("Workers heartbeat failed")
+                if consecutive_fail_s >= _HEARTBEAT_FAIL_EXIT_S:
+                    logging.error(
+                        "SQLite write blocked for %.0fs — exiting so systemd can restart workers",
+                        consecutive_fail_s,
+                    )
+                    sys.exit(1)
+
+            today = Database.utc_day()
+            if today != last_size_day:
+                try:
+                    snap = await db.record_db_size_snapshot()
+                    last_size_day = today
+                    logging.info(
+                        "DB size snapshot %s: %.1f MiB total "
+                        "(%d readings, wal=%.1f MiB)",
+                        snap["day"],
+                        snap["total_bytes"] / (1024 * 1024),
+                        snap["readings_count"],
+                        snap["wal_bytes"] / (1024 * 1024),
+                    )
+                except Exception:
+                    logging.exception("DB size snapshot failed")
+
+            now = asyncio.get_running_loop().time()
+            if now - last_checkpoint >= _WAL_CHECKPOINT_INTERVAL_S:
+                last_checkpoint = now
+                try:
+                    busy, log_pages, checkpointed = await db.checkpoint_wal("PASSIVE")
+                    wal_bytes = db.wal_size_bytes()
+                    if wal_bytes >= _WAL_TRUNCATE_BYTES:
+                        logging.warning(
+                            "WAL is %.1f MiB (busy=%s log=%s ckpt=%s); trying TRUNCATE",
+                            wal_bytes / (1024 * 1024),
+                            busy,
+                            log_pages,
+                            checkpointed,
+                        )
+                        t_busy, t_log, t_ckpt = await db.checkpoint_wal("TRUNCATE")
+                        logging.warning(
+                            "WAL TRUNCATE done (busy=%s log=%s ckpt=%s, size=%.1f MiB)",
+                            t_busy,
+                            t_log,
+                            t_ckpt,
+                            db.wal_size_bytes() / (1024 * 1024),
+                        )
+                except Exception:
+                    logging.exception("WAL checkpoint failed")
+
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
 
     await db.touch_runtime_heartbeat("workers")
     heartbeat_task = asyncio.create_task(_heartbeat(), name="workers-heartbeat")
@@ -435,6 +523,7 @@ async def _start_workers(
         "hvac_task": hvac_task,
         "ha_th_task": ha_th_task,
         "backfill_task": backfill_task,
+        "compaction_task": compaction_task,
         "heartbeat_task": heartbeat_task,
         "backfill": backfill,
         "hvac_cfg": hvac_cfg,
@@ -456,6 +545,7 @@ async def _stop_workers(
         (runtime.get("hvac_task"), "HVAC HA poll"),
         (runtime.get("ha_th_task"), "HA T/H poll"),
         (runtime.get("backfill_task"), "GATT backfill"),
+        (runtime.get("compaction_task"), "Readings compaction"),
         (runtime.get("heartbeat_task"), "Workers heartbeat"),
     ]
     pending_pairs = [

@@ -4,6 +4,12 @@
   const statusEl = document.getElementById("status");
   const overviewBody = document.getElementById("overview-body");
   const overviewStatus = document.getElementById("overview-status");
+  const overviewDeviceFilterEl = document.getElementById("overview-device-filter");
+  const OVERVIEW_TEXT_FILTER_KEY = "govee-charts.overviewTextFilter";
+  let overviewTextFilter = localStorage.getItem(OVERVIEW_TEXT_FILTER_KEY) || "";
+  if (overviewDeviceFilterEl && overviewTextFilter) {
+    overviewDeviceFilterEl.value = overviewTextFilter;
+  }
   const doorsBody = document.getElementById("doors-body");
   const doorsStatus = document.getElementById("doors-status");
   const doorLogEl = document.getElementById("door-log");
@@ -22,6 +28,45 @@
   const viewNetwork = document.getElementById("view-network");
   const viewBackfill = document.getElementById("view-backfill");
   const viewCoverage = document.getElementById("view-coverage");
+  const viewSystem = document.getElementById("view-system");
+  const systemStorageSummaryEl = document.getElementById("system-storage-summary");
+  const systemStorageHintEl = document.getElementById("system-storage-hint");
+  const systemSourceSummaryEl = document.getElementById("system-source-summary");
+  const systemInventoryHintEl = document.getElementById("system-inventory-hint");
+  const systemInventoryBody = document.getElementById("system-inventory-body");
+  const systemSensorStorageHintEl = document.getElementById(
+    "system-sensor-storage-hint"
+  );
+  const systemSensorStorageBody = document.getElementById(
+    "system-sensor-storage-body"
+  );
+  const systemCompactionPreviewEl = document.getElementById(
+    "system-compaction-preview"
+  );
+  const systemDeviceEl = document.getElementById("system-device");
+  const systemDeviceFilterEl = document.getElementById("system-device-filter");
+  const systemDeviceStatusEl = document.getElementById("system-device-status");
+  const systemStorageCanvas = document.getElementById("system-storage-chart");
+  const systemSourceChartsEl = document.getElementById("system-source-charts");
+  const systemRangeButtons = [
+    ...document.querySelectorAll("#system-range-buttons > button[data-sys-days]"),
+  ];
+  const systemGrainButtons = [
+    ...document.querySelectorAll(".system-ranges > button[data-sys-grain]"),
+  ];
+  const systemSelectAllBtn = document.getElementById("system-select-all");
+  const systemClearAllBtn = document.getElementById("system-clear-all");
+  let systemStorageChart = null;
+  /** @type {Chart[]} */
+  let systemSourceCharts = [];
+  let systemDays = 30;
+  let systemGrain = "day";
+  let systemBusy = false;
+  /** @type {{address:string,name?:string,sample_count?:number}[]} */
+  let systemDeviceList = [];
+  /** @type {Set<string>} */
+  let systemSelectedAddresses = new Set();
+  let systemDeviceFilter = "";
   const networkSvgEl = document.getElementById("network-svg");
   const networkCanvasWrapEl = document.getElementById("network-canvas-wrap");
   const networkMetaEl = document.getElementById("network-meta");
@@ -118,6 +163,10 @@
   const rangeResetZoomBtn = document.getElementById("range-reset-zoom");
   const viewButtons = [...document.querySelectorAll(".views [data-view]")];
   const viewsNavEl = document.querySelector(".views");
+  const dataMegaEl = document.querySelector('.nav-mega[data-mega="data"]');
+  const dataMegaToggle = document.getElementById("nav-mega-data-toggle");
+  const dataMegaPanel = document.getElementById("nav-mega-data-panel");
+  const DATA_VIEWS = new Set(["coverage", "backfill", "system"]);
   const topHeaderEl = document.querySelector(".top");
   const sortButtons = [...document.querySelectorAll(".sort-btn")];
   const gitPullBtn = document.getElementById("git-pull-btn");
@@ -288,6 +337,7 @@
     "network",
     "coverage",
     "backfill",
+    "system",
   ]);
   const VIEW_PATHS = {
     overview: "/overview",
@@ -296,6 +346,7 @@
     network: "/map",
     coverage: "/coverage",
     backfill: "/backfill",
+    system: "/system",
   };
 
   function normalizeView(raw) {
@@ -312,6 +363,7 @@
     if (p === "/map" || p === "/network") return "network";
     if (p === "/coverage") return "coverage";
     if (p === "/backfill") return "backfill";
+    if (p === "/system") return "system";
     return null;
   }
 
@@ -355,6 +407,20 @@
   const showForecastEl = document.getElementById("show-forecast");
   const projectionScenarioEl = document.getElementById("projection-scenario");
   const showWindowBandsEl = document.getElementById("show-window-bands");
+  const facadeShowForecastEl = document.getElementById("facade-show-forecast");
+  const facadeProjectionScenarioEl = document.getElementById(
+    "facade-projection-scenario"
+  );
+  const facadeShowWindowBandsEl = document.getElementById(
+    "facade-show-window-bands"
+  );
+  const facadeRangeSelectEl = document.getElementById("facade-range-select");
+  const facadeRangeCustomEl = document.getElementById("facade-range-custom");
+  const facadeRangeSinceEl = document.getElementById("facade-range-since");
+  const facadeRangeUntilEl = document.getElementById("facade-range-until");
+  const facadeRangeApplyBtn = document.getElementById("facade-range-apply");
+  const facadeLocateBtn = document.getElementById("facade-locate-btn");
+  const facadeGeoStatusEl = document.getElementById("facade-geo-status");
   const showHvacEl = document.getElementById("show-hvac");
   const windowNotifyEl = document.getElementById("window-notify-btn");
   const windowLegendEl = document.getElementById("window-legend");
@@ -592,33 +658,25 @@
   }
 
   function updateGeoStatus() {
-    if (!geoStatusEl) return;
-    if (!showForecast) {
-      geoStatusEl.textContent = "";
-      return;
-    }
-    if (geoStatus === "pending") {
-      geoStatusEl.textContent = "Locating…";
-      return;
-    }
-    if (geoStatus === "denied") {
-      geoStatusEl.textContent = "Location denied — using config fallback";
-      return;
-    }
-    if (geoStatus === "unavailable") {
-      geoStatusEl.textContent =
-        "Geolocation unavailable (needs HTTPS or localhost)";
-      return;
-    }
-    if (geoStatus === "error") {
-      geoStatusEl.textContent = "Location failed — using config fallback";
-      return;
-    }
-    if (browserGeo) {
-      geoStatusEl.textContent = `GPS ${browserGeo.latitude.toFixed(3)}, ${browserGeo.longitude.toFixed(3)}`;
-      return;
-    }
-    geoStatusEl.textContent = "No GPS — config fallback";
+    const text = (() => {
+      if (!showForecast) return "";
+      if (geoStatus === "pending") return "Locating…";
+      if (geoStatus === "denied") {
+        return "Location denied — using config fallback";
+      }
+      if (geoStatus === "unavailable") {
+        return "Geolocation unavailable (needs HTTPS or localhost)";
+      }
+      if (geoStatus === "error") {
+        return "Location failed — using config fallback";
+      }
+      if (browserGeo) {
+        return `GPS ${browserGeo.latitude.toFixed(3)}, ${browserGeo.longitude.toFixed(3)}`;
+      }
+      return "No GPS — config fallback";
+    })();
+    if (geoStatusEl) geoStatusEl.textContent = text;
+    if (facadeGeoStatusEl) facadeGeoStatusEl.textContent = text;
   }
 
   function requestBrowserGeo(force = false) {
@@ -694,7 +752,11 @@
 
   function loadProjectionScenario() {
     const raw = localStorage.getItem(PROJECTION_SCENARIO_KEY) || "closed";
-    if (["auto", "closed", "open", "both"].includes(raw)) return raw;
+    if (
+      ["auto", "closed", "open", "both", "coolest", "warmest"].includes(raw)
+    ) {
+      return raw;
+    }
     return "closed";
   }
 
@@ -739,9 +801,36 @@
   }
 
   function syncProjectionScenarioControl() {
-    if (!projectionScenarioEl) return;
-    projectionScenarioEl.value = projectionScenario;
-    projectionScenarioEl.disabled = !showForecast;
+    for (const el of [projectionScenarioEl, facadeProjectionScenarioEl]) {
+      if (!el) continue;
+      el.value = projectionScenario;
+      el.disabled = !showForecast;
+    }
+  }
+
+  function syncForecastToggleControls() {
+    if (showForecastEl) showForecastEl.checked = showForecast;
+    if (facadeShowForecastEl) facadeShowForecastEl.checked = showForecast;
+    if (showWindowBandsEl) showWindowBandsEl.checked = showWindowBands;
+    if (facadeShowWindowBandsEl) {
+      facadeShowWindowBandsEl.checked = showWindowBands;
+    }
+    syncProjectionScenarioControl();
+    syncForecastFutureButtons();
+  }
+
+  function reloadRangeDependentViews() {
+    if (currentView === "compare") {
+      loadHistory().catch((err) => {
+        statusEl.textContent = `Error: ${err.message}`;
+      });
+    } else if (currentView === "facades") {
+      loadFacades().catch((err) => {
+        if (facadeStatusEl) {
+          facadeStatusEl.textContent = `Error: ${err.message}`;
+        }
+      });
+    }
   }
 
   function loadActiveModels() {
@@ -984,39 +1073,47 @@
   }
 
   function syncRangeControls() {
-    rangeButtons.forEach((b) => b.classList.remove("active"));
-    if (rangeSelectEl) {
-      rangeSelectEl.classList.remove("active");
-    }
     const custom = isCustomRange();
-    if (rangeCustomEl) rangeCustomEl.hidden = !custom;
+    const h = Number(hours);
+    const quickMatch = !custom && QUICK_RANGE_HOURS.has(h);
+    const selectMatch = !custom && SELECT_RANGE_HOURS.has(h);
 
-    if (custom) {
-      if (rangeSelectEl) {
-        rangeSelectEl.value = "custom";
-        rangeSelectEl.classList.add("active");
+    rangeButtons.forEach((b) => {
+      b.classList.toggle(
+        "active",
+        quickMatch && Number(b.dataset.hours) === h
+      );
+    });
+
+    for (const sel of [rangeSelectEl, facadeRangeSelectEl]) {
+      if (!sel) continue;
+      sel.classList.remove("active");
+      if (custom) {
+        sel.value = "custom";
+        sel.classList.add("active");
+      } else if (quickMatch) {
+        sel.value = "";
+      } else if (selectMatch) {
+        sel.value = String(h);
+        sel.classList.add("active");
+      } else {
+        sel.value = "custom";
+        sel.classList.add("active");
       }
+    }
+
+    for (const box of [rangeCustomEl, facadeRangeCustomEl]) {
+      if (box) box.hidden = !custom;
+    }
+    if (custom) {
       if (rangeSinceEl) rangeSinceEl.value = toDatetimeLocalValue(customSince);
       if (rangeUntilEl) rangeUntilEl.value = toDatetimeLocalValue(customUntil);
-      return;
-    }
-
-    const h = Number(hours);
-    const quick = rangeButtons.find((b) => Number(b.dataset.hours) === h);
-    if (quick) {
-      quick.classList.add("active");
-      if (rangeSelectEl) rangeSelectEl.value = "";
-      return;
-    }
-    if (rangeSelectEl && SELECT_RANGE_HOURS.has(h)) {
-      rangeSelectEl.value = String(h);
-      rangeSelectEl.classList.add("active");
-      return;
-    }
-    // Unknown hours: show as custom absolute window ending now
-    if (rangeSelectEl) {
-      rangeSelectEl.value = "custom";
-      rangeSelectEl.classList.add("active");
+      if (facadeRangeSinceEl) {
+        facadeRangeSinceEl.value = toDatetimeLocalValue(customSince);
+      }
+      if (facadeRangeUntilEl) {
+        facadeRangeUntilEl.value = toDatetimeLocalValue(customUntil);
+      }
     }
   }
 
@@ -1025,27 +1122,8 @@
     lastRelativeHours = hours;
     customSince = null;
     customUntil = null;
-    if (rangeCustomEl) rangeCustomEl.hidden = true;
-    rangeButtons.forEach((b) => b.classList.remove("active"));
-    if (rangeSelectEl) {
-      rangeSelectEl.classList.remove("active");
-      if (fromSelect && SELECT_RANGE_HOURS.has(hours)) {
-        rangeSelectEl.value = String(hours);
-        rangeSelectEl.classList.add("active");
-      } else if (QUICK_RANGE_HOURS.has(hours)) {
-        rangeSelectEl.value = "";
-        const btn = rangeButtons.find((b) => Number(b.dataset.hours) === hours);
-        if (btn) btn.classList.add("active");
-      } else if (SELECT_RANGE_HOURS.has(hours)) {
-        rangeSelectEl.value = String(hours);
-        rangeSelectEl.classList.add("active");
-      } else {
-        rangeSelectEl.value = "";
-      }
-    } else {
-      const btn = rangeButtons.find((b) => Number(b.dataset.hours) === hours);
-      if (btn) btn.classList.add("active");
-    }
+    void fromSelect;
+    syncRangeControls();
     persistRange();
   }
 
@@ -1059,14 +1137,7 @@
     customSince = t0;
     customUntil = t1;
     hours = spanH;
-    rangeButtons.forEach((b) => b.classList.remove("active"));
-    if (rangeSelectEl) {
-      rangeSelectEl.value = "custom";
-      rangeSelectEl.classList.add("active");
-    }
-    if (rangeCustomEl) rangeCustomEl.hidden = false;
-    if (rangeSinceEl) rangeSinceEl.value = toDatetimeLocalValue(t0);
-    if (rangeUntilEl) rangeUntilEl.value = toDatetimeLocalValue(t1);
+    syncRangeControls();
     persistRange();
     return true;
   }
@@ -1215,6 +1286,12 @@
       }
       return true;
     });
+  }
+
+  function overviewVisibleDevices() {
+    return filteredDevices().filter((d) =>
+      deviceMatchesSystemFilter(d, overviewTextFilter)
+    );
   }
 
   function colorFor(address) {
@@ -3241,6 +3318,769 @@
     }
   }
 
+  function formatCount(n) {
+    const v = Number(n) || 0;
+    return v.toLocaleString();
+  }
+
+  function ensureSystemCharts() {
+    if (typeof Chart === "undefined") return;
+    if (systemStorageCanvas && !systemStorageChart) {
+      systemStorageChart = new Chart(systemStorageCanvas.getContext("2d"), {
+        type: "line",
+        data: { datasets: [] },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          plugins: {
+            legend: { position: "bottom" },
+            tooltip: {
+              callbacks: {
+                label(ctx) {
+                  const y = ctx.parsed.y;
+                  return `${ctx.dataset.label}: ${formatBytes(y)}`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              type: "time",
+              time: { unit: "day", tooltipFormat: "yyyy-MM-dd" },
+              title: { display: false },
+            },
+            y: {
+              beginAtZero: true,
+              ticks: {
+                callback(v) {
+                  return formatBytes(v);
+                },
+              },
+            },
+          },
+        },
+      });
+    }
+  }
+
+  function destroySystemSourceCharts() {
+    systemSourceCharts.forEach((c) => {
+      try {
+        c.destroy();
+      } catch (_) {
+        /* ignore */
+      }
+    });
+    systemSourceCharts = [];
+    if (systemSourceChartsEl) systemSourceChartsEl.innerHTML = "";
+  }
+
+  function makeSystemSourceChart(canvas, grain) {
+    const xUnit = grain === "hour" ? "hour" : "day";
+    return new Chart(canvas.getContext("2d"), {
+      type: "bar",
+      data: { datasets: [] },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { position: "bottom" },
+        },
+        scales: {
+          x: {
+            type: "time",
+            stacked: true,
+            time: {
+              unit: xUnit,
+              tooltipFormat: "yyyy-MM-dd HH:mm",
+            },
+          },
+          y: {
+            stacked: true,
+            beginAtZero: true,
+            title: {
+              display: true,
+              text: grain === "hour" ? "Samples / hour" : "Samples / day",
+            },
+          },
+        },
+      },
+    });
+  }
+
+  function syncSystemRangeButtons() {
+    const hourMode = systemGrain === "hour";
+    systemRangeButtons.forEach((btn) => {
+      const d = Number(btn.dataset.sysDays);
+      const hourOnly = d <= 2;
+      btn.hidden = hourMode ? false : hourOnly;
+      if (hourMode && d > 14) btn.hidden = true;
+      btn.classList.toggle("active", !btn.hidden && d === systemDays);
+    });
+    systemGrainButtons.forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.sysGrain === systemGrain);
+    });
+  }
+
+  function selectedSystemAddressesFromDom() {
+    if (!systemDeviceEl) return [];
+    return [...systemDeviceEl.selectedOptions]
+      .map((o) => o.value)
+      .filter(Boolean);
+  }
+
+  function syncSystemSelectionFromDom() {
+    if (!systemDeviceEl) return;
+    const visible = new Set(
+      [...systemDeviceEl.options].map((o) => String(o.value || "").toUpperCase())
+    );
+    for (const addr of [...systemSelectedAddresses]) {
+      if (!visible.has(addr)) continue;
+      const opt = [...systemDeviceEl.options].find(
+        (o) => String(o.value || "").toUpperCase() === addr
+      );
+      if (opt && !opt.selected) systemSelectedAddresses.delete(addr);
+    }
+    selectedSystemAddressesFromDom().forEach((a) => {
+      systemSelectedAddresses.add(String(a).toUpperCase());
+    });
+  }
+
+  function selectedSystemAddresses() {
+    syncSystemSelectionFromDom();
+    return [...systemSelectedAddresses];
+  }
+
+  function deviceMatchesSystemFilter(device, rawFilter) {
+    const q = String(rawFilter || "").trim().toLowerCase();
+    if (!q) return true;
+    const qMac = q.replace(/[:\s-]/g, "");
+    const name = String(device.name || "").toLowerCase();
+    const addr = String(device.address || "").toLowerCase();
+    const addrMac = addr.replace(/[:\s-]/g, "");
+    if (name.includes(q) || addr.includes(q)) return true;
+    return Boolean(qMac) && addrMac.includes(qMac);
+  }
+
+  function renderSystemDeviceOptions() {
+    if (!systemDeviceEl) return;
+    syncSystemSelectionFromDom();
+    const filtered = systemDeviceList.filter((d) =>
+      deviceMatchesSystemFilter(d, systemDeviceFilter)
+    );
+    systemDeviceEl.innerHTML = filtered
+      .map((d) => {
+        const addr = String(d.address || "").toUpperCase();
+        const name = String(d.name || addr);
+        const n = Number(d.sample_count) || 0;
+        const label = n ? `${name} (${formatSampleCount(n)})` : name;
+        return `<option value="${escapeHtml(addr)}">${escapeHtml(label)}</option>`;
+      })
+      .join("");
+    [...systemDeviceEl.options].forEach((opt) => {
+      opt.selected = systemSelectedAddresses.has(
+        String(opt.value || "").toUpperCase()
+      );
+    });
+  }
+
+  function seriesPointTime(row, grain) {
+    const t = row.t || row.day || "";
+    if (!t) return null;
+    if (grain === "hour") {
+      return t.endsWith("Z") ? t : `${t}Z`;
+    }
+    // Day bucket → midnight UTC
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return `${t}T00:00:00.000Z`;
+    return t;
+  }
+
+  function renderSystemStorage(data) {
+    ensureSystemCharts();
+    const current = (data.storage && data.storage.current) || {};
+    const daily = Array.isArray(data.storage && data.storage.daily)
+      ? data.storage.daily
+      : [];
+    if (systemStorageSummaryEl) {
+      const bits = [
+        `Now: ${formatBytes(current.total_bytes)}`,
+        `DB ${formatBytes(current.db_bytes)}`,
+        `WAL ${formatBytes(current.wal_bytes)}`,
+      ];
+      if (current.readings_count != null) {
+        bits.push(`${formatCount(current.readings_count)} readings`);
+      }
+      systemStorageSummaryEl.textContent = bits.join(" · ");
+    }
+    if (systemStorageHintEl) {
+      systemStorageHintEl.textContent = daily.length
+        ? `${daily.length} daily snapshot${daily.length === 1 ? "" : "s"} (UTC)`
+        : "No daily snapshots yet — recorded by workers once per UTC day";
+    }
+    if (!systemStorageChart) return;
+    const toPoints = (key) =>
+      daily.map((row) => ({
+        x: `${row.day}T00:00:00.000Z`,
+        y: Number(row[key]) || 0,
+      }));
+    // Include live point if newer than last snapshot day.
+    const seriesKeys = [
+      { key: "total_bytes", label: "Total", color: "#1f6feb" },
+      { key: "db_bytes", label: "DB file", color: "#2da44e" },
+      { key: "wal_bytes", label: "WAL", color: "#bf8700" },
+    ];
+    const lastDay = daily.length ? daily[daily.length - 1].day : null;
+    const curDay = current.day || null;
+    systemStorageChart.data.datasets = seriesKeys.map((s) => {
+      const pts = toPoints(s.key);
+      if (
+        curDay &&
+        current[s.key] != null &&
+        (!lastDay || curDay > lastDay || curDay === lastDay)
+      ) {
+        const live = {
+          x: `${curDay}T00:00:00.000Z`,
+          y: Number(current[s.key]) || 0,
+        };
+        if (!pts.length || pts[pts.length - 1].x !== live.x) {
+          pts.push(live);
+        } else {
+          pts[pts.length - 1] = live;
+        }
+      }
+      return {
+        label: s.label,
+        data: pts,
+        borderColor: s.color,
+        backgroundColor: s.color,
+        tension: 0.15,
+        pointRadius: pts.length <= 2 ? 3 : 0,
+        borderWidth: 2,
+      };
+    });
+    systemStorageChart.update();
+  }
+
+  function formatInventoryPct(pct) {
+    const v = Number(pct);
+    if (!Number.isFinite(v)) return "—";
+    if (v > 0 && v < 0.01) return "<0.01%";
+    if (v < 10) return `${v.toFixed(2)}%`;
+    return `${v.toFixed(1)}%`;
+  }
+
+  function renderSystemInventory(data) {
+    const inv = data.inventory || {};
+    const bySrc = inv.readings_by_source || {};
+    const dbFile = inv.db_file || {};
+    if (systemSourceSummaryEl) {
+      const pills = [
+        ["direct", "Direct BLE"],
+        ["backfill", "GATT backfill"],
+        ["federation", "Federation"],
+        ["other", "Other"],
+      ];
+      systemSourceSummaryEl.innerHTML = pills
+        .map(
+          ([k, label]) =>
+            `<span class="sys-pill"><span>${escapeHtml(label)}</span>` +
+            `<strong>${escapeHtml(formatCount(bySrc[k] || 0))}</strong></span>`
+        )
+        .join("");
+    }
+    if (systemInventoryHintEl) {
+      if (inv.size_source === "dbstat") {
+        const logical = Number(dbFile.logical_bytes) || 0;
+        const attributed = Number(dbFile.attributed_bytes);
+        const bits = [
+          "Sizes from SQLite dbstat (table pages + indexes)",
+          `% of ${formatBytes(logical)} logical DB`,
+        ];
+        if (Number.isFinite(attributed) && logical > 0) {
+          const other = Math.max(0, logical - attributed);
+          if (other > 0) {
+            bits.push(
+              `${formatBytes(other)} schema / free / other (${formatInventoryPct(
+                (100 * other) / logical
+              )})`
+            );
+          }
+        }
+        systemInventoryHintEl.textContent = bits.join(" · ");
+      } else {
+        systemInventoryHintEl.textContent =
+          "What is stored in this node’s database — per-table size unavailable on this SQLite build";
+      }
+    }
+    if (!systemInventoryBody) return;
+    const tables = Array.isArray(inv.tables) ? inv.tables : [];
+    if (!tables.length) {
+      systemInventoryBody.innerHTML =
+        `<tr><td colspan="5" class="overview-empty">No tables</td></tr>`;
+      return;
+    }
+    systemInventoryBody.innerHTML = tables
+      .map((t) => {
+        const size =
+          t.bytes != null
+            ? formatBytes(t.bytes)
+            : "—";
+        const pct = formatInventoryPct(t.pct);
+        return (
+          `<tr>` +
+          `<td>${escapeHtml(t.name)}</td>` +
+          `<td class="num">${escapeHtml(formatCount(t.rows))}</td>` +
+          `<td class="num">${escapeHtml(size)}</td>` +
+          `<td class="num">${escapeHtml(pct)}</td>` +
+          `<td>${escapeHtml(t.note || "")}</td>` +
+          `</tr>`
+        );
+      })
+      .join("");
+  }
+
+  function ageMixHtml(buckets) {
+    const list = Array.isArray(buckets) ? buckets : [];
+    const parts = list
+      .filter((b) => Number(b.samples) > 0)
+      .map((b) => {
+        const pct = formatInventoryPct(b.pct);
+        return `<span class="sys-age-chip" title="${escapeHtml(
+          String(b.key)
+        )}: ${escapeHtml(formatCount(b.samples))} (${escapeHtml(pct)})">${escapeHtml(
+          String(b.key)
+        )} ${escapeHtml(pct)}</span>`;
+      });
+    if (!parts.length) return '<span class="overview-meta">—</span>';
+    return `<div class="sys-age-mix">${parts.join("")}</div>`;
+  }
+
+  function renderSystemSensorStorage(data) {
+    const store = data.sensor_storage || {};
+    const policies = Array.isArray(store.policies) ? store.policies : [];
+    const sensors = Array.isArray(store.sensors) ? store.sensors : [];
+    if (systemSensorStorageHintEl) {
+      const bits = [
+        "Per-sensor readings footprint (dbstat share) and compaction policy",
+        "Policies roll up old raw samples to min/max/avg buckets on the workers schedule",
+      ];
+      if (store.readings_store_bytes != null) {
+        bits.push(
+          `Readings store ${formatBytes(store.readings_store_bytes)}` +
+            (store.rollup_bytes
+              ? ` (rollup ${formatBytes(store.rollup_bytes)})`
+              : "")
+        );
+      }
+      systemSensorStorageHintEl.textContent = bits.join(" · ");
+    }
+    if (!systemSensorStorageBody) return;
+    if (!sensors.length) {
+      systemSensorStorageBody.innerHTML =
+        `<tr><td colspan="8" class="overview-empty">No sensors</td></tr>`;
+      return;
+    }
+    const policyOptions = (selected) =>
+      policies
+        .map((p) => {
+          const id = String(p.id || "");
+          const label = String(p.label || id);
+          const sel = id === selected ? " selected" : "";
+          return `<option value="${escapeHtml(id)}"${sel}>${escapeHtml(
+            label
+          )}</option>`;
+        })
+        .join("");
+
+    systemSensorStorageBody.innerHTML = "";
+    for (const s of sensors) {
+      const tr = document.createElement("tr");
+      const addr = String(s.address || "");
+      const policy = String(s.policy || "none");
+      tr.innerHTML =
+        `<td>` +
+        `<span class="overview-name">${escapeHtml(s.name || addr)}</span>` +
+        `<span class="overview-meta">${escapeHtml(addr)}</span>` +
+        `</td>` +
+        `<td class="num">${escapeHtml(formatCount(s.samples))}</td>` +
+        `<td class="num">${escapeHtml(formatBytes(s.bytes_est))}</td>` +
+        `<td class="num">${escapeHtml(formatInventoryPct(s.pct))}</td>` +
+        `<td>${ageMixHtml(s.age_buckets)}</td>` +
+        `<td class="sys-policy-cell"></td>` +
+        `<td class="num">${escapeHtml(formatBytes(s.bytes_after_est))}</td>` +
+        `<td class="sys-preview-cell"></td>`;
+      const cell = tr.querySelector(".sys-policy-cell");
+      const select = document.createElement("select");
+      select.className = "cat-select sys-compaction-select";
+      select.setAttribute("aria-label", `Compaction policy for ${s.name || addr}`);
+      select.innerHTML = policyOptions(policy);
+      select.addEventListener("click", (ev) => ev.stopPropagation());
+      select.addEventListener("change", async () => {
+        const next = select.value;
+        select.disabled = true;
+        try {
+          const res = await fetch(
+            `/api/devices/${encodeURIComponent(addr)}/compaction`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ policy: next }),
+            }
+          );
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error(
+              typeof body.detail === "string" ? body.detail : `HTTP ${res.status}`
+            );
+          }
+          s.policy = next;
+          // Refresh estimates from server.
+          loadSystem().catch((err) => console.warn(err));
+        } catch (err) {
+          console.warn(err);
+          select.value = policy;
+          if (systemSensorStorageHintEl) {
+            systemSensorStorageHintEl.textContent = `Policy update failed: ${err.message}`;
+          }
+        } finally {
+          select.disabled = false;
+        }
+      });
+      cell.appendChild(select);
+
+      const previewCell = tr.querySelector(".sys-preview-cell");
+      const previewBtn = document.createElement("button");
+      previewBtn.type = "button";
+      previewBtn.className = "backfill-btn sys-preview-btn";
+      previewBtn.textContent = "Preview";
+      previewBtn.title = "Dry-run report for every policy (no changes)";
+      previewBtn.addEventListener("click", () => {
+        loadCompactionPreview(addr, s.name || addr, previewBtn).catch((err) =>
+          console.warn(err)
+        );
+      });
+      previewCell.appendChild(previewBtn);
+      systemSensorStorageBody.appendChild(tr);
+    }
+  }
+
+  function formatBucketLabel(secs) {
+    const s = Number(secs) || 0;
+    if (s >= 86400) return `${Math.round(s / 86400)}d`;
+    if (s >= 3600) return `${Math.round(s / 3600)}h`;
+    if (s >= 60) return `${Math.round(s / 60)}m`;
+    return `${s}s`;
+  }
+
+  function renderCompactionPreview(report) {
+    if (!systemCompactionPreviewEl) return;
+    const cur = report.current || {};
+    const policies = Array.isArray(report.policies) ? report.policies : [];
+    const rows = policies
+      .map((p) => {
+        const d = p.details || {};
+        let detailHtml = "";
+        if (d.kind === "none") {
+          detailHtml = `<span class="overview-meta">${escapeHtml(
+            d.note || "No changes"
+          )}</span>`;
+        } else if (d.kind === "tiers") {
+          const tiers = Array.isArray(d.tiers) ? d.tiers : [];
+          detailHtml =
+            `<ul class="sys-preview-tiers">` +
+            tiers
+              .map((t) => {
+                const age =
+                  t.younger_than_days == null
+                    ? `≥${t.older_than_days}d`
+                    : `${t.older_than_days}–${t.younger_than_days}d`;
+                return (
+                  `<li>` +
+                  `<strong>${escapeHtml(age)}</strong> @ ${escapeHtml(
+                    formatBucketLabel(t.bucket_secs)
+                  )}: ` +
+                  `${escapeHtml(formatCount(t.raw_compacted))} → ` +
+                  `${escapeHtml(formatCount(t.rollups))} rollup(s)` +
+                  (t.raw_kept_incomplete_bucket
+                    ? ` · ${escapeHtml(
+                        formatCount(t.raw_kept_incomplete_bucket)
+                      )} kept (open bucket)`
+                    : "") +
+                  `</li>`
+                );
+              })
+              .join("") +
+            `</ul>`;
+        } else if (d.kind === "adaptive") {
+          detailHtml =
+            `<ul class="sys-preview-tiers">` +
+            `<li>Hot window (&lt;${escapeHtml(
+              String(d.raw_days)
+            )}d): ${escapeHtml(formatCount(d.samples_hot_raw))} raw kept</li>` +
+            `<li>Old window: ${escapeHtml(
+              formatCount(d.samples_old_window)
+            )} samples · ΔT≤${escapeHtml(
+              String(d.temp_epsilon_c)
+            )} °C</li>` +
+            `<li>Stable segments: ${escapeHtml(
+              formatCount(d.stable_segments)
+            )} ` +
+            `(avg ${escapeHtml(String(d.avg_segment_samples))} samples / ` +
+            `${escapeHtml(formatBucketLabel(d.avg_segment_span_secs))}, ` +
+            `ΔT̄ ${escapeHtml(String(d.avg_segment_delta_t))} °C)</li>` +
+            `<li>Rolled: ${escapeHtml(
+              formatCount(d.samples_rolled)
+            )} · kept volatile: ${escapeHtml(
+              formatCount(d.samples_kept_volatile)
+            )}</li>` +
+            `</ul>`;
+        }
+        return (
+          `<tr>` +
+          `<td>${escapeHtml(p.label || p.policy)}</td>` +
+          `<td class="num">${escapeHtml(formatCount(p.raw_deleted))}</td>` +
+          `<td class="num">${escapeHtml(formatCount(p.rollups))}</td>` +
+          `<td class="num">${escapeHtml(formatCount(p.raw_kept))}</td>` +
+          `<td class="num">${escapeHtml(formatBytes(p.bytes_after_est))}</td>` +
+          `<td class="num">${escapeHtml(formatBytes(p.bytes_saved_est))} ` +
+          `(${escapeHtml(formatInventoryPct(p.pct_saved))})</td>` +
+          `<td>${detailHtml}</td>` +
+          `</tr>`
+        );
+      })
+      .join("");
+
+    systemCompactionPreviewEl.hidden = false;
+    systemCompactionPreviewEl.innerHTML =
+      `<div class="overview-head overview-head-secondary">` +
+      `<h3>Compaction preview — ${escapeHtml(report.name || report.address)}</h3>` +
+      `<p class="overview-hint">Dry-run only · current ` +
+      `${escapeHtml(formatCount(cur.raw_samples))} raw · ` +
+      `${escapeHtml(formatBytes(cur.bytes_est))} · no data written</p>` +
+      `<button type="button" class="backfill-btn" id="system-compaction-preview-close">Close</button>` +
+      `</div>` +
+      `<div class="overview-table-wrap">` +
+      `<table class="overview-table system-compaction-preview-table">` +
+      `<thead><tr>` +
+      `<th>Policy</th>` +
+      `<th class="num">Would delete</th>` +
+      `<th class="num">Rollups</th>` +
+      `<th class="num">Raw kept</th>` +
+      `<th class="num">Size after</th>` +
+      `<th class="num">Saved</th>` +
+      `<th>Details</th>` +
+      `</tr></thead>` +
+      `<tbody>${rows}</tbody>` +
+      `</table></div>`;
+
+    const closeBtn = document.getElementById("system-compaction-preview-close");
+    if (closeBtn) {
+      closeBtn.addEventListener("click", () => {
+        systemCompactionPreviewEl.hidden = true;
+        systemCompactionPreviewEl.innerHTML = "";
+      });
+    }
+  }
+
+  async function loadCompactionPreview(address, name, btn) {
+    if (!systemCompactionPreviewEl) return;
+    const prev = btn ? btn.textContent : "";
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "…";
+    }
+    systemCompactionPreviewEl.hidden = false;
+    systemCompactionPreviewEl.innerHTML =
+      `<p class="overview-hint">Analyzing policies for ${escapeHtml(
+        name || address
+      )}… (adaptive may take a few seconds)</p>`;
+    try {
+      const res = await fetch(
+        `/api/devices/${encodeURIComponent(address)}/compaction/preview`
+      );
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof body.detail === "string" ? body.detail : `HTTP ${res.status}`
+        );
+      }
+      renderCompactionPreview(body);
+    } catch (err) {
+      systemCompactionPreviewEl.innerHTML =
+        `<p class="overview-hint">Preview failed: ${escapeHtml(err.message)}</p>`;
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = prev || "Preview";
+      }
+    }
+  }
+
+  function populateSystemDevices(devices) {
+    if (!systemDeviceEl) return;
+    syncSystemSelectionFromDom();
+    systemDeviceList = Array.isArray(devices) ? devices : [];
+    if (!systemSelectedAddresses.size) {
+      let saved = [];
+      try {
+        saved = JSON.parse(
+          localStorage.getItem("govee-charts.systemAddresses") || "[]"
+        );
+      } catch (_) {
+        saved = [];
+      }
+      if (Array.isArray(saved)) {
+        saved.forEach((a) => {
+          if (a) systemSelectedAddresses.add(String(a).toUpperCase());
+        });
+      }
+      const legacy = localStorage.getItem("govee-charts.systemAddress") || "";
+      if (legacy) systemSelectedAddresses.add(String(legacy).toUpperCase());
+    }
+    const known = new Set(
+      systemDeviceList.map((d) => String(d.address || "").toUpperCase())
+    );
+    for (const addr of [...systemSelectedAddresses]) {
+      if (!known.has(addr)) systemSelectedAddresses.delete(addr);
+    }
+    if (systemDeviceFilterEl && systemDeviceFilter) {
+      systemDeviceFilterEl.value = systemDeviceFilter;
+    }
+    renderSystemDeviceOptions();
+  }
+
+  async function loadSystemDeviceSources() {
+    const addresses = selectedSystemAddresses();
+    localStorage.setItem(
+      "govee-charts.systemAddresses",
+      JSON.stringify(addresses)
+    );
+    if (!addresses.length) {
+      destroySystemSourceCharts();
+      if (systemDeviceStatusEl) {
+        systemDeviceStatusEl.textContent =
+          "Select one or more sensors (Ctrl/Cmd-click) — one chart each.";
+      }
+      return;
+    }
+    if (systemDeviceStatusEl) systemDeviceStatusEl.textContent = "Loading…";
+    const params = new URLSearchParams({
+      days: String(systemDays),
+      grain: systemGrain,
+    });
+    addresses.forEach((a) => params.append("address", a));
+    const res = await fetch(`/api/system/device-sources?${params}`);
+    if (!res.ok) throw new Error(`device-sources HTTP ${res.status}`);
+    const data = await res.json();
+    if (typeof Chart === "undefined" || !systemSourceChartsEl) {
+      if (systemDeviceStatusEl) {
+        systemDeviceStatusEl.textContent = "Chart.js unavailable.";
+      }
+      return;
+    }
+    const grain = data.grain || systemGrain;
+    const buckets = [
+      { key: "direct", label: "Direct BLE", color: "#2da44e" },
+      { key: "backfill", label: "GATT backfill", color: "#bf8700" },
+      { key: "federation", label: "Federation", color: "#1f6feb" },
+      { key: "other", label: "Other", color: "#8c959f" },
+    ];
+    const devices = Array.isArray(data.devices) ? data.devices : [];
+    destroySystemSourceCharts();
+    let grandTotal = 0;
+    devices.forEach((dev) => {
+      const series = Array.isArray(dev.series) ? dev.series : [];
+      const total = series.reduce(
+        (acc, row) =>
+          acc +
+          (Number(row.direct) || 0) +
+          (Number(row.backfill) || 0) +
+          (Number(row.federation) || 0) +
+          (Number(row.other) || 0),
+        0
+      );
+      grandTotal += total;
+      const block = document.createElement("div");
+      block.className = "system-source-chart-block";
+      const title = document.createElement("h3");
+      title.textContent = dev.name || dev.address || "Sensor";
+      const meta = document.createElement("p");
+      meta.className = "system-chart-meta";
+      meta.textContent = `${formatCount(total)} samples · ${dev.address || ""}`;
+      const wrap = document.createElement("div");
+      wrap.className = "system-chart-wrap system-chart-wrap-tall";
+      const canvas = document.createElement("canvas");
+      canvas.setAttribute(
+        "aria-label",
+        `Provenance for ${dev.name || dev.address || "sensor"}`
+      );
+      wrap.appendChild(canvas);
+      block.appendChild(title);
+      block.appendChild(meta);
+      block.appendChild(wrap);
+      systemSourceChartsEl.appendChild(block);
+
+      const chart = makeSystemSourceChart(canvas, grain);
+      chart.data.datasets = buckets.map((b) => ({
+        label: b.label,
+        data: series
+          .map((row) => {
+            const x = seriesPointTime(row, grain);
+            if (!x) return null;
+            return { x, y: Number(row[b.key]) || 0 };
+          })
+          .filter(Boolean),
+        backgroundColor: b.color,
+        borderColor: b.color,
+        stack: "src",
+        borderWidth: 0,
+      }));
+      chart.update();
+      systemSourceCharts.push(chart);
+    });
+    const rangeBit =
+      systemDays < 1
+        ? `${Math.round(systemDays * 24)}h`
+        : systemDays === 1
+          ? "24h"
+          : `${systemDays}d`;
+    if (systemDeviceStatusEl) {
+      systemDeviceStatusEl.textContent = `${devices.length} chart${
+        devices.length === 1 ? "" : "s"
+      } · ${formatCount(grandTotal)} samples total · ${grain} buckets · ${rangeBit}`;
+    }
+  }
+
+  async function loadSystem() {
+    if (systemBusy) return;
+    systemBusy = true;
+    try {
+      if (systemStorageSummaryEl) systemStorageSummaryEl.textContent = "Loading…";
+      const res = await fetch("/api/system");
+      if (!res.ok) throw new Error(`system HTTP ${res.status}`);
+      const data = await res.json();
+      renderSystemStorage(data);
+      renderSystemInventory(data);
+      renderSystemSensorStorage(data);
+      populateSystemDevices(data.devices || []);
+      syncSystemRangeButtons();
+      await loadSystemDeviceSources();
+      requestAnimationFrame(() => {
+        if (systemStorageChart) systemStorageChart.resize();
+        systemSourceCharts.forEach((c) => c.resize());
+      });
+    } catch (err) {
+      console.warn("system:", err);
+      if (systemStorageSummaryEl) {
+        systemStorageSummaryEl.textContent = `Error: ${err.message}`;
+      }
+    } finally {
+      systemBusy = false;
+    }
+  }
+
   function deviceLabel(device) {
     return device ? device.name : "—";
   }
@@ -3690,6 +4530,25 @@
     topBarResizeObs.observe(topBarEl);
   }
 
+  function isDataMegaOpen() {
+    return !!(dataMegaEl && dataMegaEl.classList.contains("open"));
+  }
+
+  function setDataMegaOpen(open) {
+    if (!dataMegaEl || !dataMegaToggle || !dataMegaPanel) return;
+    const next = !!open;
+    dataMegaEl.classList.toggle("open", next);
+    dataMegaToggle.setAttribute("aria-expanded", next ? "true" : "false");
+    dataMegaPanel.hidden = !next;
+  }
+
+  function syncDataMega(view) {
+    if (!dataMegaEl) return;
+    const inData = DATA_VIEWS.has(view);
+    dataMegaEl.classList.toggle("active", inData);
+    setDataMegaOpen(inData);
+  }
+
   function setView(view, opts = {}) {
     const mode = opts.url || "none";
     view = normalizeView(view);
@@ -3704,12 +4563,14 @@
     if (viewNetwork) viewNetwork.hidden = view !== "network";
     if (viewCoverage) viewCoverage.hidden = view !== "coverage";
     if (viewBackfill) viewBackfill.hidden = view !== "backfill";
+    if (viewSystem) viewSystem.hidden = view !== "system";
     viewButtons.forEach((btn) => {
       const active = btn.dataset.view === view;
       btn.classList.toggle("active", active);
       if (active) btn.setAttribute("aria-current", "page");
       else btn.removeAttribute("aria-current");
     });
+    syncDataMega(view);
     if (view === "compare" && !historyLoaded) {
       loadHistory().catch((err) => {
         statusEl.textContent = `Error: ${err.message}`;
@@ -3741,6 +4602,8 @@
         .catch((err) => console.warn(err));
     } else if (view === "backfill") {
       loadBackfill().catch((err) => console.warn(err));
+    } else if (view === "system") {
+      loadSystem().catch((err) => console.warn(err));
     }
     syncBackfillPolling();
   }
@@ -3749,9 +4612,11 @@
     if (!facadeBody) return;
     if (facadeStatusEl) facadeStatusEl.textContent = "Loading…";
     await requestBrowserGeo(false);
+    const pastH = Math.min(rangeOverlayHours(), 26280);
+    const futH = Math.min(Number(forecastFutureHours) || 24, 384);
     const params = new URLSearchParams({
-      hours: "24",
-      future_hours: String(forecastFutureHours),
+      hours: String(pastH),
+      future_hours: String(futH),
     });
     if (browserGeo) {
       params.set("latitude", String(browserGeo.latitude));
@@ -6517,8 +7382,6 @@
     const rooms = data.rooms || [];
     const groups = groupRoomsByFacade(rooms);
     const outdoorPoints = outdoor.points || [];
-    const pastHours = data.hours || 24;
-    const futureHours = data.future_hours != null ? data.future_hours : pastHours;
 
     if (!groups.length || !outdoor.available || !outdoorPoints.length) {
       facadeChartsEl.hidden = true;
@@ -6526,9 +7389,7 @@
     }
 
     facadeChartsEl.hidden = false;
-    const nowMs = Date.now();
-    const xMin = nowMs - pastHours * 3600 * 1000;
-    const xMax = nowMs + futureHours * 3600 * 1000;
+    const axis = rangeAxisBounds();
     groups.forEach((group, gIdx) => {
       const figure = document.createElement("figure");
       figure.className = "chart-block facade-chart-block";
@@ -6536,7 +7397,9 @@
       const caption = document.createElement("figcaption");
       const roomNames = group.rooms.map((r) => r.label || r.id).join(", ");
       caption.innerHTML = `${escapeHtml(group.label)} façade
-        <span class="overview-meta">${escapeHtml(roomNames)} · −${pastHours} h / +${futureHours} h</span>`;
+        <span class="overview-meta">${escapeHtml(roomNames)} · ${escapeHtml(
+        formatRangeLabel()
+      )} · +${forecastFutureHours} h</span>`;
 
       const canvas = document.createElement("canvas");
       canvas.id = `facade-chart-${gIdx}`;
@@ -6546,6 +7409,7 @@
 
       const legendHint = document.createElement("p");
       legendHint.className = "facade-window-legend";
+      legendHint.hidden = !showWindowBands;
       legendHint.innerHTML =
         '<span class="window-swatch window-swatch-open"></span> open cools ' +
         '<span class="window-swatch window-swatch-close"></span> open heats ' +
@@ -6568,7 +7432,7 @@
       );
 
       const fp = group.rooms.map((r) => r.facade_projection).find((p) => p && p.points);
-      if (fp && fp.points.length) {
+      if (showForecast && fp && fp.points.length) {
         datasets.push(
           makeDataset(
             `${group.label} effective`,
@@ -6618,23 +7482,89 @@
             )
           );
         }
-        if (rp && (rp.points || []).length) {
-          datasets.push(
-            makeDataset(
-              `${labelBase} (proj.)`,
-              color,
-              rp.points.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
-              false,
-              { borderDash: [2, 4], borderWidth: 1.75 }
-            )
-          );
+        if (showForecast && rp) {
+          const scenarios = rp.window_scenarios || {};
+          const closedPts =
+            (scenarios.windows_closed && scenarios.windows_closed.points) || [];
+          const openPts =
+            (scenarios.windows_open && scenarios.windows_open.points) || [];
+          const coolPts =
+            (scenarios.strategy_coolest &&
+              scenarios.strategy_coolest.points) ||
+            [];
+          const warmPts =
+            (scenarios.strategy_warmest &&
+              scenarios.strategy_warmest.points) ||
+            [];
+          const showAuto = projectionScenario === "auto";
+          const showClosed =
+            projectionScenario === "closed" || projectionScenario === "both";
+          const showOpen =
+            projectionScenario === "open" || projectionScenario === "both";
+          const showCoolest = projectionScenario === "coolest";
+          const showWarmest = projectionScenario === "warmest";
+          if (showAuto && (rp.points || []).length) {
+            datasets.push(
+              makeDataset(
+                `${labelBase} (proj.)`,
+                color,
+                rp.points.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [2, 4], borderWidth: 1.75 }
+              )
+            );
+          }
+          if (showClosed && closedPts.length) {
+            datasets.push(
+              makeDataset(
+                `${labelBase} (windows closed)`,
+                color,
+                closedPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [8, 4], borderWidth: 1.35 }
+              )
+            );
+          }
+          if (showOpen && openPts.length) {
+            datasets.push(
+              makeDataset(
+                `${labelBase} (windows open)`,
+                color,
+                openPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [2, 3], borderWidth: 1.35 }
+              )
+            );
+          }
+          if (showCoolest && coolPts.length) {
+            datasets.push(
+              makeDataset(
+                `${labelBase} (coolest open/close)`,
+                color,
+                coolPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [6, 2], borderWidth: 1.75 }
+              )
+            );
+          }
+          if (showWarmest && warmPts.length) {
+            datasets.push(
+              makeDataset(
+                `${labelBase} (warmest open/close)`,
+                color,
+                warmPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [4, 2, 1, 2], borderWidth: 1.75 }
+              )
+            );
+          }
         }
       });
 
       const indoor = indoorSeriesForFacade(group.rooms);
       const allExterior = rooms.flatMap((r) => r.exterior || []);
       let bands = [];
-      if (indoor && indoor.series.length) {
+      if (showWindowBands && indoor && indoor.series.length) {
         bands = buildWindowBands(
           indoor.series,
           outdoorPoints,
@@ -6648,20 +7578,22 @@
         if (indoor.room) {
           scheduleEl.title = `Based on ${indoor.room.label || indoor.room.id} vs outdoor air + wind (past + forecast)`;
         }
+      } else if (!showWindowBands) {
+        scheduleEl.textContent = "";
       } else {
         scheduleEl.textContent =
           "Window schedule unavailable (no interior sensor / history for this façade).";
       }
 
       const opts = structuredClone(chartDefaults);
-      opts.plugins.windowBands = { bands };
+      opts.plugins.windowBands = { bands: showWindowBands ? bands : [] };
       opts.plugins.legend.display = datasets.length > 1;
       // Compare-only: no drag-zoom on façade overview charts.
       if (opts.plugins.zoom) delete opts.plugins.zoom;
       if (!opts.scales) opts.scales = {};
       if (!opts.scales.x) opts.scales.x = {};
-      opts.scales.x.min = xMin;
-      opts.scales.x.max = xMax;
+      opts.scales.x.min = axis.xMin;
+      opts.scales.x.max = axis.xMax;
 
       const chart = new Chart(canvas, {
         type: "line",
@@ -7865,6 +8797,26 @@
           ` · open${oSrc} ${Number(opened.summary.temp_min).toFixed(1)}–${Number(opened.summary.temp_max).toFixed(1)} °C`;
       } else if (projectionScenario === "auto" && proj.opening_state) {
         scenarioTxt = ` · opening ${proj.opening_state}`;
+      } else if (projectionScenario === "coolest") {
+        const cool = scenarios.strategy_coolest;
+        if (cool && cool.summary) {
+          const openH =
+            cool.summary.hours_open != null
+              ? ` · ${cool.summary.hours_open}h open`
+              : "";
+          scenarioTxt =
+            ` · coolest ${Number(cool.summary.temp_min).toFixed(1)}–${Number(cool.summary.temp_max).toFixed(1)} °C${openH}`;
+        }
+      } else if (projectionScenario === "warmest") {
+        const warm = scenarios.strategy_warmest;
+        if (warm && warm.summary) {
+          const openH =
+            warm.summary.hours_open != null
+              ? ` · ${warm.summary.hours_open}h open`
+              : "";
+          scenarioTxt =
+            ` · warmest ${Number(warm.summary.temp_min).toFixed(1)}–${Number(warm.summary.temp_max).toFixed(1)} °C${openH}`;
+        }
       }
       cards.push(`
         <article class="projection-card" style="--device-color:${colorFor(device.address)}">
@@ -8145,7 +9097,7 @@
   function updateOverview() {
     overviewBody.innerHTML = "";
     updateSortButtons();
-    const visible = filteredDevices();
+    const visible = overviewVisibleDevices();
     if (!devices.length) {
       overviewBody.innerHTML =
         '<p class="overview-empty">No devices detected</p>';
@@ -8192,6 +9144,27 @@
           fmtNum(device.humidity, 1, " %")
         )}</span>`;
 
+      const chartsBtn = document.createElement("button");
+      chartsBtn.type = "button";
+      chartsBtn.className = "restart-btn overview-charts-btn";
+      chartsBtn.textContent = "Charts";
+      chartsBtn.title = "Open compare charts for this sensor";
+      chartsBtn.setAttribute(
+        "aria-label",
+        `Open compare charts for ${device.name || device.address}`
+      );
+      chartsBtn.addEventListener("click", () => {
+        selected = new Set([device.address]);
+        persistSelection();
+        fillDeviceList();
+        updateCurrent();
+        setView("compare");
+        loadHistory().catch((err) => {
+          statusEl.textContent = `Error: ${err.message}`;
+        });
+      });
+      readings.appendChild(chartsBtn);
+
       top.append(identity, readings);
 
       const place = document.createElement("div");
@@ -8230,17 +9203,6 @@
       foot.append(footLeft, footRight);
 
       card.append(top, place, foot);
-      card.addEventListener("click", (ev) => {
-        if (ev.target.closest("select, a, button, label")) return;
-        selected = new Set([device.address]);
-        persistSelection();
-        fillDeviceList();
-        updateCurrent();
-        setView("compare");
-        loadHistory().catch((err) => {
-          statusEl.textContent = `Error: ${err.message}`;
-        });
-      });
       overviewBody.appendChild(card);
     }
 
@@ -8252,9 +9214,11 @@
         ? ` · Δ ${(Math.max(...temps) - Math.min(...temps)).toFixed(1)} °C`
         : "";
     const activeCats = ["zone", "height", "room"].flatMap((k) => catFilters[k]);
+    const textQ = String(overviewTextFilter || "").trim();
     const filterNote = [
       ...activeModels.map((m) => m.toUpperCase()),
       ...activeCats,
+      textQ ? `“${textQ}”` : "",
     ]
       .filter(Boolean)
       .join(" · ");
@@ -8624,6 +9588,8 @@
           projectionScenario === "closed" || projectionScenario === "both";
         const showOpen =
           projectionScenario === "open" || projectionScenario === "both";
+        const showCoolest = projectionScenario === "coolest";
+        const showWarmest = projectionScenario === "warmest";
         for (const { device } of results) {
           const proj = projections[device.address];
           if (!proj) continue;
@@ -8633,6 +9599,14 @@
             (scenarios.windows_closed && scenarios.windows_closed.points) || [];
           const openPts =
             (scenarios.windows_open && scenarios.windows_open.points) || [];
+          const coolPts =
+            (scenarios.strategy_coolest &&
+              scenarios.strategy_coolest.points) ||
+            [];
+          const warmPts =
+            (scenarios.strategy_warmest &&
+              scenarios.strategy_warmest.points) ||
+            [];
 
           if (showAuto && (proj.points || []).length) {
             tempDatasets.push(
@@ -8692,6 +9666,28 @@
                 openPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
                 false,
                 { borderDash: [1, 3], borderWidth: 1.85 }
+              )
+            );
+          }
+          if (showCoolest && coolPts.length) {
+            tempDatasets.push(
+              makeDataset(
+                `${deviceLabel(device)} (coolest open/close)`,
+                color,
+                coolPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [6, 2], borderWidth: 1.75 }
+              )
+            );
+          }
+          if (showWarmest && warmPts.length) {
+            tempDatasets.push(
+              makeDataset(
+                `${deviceLabel(device)} (warmest open/close)`,
+                color,
+                warmPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [4, 2, 1, 2], borderWidth: 1.75 }
               )
             );
           }
@@ -8911,6 +9907,32 @@
     });
   });
 
+  if (dataMegaToggle) {
+    dataMegaToggle.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (DATA_VIEWS.has(currentView)) {
+        // Already in Data — toggle the submenu only.
+        setDataMegaOpen(!isDataMegaOpen());
+        return;
+      }
+      setView("coverage", { url: "push" });
+    });
+  }
+
+  document.addEventListener("click", (ev) => {
+    if (!dataMegaEl || !isDataMegaOpen()) return;
+    if (DATA_VIEWS.has(currentView)) return;
+    if (dataMegaEl.contains(ev.target)) return;
+    setDataMegaOpen(false);
+  });
+
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape" || !isDataMegaOpen()) return;
+    if (DATA_VIEWS.has(currentView)) return;
+    setDataMegaOpen(false);
+  });
+
   window.addEventListener("popstate", () => {
     const fromPath = pathToView(window.location.pathname) || "overview";
     setView(fromPath, { url: "none" });
@@ -9019,59 +10041,90 @@
     });
   });
 
+  if (overviewDeviceFilterEl) {
+    overviewDeviceFilterEl.addEventListener("input", () => {
+      overviewTextFilter = overviewDeviceFilterEl.value || "";
+      localStorage.setItem(OVERVIEW_TEXT_FILTER_KEY, overviewTextFilter);
+      updateOverview();
+    });
+  }
+
   rangeButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
       setRelativeRange(btn.dataset.hours);
-      loadHistory().catch((err) => {
-        statusEl.textContent = `Error: ${err.message}`;
-      });
+      reloadRangeDependentViews();
     });
   });
 
-  if (rangeSelectEl) {
-    rangeSelectEl.addEventListener("change", () => {
-      const val = rangeSelectEl.value;
+  function bindRangeSelect(selectEl, customEl, sinceEl, untilEl) {
+    if (!selectEl) return;
+    selectEl.addEventListener("change", () => {
+      const val = selectEl.value;
       if (!val) {
         setRelativeRange(24);
-        loadHistory().catch((err) => {
-          statusEl.textContent = `Error: ${err.message}`;
-        });
+        reloadRangeDependentViews();
         return;
       }
       if (val === "custom") {
         const until = Date.now() / 1000;
         const since = until - (Number(hours) || 24) * 3600;
-        if (rangeCustomEl) rangeCustomEl.hidden = false;
-        if (rangeSinceEl) rangeSinceEl.value = toDatetimeLocalValue(since);
-        if (rangeUntilEl) rangeUntilEl.value = toDatetimeLocalValue(until);
+        if (customEl) customEl.hidden = false;
+        if (sinceEl) sinceEl.value = toDatetimeLocalValue(since);
+        if (untilEl) untilEl.value = toDatetimeLocalValue(until);
         rangeButtons.forEach((b) => b.classList.remove("active"));
-        rangeSelectEl.classList.add("active");
+        selectEl.classList.add("active");
+        if (rangeSelectEl && selectEl !== rangeSelectEl) {
+          rangeSelectEl.value = "custom";
+          rangeSelectEl.classList.add("active");
+        }
+        if (facadeRangeSelectEl && selectEl !== facadeRangeSelectEl) {
+          facadeRangeSelectEl.value = "custom";
+          facadeRangeSelectEl.classList.add("active");
+        }
         return;
       }
       setRelativeRange(Number(val), { fromSelect: true });
-      loadHistory().catch((err) => {
-        statusEl.textContent = `Error: ${err.message}`;
-      });
+      reloadRangeDependentViews();
     });
   }
 
-  if (rangeApplyBtn) {
-    rangeApplyBtn.addEventListener("click", () => {
-      const since = fromDatetimeLocalValue(rangeSinceEl && rangeSinceEl.value);
-      const until = fromDatetimeLocalValue(rangeUntilEl && rangeUntilEl.value);
+  bindRangeSelect(rangeSelectEl, rangeCustomEl, rangeSinceEl, rangeUntilEl);
+  bindRangeSelect(
+    facadeRangeSelectEl,
+    facadeRangeCustomEl,
+    facadeRangeSinceEl,
+    facadeRangeUntilEl
+  );
+
+  function bindRangeApply(btn, sinceEl, untilEl, statusTarget) {
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      const since = fromDatetimeLocalValue(sinceEl && sinceEl.value);
+      const until = fromDatetimeLocalValue(untilEl && untilEl.value);
       if (since == null || until == null) {
-        statusEl.textContent = "Choose valid From / To dates";
+        if (statusTarget) {
+          statusTarget.textContent = "Choose valid From / To dates";
+        }
         return;
       }
       if (!setCustomRange(since, until)) {
-        statusEl.textContent = "Custom range must be between a minute and 3 years";
+        if (statusTarget) {
+          statusTarget.textContent =
+            "Custom range must be between a minute and 3 years";
+        }
         return;
       }
-      loadHistory().catch((err) => {
-        statusEl.textContent = `Error: ${err.message}`;
-      });
+      reloadRangeDependentViews();
     });
   }
+
+  bindRangeApply(rangeApplyBtn, rangeSinceEl, rangeUntilEl, statusEl);
+  bindRangeApply(
+    facadeRangeApplyBtn,
+    facadeRangeSinceEl,
+    facadeRangeUntilEl,
+    facadeStatusEl
+  );
 
   if (rangeResetZoomBtn) {
     rangeResetZoomBtn.addEventListener("click", () => {
@@ -9085,14 +10138,21 @@
       showForecast = showForecastEl.checked;
       localStorage.setItem(FORECAST_KEY, showForecast ? "1" : "0");
       if (!showForecast) clearProjections();
-      syncProjectionScenarioControl();
-      syncForecastFutureButtons();
+      syncForecastToggleControls();
       updateGeoStatus();
-      if (currentView === "compare") {
-        loadHistory().catch((err) => {
-          statusEl.textContent = `Error: ${err.message}`;
-        });
-      }
+      reloadRangeDependentViews();
+    });
+  }
+
+  if (facadeShowForecastEl) {
+    facadeShowForecastEl.checked = showForecast;
+    facadeShowForecastEl.addEventListener("change", () => {
+      showForecast = facadeShowForecastEl.checked;
+      localStorage.setItem(FORECAST_KEY, showForecast ? "1" : "0");
+      if (!showForecast) clearProjections();
+      syncForecastToggleControls();
+      updateGeoStatus();
+      reloadRangeDependentViews();
     });
   }
 
@@ -9104,22 +10164,29 @@
       });
     });
   syncForecastFutureButtons();
+  syncForecastToggleControls();
 
-  if (projectionScenarioEl) {
-    syncProjectionScenarioControl();
-    projectionScenarioEl.addEventListener("change", () => {
-      const next = projectionScenarioEl.value;
-      projectionScenario = ["auto", "closed", "open", "both"].includes(next)
+  function bindProjectionScenario(el) {
+    if (!el) return;
+    el.addEventListener("change", () => {
+      const next = el.value;
+      projectionScenario = [
+        "auto",
+        "closed",
+        "open",
+        "both",
+        "coolest",
+        "warmest",
+      ].includes(next)
         ? next
         : "closed";
       localStorage.setItem(PROJECTION_SCENARIO_KEY, projectionScenario);
-      if (currentView === "compare" && showForecast) {
-        loadHistory().catch((err) => {
-          statusEl.textContent = `Error: ${err.message}`;
-        });
-      }
+      syncProjectionScenarioControl();
+      if (showForecast) reloadRangeDependentViews();
     });
   }
+  bindProjectionScenario(projectionScenarioEl);
+  bindProjectionScenario(facadeProjectionScenarioEl);
 
   if (chartHeightEl) {
     chartHeightEl.value = String(chartHeight);
@@ -9135,12 +10202,32 @@
     showWindowBandsEl.addEventListener("change", () => {
       showWindowBands = showWindowBandsEl.checked;
       localStorage.setItem(WINDOW_BANDS_KEY, showWindowBands ? "1" : "0");
-      syncForecastFutureButtons();
-      if (currentView === "compare") {
-        loadHistory().catch((err) => {
-          statusEl.textContent = `Error: ${err.message}`;
-        });
-      }
+      syncForecastToggleControls();
+      reloadRangeDependentViews();
+    });
+  }
+  if (facadeShowWindowBandsEl) {
+    facadeShowWindowBandsEl.checked = showWindowBands;
+    facadeShowWindowBandsEl.addEventListener("change", () => {
+      showWindowBands = facadeShowWindowBandsEl.checked;
+      localStorage.setItem(WINDOW_BANDS_KEY, showWindowBands ? "1" : "0");
+      syncForecastToggleControls();
+      reloadRangeDependentViews();
+    });
+  }
+
+  if (facadeLocateBtn) {
+    facadeLocateBtn.addEventListener("click", () => {
+      requestBrowserGeo(true).then(() => {
+        updateGeoStatus();
+        if (currentView === "facades") {
+          loadFacades().catch((err) => {
+            if (facadeStatusEl) {
+              facadeStatusEl.textContent = `Error: ${err.message}`;
+            }
+          });
+        }
+      });
     });
   }
 
@@ -9662,6 +10749,65 @@
       persistCoverageState();
       syncCoverageRangeButtons();
       loadCoverage().catch((err) => console.warn(err));
+    });
+  });
+
+  if (systemDeviceEl) {
+    systemDeviceEl.addEventListener("change", () => {
+      syncSystemSelectionFromDom();
+      loadSystemDeviceSources().catch((err) => console.warn(err));
+    });
+  }
+
+  if (systemDeviceFilterEl) {
+    systemDeviceFilterEl.addEventListener("input", () => {
+      systemDeviceFilter = systemDeviceFilterEl.value || "";
+      renderSystemDeviceOptions();
+    });
+  }
+
+  if (systemSelectAllBtn && systemDeviceEl) {
+    systemSelectAllBtn.addEventListener("click", () => {
+      [...systemDeviceEl.options].forEach((o) => {
+        o.selected = true;
+        systemSelectedAddresses.add(String(o.value || "").toUpperCase());
+      });
+      loadSystemDeviceSources().catch((err) => console.warn(err));
+    });
+  }
+  if (systemClearAllBtn && systemDeviceEl) {
+    systemClearAllBtn.addEventListener("click", () => {
+      systemSelectedAddresses.clear();
+      [...systemDeviceEl.options].forEach((o) => {
+        o.selected = false;
+      });
+      loadSystemDeviceSources().catch((err) => console.warn(err));
+    });
+  }
+
+  systemGrainButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      systemGrain = btn.dataset.sysGrain === "hour" ? "hour" : "day";
+      if (systemGrain === "hour" && systemDays > 14) {
+        systemDays = 7;
+      }
+      if (systemGrain === "day" && systemDays < 1) {
+        systemDays = 7;
+      }
+      // Prefer 24h when switching to hour from a long day range.
+      if (systemGrain === "hour" && systemDays >= 30) {
+        systemDays = 1;
+      }
+      syncSystemRangeButtons();
+      loadSystemDeviceSources().catch((err) => console.warn(err));
+    });
+  });
+
+  systemRangeButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      systemDays = Number(btn.dataset.sysDays) || 30;
+      syncSystemRangeButtons();
+      loadSystemDeviceSources().catch((err) => console.warn(err));
     });
   });
 

@@ -251,6 +251,56 @@ body {
   border-color: var(--accent);
 }
 
+.nav-mega {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+}
+
+.nav-mega.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.nav-mega-toggle {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.5rem 0.95rem;
+  font: inherit;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.nav-mega-toggle:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+.nav-mega.open .nav-mega-toggle,
+.nav-mega.active .nav-mega-toggle {
+  color: var(--ink);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.nav-mega-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.nav-mega-panel[hidden] {
+  display: none;
+}
+
 body.sticky-views-enabled .views {
   position: sticky;
   /* Must sit below the fixed .top-bar; offset is measured in JS. */
@@ -1397,6 +1447,31 @@ main {
   margin: 0 0 1rem;
 }
 
+.overview-text-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.75rem;
+  margin: 0 0 0.85rem;
+  max-width: 28rem;
+}
+
+.overview-text-filter-label {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.overview-text-filter input[type="search"] {
+  flex: 1 1 12rem;
+  font: inherit;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  min-width: 0;
+}
+
 .model-filters-inline {
   margin: 0.35rem 0 0.15rem;
 }
@@ -1581,13 +1656,6 @@ main {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
-  cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-.overview-card:hover {
-  border-color: color-mix(in srgb, var(--device-color, var(--accent)) 55%, var(--line));
-  background: color-mix(in srgb, var(--device-color, var(--accent)) 8%, var(--bg-elev));
 }
 
 .overview-card-top {
@@ -1614,7 +1682,7 @@ main {
 .overview-card-readings {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 0.35rem 1rem;
   flex: 0 0 auto;
 }
@@ -1630,6 +1698,13 @@ main {
   color: var(--hum);
   font-size: 1.05rem;
   font-variant-numeric: tabular-nums;
+}
+
+.overview-charts-btn {
+  align-self: center;
+  font-size: 0.8rem;
+  padding: 0.25rem 0.65rem;
+  white-space: nowrap;
 }
 
 .overview-card-place {
@@ -1931,6 +2006,10 @@ main {
   gap: 1rem 1.5rem;
   align-items: start;
   margin: 1.5rem 0;
+}
+
+.facade-controls {
+  margin-top: 0.35rem;
 }
 
 .field {
@@ -3348,4 +3427,206 @@ main {
   .ranges {
     width: 100%;
   }
+}
+
+/* —— System view —— */
+.system-storage-summary {
+  margin: 0.35rem 0 0.75rem;
+  font-size: 0.92rem;
+  color: var(--muted, #5a6570);
+}
+
+.system-chart-wrap {
+  position: relative;
+  width: 100%;
+  height: 260px;
+  margin: 0 0 1.5rem;
+  overflow: hidden;
+}
+
+.system-chart-wrap > canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  max-height: 100%;
+}
+
+.system-source-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1.25rem;
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+}
+
+.system-source-summary .sys-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+.system-source-summary .sys-pill strong {
+  font-weight: 600;
+}
+
+.sys-age-mix {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.35rem;
+  max-width: 18rem;
+}
+
+.sys-age-chip {
+  display: inline-block;
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--line) 55%, transparent);
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+  white-space: nowrap;
+}
+
+.sys-policy-cell .sys-compaction-select {
+  max-width: 16rem;
+  min-width: 10rem;
+}
+
+.sys-preview-btn {
+  font-size: 0.8rem;
+  padding: 0.2rem 0.55rem;
+}
+
+.system-compaction-preview {
+  margin: 0.75rem 0 1.25rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-elev) 88%, transparent);
+}
+
+.system-compaction-preview .overview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.65rem;
+}
+
+.system-compaction-preview h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.sys-preview-tiers {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.sys-preview-tiers li {
+  margin: 0.15rem 0;
+}
+
+.system-sensor-storage-table td .overview-meta {
+  display: block;
+  margin-top: 0.15rem;
+}
+
+.system-device-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.85rem 1.25rem;
+  margin: 0.5rem 0 0.75rem;
+}
+
+.system-device-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1 1 16rem;
+  min-width: min(100%, 18rem);
+}
+
+.system-device-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  min-width: 0;
+}
+
+.system-device-label input[type="search"] {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.system-device-label select {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  min-height: 10rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.system-device-side {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  flex: 1 1 14rem;
+}
+
+.system-ctrl-label {
+  font-size: 0.8rem;
+  margin-right: 0.35rem;
+  color: var(--muted, #5a6570);
+}
+
+.system-device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.system-ranges button {
+  font: inherit;
+  padding: 0.3rem 0.65rem;
+  cursor: pointer;
+}
+
+.system-ranges button.active {
+  font-weight: 600;
+}
+
+.system-chart-wrap-tall {
+  height: 280px;
+}
+
+.system-source-charts {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  margin: 0 0 1.5rem;
+}
+
+.system-source-chart-block {
+  margin: 0;
+  min-width: 0;
+}
+
+.system-source-chart-block h3 {
+  margin: 0 0 0.35rem;
+  font-family: var(--font-display, inherit);
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+.system-source-chart-block .system-chart-meta {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  color: var(--muted, #5a6570);
 }

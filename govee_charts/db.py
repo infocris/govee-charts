@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +18,18 @@ from govee_charts.address import (
     register_mac,
 )
 from govee_charts.decode import Reading
+from govee_charts.federation import source_bucket_sql
+
+_HEARTBEAT_LOCK_RETRIES = 3
+_HEARTBEAT_LOCK_BACKOFF_S = 0.05
+
+
+def is_db_locked(exc: BaseException) -> bool:
+    """True when SQLite reports a transient lock / busy condition."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
 
 
 class Database:
@@ -24,11 +39,13 @@ class Database:
 
     async def connect(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(self.path)
+        # Autocommit: avoid long-lived read transactions that freeze the WAL
+        # snapshot for this connection and block checkpoints for peers.
+        self._db = await aiosqlite.connect(self.path, isolation_level=None)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
-        await self._db.execute("PRAGMA busy_timeout=5000")
+        await self._db.execute("PRAGMA busy_timeout=15000")
         await self._db.executescript(
             """
             CREATE TABLE IF NOT EXISTS devices (
@@ -53,6 +70,35 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_readings_address_ts
                 ON readings(address, ts);
+
+            CREATE TABLE IF NOT EXISTS readings_rollup (
+                address TEXT NOT NULL,
+                bucket_start REAL NOT NULL,
+                bucket_secs INTEGER NOT NULL,
+                temp_avg REAL NOT NULL,
+                temp_min REAL NOT NULL,
+                temp_max REAL NOT NULL,
+                hum_avg REAL NOT NULL,
+                hum_min REAL NOT NULL,
+                hum_max REAL NOT NULL,
+                n INTEGER NOT NULL,
+                source TEXT,
+                PRIMARY KEY (address, bucket_start, bucket_secs),
+                FOREIGN KEY (address) REFERENCES devices(address)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_readings_rollup_address_start
+                ON readings_rollup(address, bucket_start);
+
+            CREATE TABLE IF NOT EXISTS compaction_state (
+                address TEXT PRIMARY KEY,
+                policy TEXT NOT NULL DEFAULT 'none',
+                last_run_ts REAL,
+                last_saved_bytes INTEGER,
+                last_raw_deleted INTEGER,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY (address) REFERENCES devices(address)
+            );
 
             CREATE TABLE IF NOT EXISTS door_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,6 +192,15 @@ class Database:
             CREATE TABLE IF NOT EXISTS runtime_state (
                 component TEXT PRIMARY KEY,
                 heartbeat_ts REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS db_size_daily (
+                day TEXT PRIMARY KEY,
+                db_bytes INTEGER NOT NULL,
+                wal_bytes INTEGER NOT NULL,
+                total_bytes INTEGER NOT NULL,
+                readings_count INTEGER,
+                recorded_at REAL NOT NULL
             );
             """
         )
@@ -283,6 +338,36 @@ class Database:
             (new_address, old_address),
         )
         await self.db.execute("DELETE FROM readings WHERE address = ?", (old_address,))
+        await self.db.execute(
+            """
+            INSERT OR IGNORE INTO readings_rollup
+                (address, bucket_start, bucket_secs,
+                 temp_avg, temp_min, temp_max,
+                 hum_avg, hum_min, hum_max, n, source)
+            SELECT ?, bucket_start, bucket_secs,
+                   temp_avg, temp_min, temp_max,
+                   hum_avg, hum_min, hum_max, n, source
+            FROM readings_rollup WHERE address = ?
+            """,
+            (new_address, old_address),
+        )
+        await self.db.execute(
+            "DELETE FROM readings_rollup WHERE address = ?", (old_address,)
+        )
+        await self.db.execute(
+            """
+            INSERT OR IGNORE INTO compaction_state
+                (address, policy, last_run_ts, last_saved_bytes,
+                 last_raw_deleted, updated_at)
+            SELECT ?, policy, last_run_ts, last_saved_bytes,
+                   last_raw_deleted, updated_at
+            FROM compaction_state WHERE address = ?
+            """,
+            (new_address, old_address),
+        )
+        await self.db.execute(
+            "DELETE FROM compaction_state WHERE address = ?", (old_address,)
+        )
         await self.db.execute("DELETE FROM devices WHERE address = ?", (old_address,))
 
     async def suffix_map_from_devices(self) -> dict[str, str]:
@@ -300,19 +385,52 @@ class Database:
             await self._db.close()
             self._db = None
 
+    def wal_path(self) -> Path:
+        return Path(f"{self.path}-wal")
+
+    def wal_size_bytes(self) -> int:
+        """Return on-disk WAL size, or 0 if absent."""
+        try:
+            return self.wal_path().stat().st_size
+        except OSError:
+            return 0
+
+    async def checkpoint_wal(self, mode: str = "PASSIVE") -> tuple[int, int, int]:
+        """Run PRAGMA wal_checkpoint; returns (busy, log, checkpointed)."""
+        mode_u = str(mode or "PASSIVE").strip().upper()
+        if mode_u not in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}:
+            raise ValueError(f"Invalid wal_checkpoint mode: {mode}")
+        cursor = await self.db.execute(f"PRAGMA wal_checkpoint({mode_u})")
+        row = await cursor.fetchone()
+        if row is None:
+            return (0, 0, 0)
+        return (int(row[0]), int(row[1]), int(row[2]))
+
     async def touch_runtime_heartbeat(self, component: str) -> None:
         """Upsert the latest heartbeat timestamp for a runtime component."""
-        ts = time.time()
-        await self.db.execute(
-            """
-            INSERT INTO runtime_state (component, heartbeat_ts)
-            VALUES (?, ?)
-            ON CONFLICT(component) DO UPDATE SET
-                heartbeat_ts = excluded.heartbeat_ts
-            """,
-            (str(component).strip().lower(), ts),
-        )
-        await self.db.commit()
+        key = str(component).strip().lower()
+        last_exc: BaseException | None = None
+        for attempt in range(_HEARTBEAT_LOCK_RETRIES):
+            ts = time.time()
+            try:
+                await self.db.execute(
+                    """
+                    INSERT INTO runtime_state (component, heartbeat_ts)
+                    VALUES (?, ?)
+                    ON CONFLICT(component) DO UPDATE SET
+                        heartbeat_ts = excluded.heartbeat_ts
+                    """,
+                    (key, ts),
+                )
+                await self.db.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                if not is_db_locked(exc) or attempt + 1 >= _HEARTBEAT_LOCK_RETRIES:
+                    raise
+                await asyncio.sleep(_HEARTBEAT_LOCK_BACKOFF_S * (attempt + 1))
+        if last_exc is not None:
+            raise last_exc
 
     async def get_runtime_heartbeat(self, component: str) -> float | None:
         """Return last heartbeat timestamp for a runtime component."""
@@ -322,6 +440,1216 @@ class Database:
         )
         row = await cursor.fetchone()
         return float(row[0]) if row else None
+
+    @staticmethod
+    def utc_day(ts: float | None = None) -> str:
+        """UTC calendar day as YYYY-MM-DD."""
+        when = float(ts) if ts is not None else time.time()
+        return datetime.fromtimestamp(when, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    def db_file_bytes(self) -> int:
+        try:
+            return self.path.stat().st_size
+        except OSError:
+            return 0
+
+    async def has_db_size_day(self, day: str) -> bool:
+        cursor = await self.db.execute(
+            "SELECT 1 FROM db_size_daily WHERE day = ? LIMIT 1",
+            (day,),
+        )
+        return await cursor.fetchone() is not None
+
+    async def record_db_size_snapshot(self) -> dict[str, Any]:
+        """Upsert today's UTC DB/WAL size snapshot."""
+        day = self.utc_day()
+        db_bytes = self.db_file_bytes()
+        wal_bytes = self.wal_size_bytes()
+        total_bytes = db_bytes + wal_bytes
+        cursor = await self.db.execute("SELECT COUNT(*) FROM readings")
+        row = await cursor.fetchone()
+        readings_count = int(row[0] or 0) if row else 0
+        recorded_at = time.time()
+        await self.db.execute(
+            """
+            INSERT INTO db_size_daily
+                (day, db_bytes, wal_bytes, total_bytes, readings_count, recorded_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(day) DO UPDATE SET
+                db_bytes = excluded.db_bytes,
+                wal_bytes = excluded.wal_bytes,
+                total_bytes = excluded.total_bytes,
+                readings_count = excluded.readings_count,
+                recorded_at = excluded.recorded_at
+            """,
+            (day, db_bytes, wal_bytes, total_bytes, readings_count, recorded_at),
+        )
+        await self.db.commit()
+        return {
+            "day": day,
+            "db_bytes": db_bytes,
+            "wal_bytes": wal_bytes,
+            "total_bytes": total_bytes,
+            "readings_count": readings_count,
+            "recorded_at": recorded_at,
+        }
+
+    async def list_db_size_daily(self, *, limit: int = 365) -> list[dict[str, Any]]:
+        lim = max(1, min(int(limit), 2000))
+        cursor = await self.db.execute(
+            """
+            SELECT day, db_bytes, wal_bytes, total_bytes, readings_count, recorded_at
+            FROM db_size_daily
+            ORDER BY day ASC
+            LIMIT ?
+            """,
+            (lim,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "day": str(r[0]),
+                "db_bytes": int(r[1]),
+                "wal_bytes": int(r[2]),
+                "total_bytes": int(r[3]),
+                "readings_count": int(r[4]) if r[4] is not None else None,
+                "recorded_at": float(r[5]),
+            }
+            for r in rows
+        ]
+
+    _TABLE_NOTES: dict[str, str] = {
+        "devices": "BLE / HA device registry",
+        "readings": "Temperature / humidity samples",
+        "door_events": "Contact open/close events",
+        "door_sensors": "Door sensor metadata",
+        "hvac_events": "Climate state history",
+        "power_samples": "AC power (W) samples",
+        "energy_samples": "Energy (kWh) samples",
+        "backfill_jobs": "GATT / federation backfill queue",
+        "backfill_state": "Per-device backfill settings",
+        "runtime_state": "Process heartbeats",
+        "db_size_daily": "Daily SQLite size snapshots",
+        "readings_rollup": "Compacted min/max/avg buckets",
+        "compaction_state": "Per-device compaction policy",
+    }
+
+    async def _table_bytes_from_dbstat(self) -> dict[str, int] | None:
+        """Map each user table to bytes used (table pages + its indexes).
+
+        Uses SQLite's ``dbstat`` virtual table when available. Returns
+        ``None`` if dbstat is unavailable on this build.
+        """
+        try:
+            size_cur = await self.db.execute(
+                """
+                SELECT name, SUM(pgsize) AS bytes
+                FROM dbstat
+                GROUP BY name
+                """
+            )
+            size_by_object: dict[str, int] = {
+                str(row[0]): int(row[1] or 0)
+                for row in await size_cur.fetchall()
+                if row[0] is not None
+            }
+        except Exception:
+            return None
+
+        idx_cur = await self.db.execute(
+            """
+            SELECT name, tbl_name FROM sqlite_master
+            WHERE type = 'index' AND tbl_name IS NOT NULL
+            """
+        )
+        index_to_table = {
+            str(row[0]): str(row[1])
+            for row in await idx_cur.fetchall()
+            if row[0] and row[1]
+        }
+
+        names_cur = await self.db.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            """
+        )
+        table_names = [str(r[0]) for r in await names_cur.fetchall()]
+        out: dict[str, int] = {name: size_by_object.get(name, 0) for name in table_names}
+        for idx_name, tbl_name in index_to_table.items():
+            if tbl_name in out:
+                out[tbl_name] += size_by_object.get(idx_name, 0)
+        return out
+
+    async def inventory_stats(self, node_id: str) -> dict[str, Any]:
+        """Row counts per table + readings provenance breakdown."""
+        page_row = await (
+            await self.db.execute("PRAGMA page_count")
+        ).fetchone()
+        page_size_row = await (
+            await self.db.execute("PRAGMA page_size")
+        ).fetchone()
+        page_count = int(page_row[0] or 0) if page_row else 0
+        page_size = int(page_size_row[0] or 0) if page_size_row else 0
+        logical_bytes = page_count * page_size
+
+        names_cur = await self.db.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            ORDER BY name COLLATE NOCASE
+            """
+        )
+        table_names = [str(r[0]) for r in await names_cur.fetchall()]
+        bytes_by_table = await self._table_bytes_from_dbstat()
+        size_source = "dbstat" if bytes_by_table is not None else None
+        tables: list[dict[str, Any]] = []
+        for name in table_names:
+            # Table names come from sqlite_master only (not user input).
+            count_cur = await self.db.execute(f'SELECT COUNT(*) FROM "{name}"')
+            crow = await count_cur.fetchone()
+            rows_n = int(crow[0] or 0) if crow else 0
+            bytes_n: int | None = None
+            pct: float | None = None
+            if bytes_by_table is not None:
+                bytes_n = int(bytes_by_table.get(name, 0))
+                pct = (
+                    (100.0 * bytes_n / logical_bytes)
+                    if logical_bytes > 0
+                    else 0.0
+                )
+            tables.append(
+                {
+                    "name": name,
+                    "rows": rows_n,
+                    "bytes": bytes_n,
+                    "pct": pct,
+                    "note": self._TABLE_NOTES.get(name, ""),
+                }
+            )
+        # Largest consumers first when sizes are known.
+        if size_source:
+            tables.sort(
+                key=lambda t: (
+                    -(t["bytes"] if t["bytes"] is not None else -1),
+                    str(t["name"]).lower(),
+                )
+            )
+
+        bucket_sql = source_bucket_sql("source")
+        src_cur = await self.db.execute(
+            f"""
+            SELECT {bucket_sql} AS bucket, COUNT(*) AS n
+            FROM readings
+            GROUP BY bucket
+            """,
+            (str(node_id).strip(),),
+        )
+        readings_by_source = {
+            "direct": 0,
+            "backfill": 0,
+            "federation": 0,
+            "other": 0,
+        }
+        for row in await src_cur.fetchall():
+            key = str(row[0] or "other")
+            if key not in readings_by_source:
+                key = "other"
+            readings_by_source[key] = int(row[1] or 0)
+
+        db_bytes = self.db_file_bytes()
+        wal_bytes = self.wal_size_bytes()
+        attributed = (
+            sum(int(t["bytes"] or 0) for t in tables) if size_source else None
+        )
+        return {
+            "tables": tables,
+            "readings_by_source": readings_by_source,
+            "size_source": size_source,
+            "db_file": {
+                "path": str(self.path),
+                "db_bytes": db_bytes,
+                "wal_bytes": wal_bytes,
+                "total_bytes": db_bytes + wal_bytes,
+                "logical_bytes": logical_bytes,
+                "page_count": page_count,
+                "page_size": page_size,
+                "attributed_bytes": attributed,
+            },
+        }
+
+    async def sensor_storage_stats(
+        self,
+        *,
+        labels: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Per-device readings footprint, age mix, and compaction policy."""
+        from govee_charts.compaction import (
+            AGE_BUCKET_DEFS,
+            estimate_bytes_after_policy,
+            policy_catalog,
+        )
+
+        bytes_by_table = await self._table_bytes_from_dbstat()
+        readings_bytes = int((bytes_by_table or {}).get("readings") or 0)
+        rollup_table_bytes = int((bytes_by_table or {}).get("readings_rollup") or 0)
+
+        count_cur = await self.db.execute("SELECT COUNT(*) FROM readings")
+        total_raw = int((await count_cur.fetchone())[0] or 0)
+        bytes_per_raw = (
+            (readings_bytes / total_raw) if total_raw > 0 and readings_bytes > 0 else 120.0
+        )
+
+        roll_count_cur = await self.db.execute("SELECT COUNT(*) FROM readings_rollup")
+        total_rollups = int((await roll_count_cur.fetchone())[0] or 0)
+        bytes_per_rollup = (
+            (rollup_table_bytes / total_rollups)
+            if total_rollups > 0 and rollup_table_bytes > 0
+            else 200.0
+        )
+
+        now = time.time()
+        # Single pass: counts per address × age bucket.
+        age_case_parts: list[str] = []
+        for key, lo, hi in AGE_BUCKET_DEFS:
+            lo_ts = now - (hi or 1e9) * 86400.0
+            hi_ts = now - lo * 86400.0
+            if hi is None:
+                age_case_parts.append(
+                    f"WHEN ts < {hi_ts!r} THEN {key!r}"
+                )
+            else:
+                age_case_parts.append(
+                    f"WHEN ts >= {lo_ts!r} AND ts < {hi_ts!r} THEN {key!r}"
+                )
+        age_case = "CASE " + " ".join(age_case_parts) + " ELSE '365d+' END"
+
+        age_cur = await self.db.execute(
+            f"""
+            SELECT address, {age_case} AS age_key, COUNT(*) AS n
+            FROM readings
+            GROUP BY address, age_key
+            """
+        )
+        age_by_addr: dict[str, dict[str, int]] = {}
+        samples_by_addr: dict[str, int] = {}
+        for row in await age_cur.fetchall():
+            addr = str(row[0]).upper()
+            key = str(row[1])
+            n = int(row[2] or 0)
+            age_by_addr.setdefault(addr, {})[key] = n
+            samples_by_addr[addr] = samples_by_addr.get(addr, 0) + n
+
+        roll_cur = await self.db.execute(
+            """
+            SELECT address, COUNT(*) AS n, COALESCE(SUM(n), 0) AS samples
+            FROM readings_rollup
+            GROUP BY address
+            """
+        )
+        rollup_by_addr: dict[str, dict[str, int]] = {}
+        for row in await roll_cur.fetchall():
+            addr = str(row[0]).upper()
+            rollup_by_addr[addr] = {
+                "rows": int(row[1] or 0),
+                "samples": int(row[2] or 0),
+            }
+
+        pol_cur = await self.db.execute(
+            "SELECT address, policy, last_run_ts, last_saved_bytes FROM compaction_state"
+        )
+        policy_by_addr = {
+            str(row[0]).upper(): {
+                "policy": str(row[1] or "none"),
+                "last_run_ts": float(row[2]) if row[2] is not None else None,
+                "last_saved_bytes": int(row[3]) if row[3] is not None else None,
+            }
+            for row in await pol_cur.fetchall()
+        }
+
+        devices = await self.list_devices(include_stats=False)
+        label_map = {str(k).upper(): str(v) for k, v in (labels or {}).items()}
+        sensors: list[dict[str, Any]] = []
+        readings_store_bytes = readings_bytes + rollup_table_bytes
+
+        for device in devices:
+            addr = str(device["address"]).upper()
+            raw_n = int(samples_by_addr.get(addr, 0))
+            roll_info = rollup_by_addr.get(addr, {"rows": 0, "samples": 0})
+            raw_bytes = int(round(raw_n * bytes_per_raw))
+            roll_bytes = int(round(int(roll_info["rows"]) * bytes_per_rollup))
+            bytes_est = raw_bytes + roll_bytes
+            age_counts = age_by_addr.get(addr, {})
+            age_buckets: list[dict[str, Any]] = []
+            for key, _lo, _hi in AGE_BUCKET_DEFS:
+                n = int(age_counts.get(key, 0))
+                b = int(round(n * bytes_per_raw))
+                age_buckets.append(
+                    {
+                        "key": key,
+                        "samples": n,
+                        "bytes": b,
+                        "pct": (100.0 * n / raw_n) if raw_n > 0 else 0.0,
+                    }
+                )
+            pol = policy_by_addr.get(addr, {})
+            policy = str(pol.get("policy") or "none")
+            name = label_map.get(addr) or str(device.get("name") or addr)
+            sensors.append(
+                {
+                    "address": addr,
+                    "name": name,
+                    "model": device.get("model"),
+                    "samples": raw_n,
+                    "rollup_rows": int(roll_info["rows"]),
+                    "rollup_samples": int(roll_info["samples"]),
+                    "bytes_est": bytes_est,
+                    "pct": (
+                        (100.0 * bytes_est / readings_store_bytes)
+                        if readings_store_bytes > 0
+                        else 0.0
+                    ),
+                    "age_buckets": age_buckets,
+                    "policy": policy,
+                    "bytes_after_est": estimate_bytes_after_policy(
+                        policy=policy,
+                        age_buckets=age_buckets,
+                        bytes_per_raw=bytes_per_raw,
+                        rollup_bytes=roll_bytes,
+                    ),
+                    "last_run_ts": pol.get("last_run_ts"),
+                    "last_saved_bytes": pol.get("last_saved_bytes"),
+                }
+            )
+
+        sensors.sort(
+            key=lambda s: (-int(s["bytes_est"]), str(s["name"]).lower(), s["address"])
+        )
+        return {
+            "readings_bytes": readings_bytes,
+            "rollup_bytes": rollup_table_bytes,
+            "readings_store_bytes": readings_store_bytes,
+            "total_raw_samples": total_raw,
+            "bytes_per_raw": bytes_per_raw,
+            "policies": policy_catalog(),
+            "sensors": sensors,
+        }
+
+    async def list_compaction_states(self) -> list[dict[str, Any]]:
+        cursor = await self.db.execute(
+            """
+            SELECT address, policy, last_run_ts, last_saved_bytes,
+                   last_raw_deleted, updated_at
+            FROM compaction_state
+            ORDER BY address
+            """
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_compaction_state(self, address: str) -> dict[str, Any] | None:
+        cursor = await self.db.execute(
+            """
+            SELECT address, policy, last_run_ts, last_saved_bytes,
+                   last_raw_deleted, updated_at
+            FROM compaction_state
+            WHERE address = ?
+            """,
+            (address.upper(),),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def set_compaction_policy(
+        self,
+        address: str,
+        policy: str,
+    ) -> dict[str, Any] | None:
+        from govee_charts.compaction import normalize_policy
+
+        address_u = address.upper()
+        device = await self.get_device(address_u)
+        if device is None:
+            return None
+        policy_n = normalize_policy(policy)
+        now = time.time()
+        await self.db.execute(
+            """
+            INSERT INTO compaction_state
+                (address, policy, last_run_ts, last_saved_bytes,
+                 last_raw_deleted, updated_at)
+            VALUES (?, ?, NULL, NULL, NULL, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                policy = excluded.policy,
+                updated_at = excluded.updated_at
+            """,
+            (address_u, policy_n, now),
+        )
+        await self.db.commit()
+        state = await self.get_compaction_state(address_u)
+        assert state is not None
+        return state
+
+    async def preview_compaction(
+        self,
+        address: str,
+        *,
+        labels: dict[str, str] | None = None,
+        now: float | None = None,
+        chunk_size: int = 50_000,
+    ) -> dict[str, Any] | None:
+        """Dry-run every compaction policy for one device (no writes)."""
+        from govee_charts.compaction import (
+            COMPACTION_POLICIES,
+            POLICY_LABELS,
+            _BYTES_PER_ROLLUP,
+            normalize_policy,
+        )
+
+        address_u = address.upper()
+        device = await self.get_device(address_u)
+        if device is None:
+            return None
+
+        t_now = float(now if now is not None else time.time())
+        bytes_by_table = await self._table_bytes_from_dbstat()
+        readings_bytes = int((bytes_by_table or {}).get("readings") or 0)
+        total_cur = await self.db.execute("SELECT COUNT(*) FROM readings")
+        total_raw_all = int((await total_cur.fetchone())[0] or 0)
+        bytes_per_raw = (
+            (readings_bytes / total_raw_all)
+            if total_raw_all > 0 and readings_bytes > 0
+            else 120.0
+        )
+
+        count_cur = await self.db.execute(
+            "SELECT COUNT(*) FROM readings WHERE address = ?",
+            (address_u,),
+        )
+        raw_samples = int((await count_cur.fetchone())[0] or 0)
+        roll_cur = await self.db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(n), 0) FROM readings_rollup WHERE address = ?",
+            (address_u,),
+        )
+        roll_row = await roll_cur.fetchone()
+        rollup_rows = int(roll_row[0] or 0) if roll_row else 0
+        current_bytes = int(round(raw_samples * bytes_per_raw + rollup_rows * _BYTES_PER_ROLLUP))
+
+        label_map = {str(k).upper(): str(v) for k, v in (labels or {}).items()}
+        name = label_map.get(address_u) or str(device.get("name") or address_u)
+
+        policies_out: list[dict[str, Any]] = []
+        for policy_key in COMPACTION_POLICIES:
+            policy = normalize_policy(policy_key)
+            if policy == "none":
+                policies_out.append(
+                    {
+                        "policy": policy,
+                        "label": POLICY_LABELS[policy],
+                        "raw_kept": raw_samples,
+                        "raw_deleted": 0,
+                        "rollups": 0,
+                        "bytes_after_est": current_bytes,
+                        "bytes_saved_est": 0,
+                        "pct_saved": 0.0,
+                        "details": {
+                            "kind": "none",
+                            "note": "No compaction — keep all raw samples",
+                        },
+                    }
+                )
+                continue
+
+            if policy == "adaptive":
+                report = await self._preview_adaptive(
+                    address_u,
+                    t_now=t_now,
+                    raw_samples=raw_samples,
+                    bytes_per_raw=bytes_per_raw,
+                    rollup_rows=rollup_rows,
+                    chunk_size=chunk_size,
+                )
+            else:
+                report = await self._preview_tiers(
+                    address_u,
+                    policy,
+                    t_now=t_now,
+                    raw_samples=raw_samples,
+                    bytes_per_raw=bytes_per_raw,
+                    rollup_rows=rollup_rows,
+                )
+            report["policy"] = policy
+            report["label"] = POLICY_LABELS[policy]
+            policies_out.append(report)
+
+        return {
+            "address": address_u,
+            "name": name,
+            "bytes_per_raw": bytes_per_raw,
+            "current": {
+                "raw_samples": raw_samples,
+                "rollup_rows": rollup_rows,
+                "bytes_est": current_bytes,
+            },
+            "policies": policies_out,
+            "dry_run": True,
+        }
+
+    async def _preview_tiers(
+        self,
+        address_u: str,
+        policy: str,
+        *,
+        t_now: float,
+        raw_samples: int,
+        bytes_per_raw: float,
+        rollup_rows: int,
+    ) -> dict[str, Any]:
+        from govee_charts.compaction import POLICY_TIERS, _BYTES_PER_ROLLUP
+
+        tiers = POLICY_TIERS[policy]
+        tier_details: list[dict[str, Any]] = []
+        raw_deleted = 0
+        rollups = 0
+        for older_days, younger_days, bucket_secs in tiers.tiers:
+            older_ts = t_now - float(older_days) * 86400.0
+            younger_ts = (
+                0.0
+                if younger_days is None
+                else t_now - float(younger_days) * 86400.0
+            )
+            win_start = float(younger_ts)
+            win_end = float(older_ts)
+            if win_end <= win_start:
+                continue
+            win_cur = await self.db.execute(
+                """
+                SELECT COUNT(*) FROM readings
+                WHERE address = ? AND ts >= ? AND ts < ?
+                """,
+                (address_u, win_start, win_end),
+            )
+            raw_in_window = int((await win_cur.fetchone())[0] or 0)
+            # Closed buckets only: bucket_end <= win_end
+            # bucket_start = floor(ts/b)*b, keep if bucket_start + b <= win_end
+            # <=> ts < win_end - (ts % b) ... simpler: count via group by
+            agg_cur = await self.db.execute(
+                """
+                SELECT
+                    CAST(ts / ? AS INTEGER) * ? AS bucket_start,
+                    COUNT(*) AS n
+                FROM readings
+                WHERE address = ? AND ts >= ? AND ts < ?
+                GROUP BY bucket_start
+                """,
+                (float(bucket_secs), float(bucket_secs), address_u, win_start, win_end),
+            )
+            closed_rollups = 0
+            closed_samples = 0
+            incomplete_samples = 0
+            for brow in await agg_cur.fetchall():
+                b_start = float(brow[0])
+                n = int(brow[1] or 0)
+                if b_start + float(bucket_secs) <= win_end:
+                    closed_rollups += 1
+                    closed_samples += n
+                else:
+                    incomplete_samples += n
+            raw_deleted += closed_samples
+            rollups += closed_rollups
+            tier_details.append(
+                {
+                    "older_than_days": older_days,
+                    "younger_than_days": younger_days,
+                    "bucket_secs": int(bucket_secs),
+                    "raw_in_window": raw_in_window,
+                    "rollups": closed_rollups,
+                    "raw_compacted": closed_samples,
+                    "raw_kept_incomplete_bucket": incomplete_samples,
+                }
+            )
+
+        raw_kept = max(0, raw_samples - raw_deleted)
+        bytes_after = int(
+            round(raw_kept * bytes_per_raw + (rollup_rows + rollups) * _BYTES_PER_ROLLUP)
+        )
+        current_bytes = int(round(raw_samples * bytes_per_raw + rollup_rows * _BYTES_PER_ROLLUP))
+        saved = max(0, current_bytes - bytes_after)
+        return {
+            "raw_kept": raw_kept,
+            "raw_deleted": raw_deleted,
+            "rollups": rollups,
+            "bytes_after_est": bytes_after,
+            "bytes_saved_est": saved,
+            "pct_saved": (100.0 * saved / current_bytes) if current_bytes > 0 else 0.0,
+            "details": {
+                "kind": "tiers",
+                "raw_days": tiers.raw_days,
+                "tiers": tier_details,
+            },
+        }
+
+    async def _preview_adaptive(
+        self,
+        address_u: str,
+        *,
+        t_now: float,
+        raw_samples: int,
+        bytes_per_raw: float,
+        rollup_rows: int,
+        chunk_size: int = 50_000,
+    ) -> dict[str, Any]:
+        from govee_charts.compaction import (
+            ADAPTIVE_PARAMS,
+            AdaptiveSegmenter,
+            _BYTES_PER_ROLLUP,
+            summarize_adaptive_segments,
+        )
+
+        params = ADAPTIVE_PARAMS
+        win_end = t_now - float(params.raw_days) * 86400.0
+        hot_cur = await self.db.execute(
+            """
+            SELECT COUNT(*) FROM readings
+            WHERE address = ? AND ts >= ?
+            """,
+            (address_u, win_end),
+        )
+        samples_hot = int((await hot_cur.fetchone())[0] or 0)
+        old_cur = await self.db.execute(
+            """
+            SELECT COUNT(*) FROM readings
+            WHERE address = ? AND ts < ?
+            """,
+            (address_u, win_end),
+        )
+        samples_old = int((await old_cur.fetchone())[0] or 0)
+
+        segmenter = AdaptiveSegmenter(params)
+        # Keyset pagination by ts for stable streaming.
+        cursor_ts = -1.0
+        while True:
+            cur = await self.db.execute(
+                """
+                SELECT ts, temperature_c, humidity
+                FROM readings
+                WHERE address = ? AND ts < ? AND ts > ?
+                ORDER BY ts ASC
+                LIMIT ?
+                """,
+                (address_u, win_end, cursor_ts, int(chunk_size)),
+            )
+            rows = [dict(r) for r in await cur.fetchall()]
+            if not rows:
+                break
+            segmenter.feed(rows)
+            cursor_ts = float(rows[-1]["ts"])
+            if len(rows) < chunk_size:
+                break
+            await asyncio.sleep(0)
+
+        segments = segmenter.finish()
+        summary = summarize_adaptive_segments(
+            segments, samples_in_window=samples_old
+        )
+        raw_deleted = int(summary["samples_rolled"])
+        rollups = int(summary["stable_segments"])
+        raw_kept = samples_hot + int(summary["samples_kept_volatile"])
+        bytes_after = int(
+            round(raw_kept * bytes_per_raw + (rollup_rows + rollups) * _BYTES_PER_ROLLUP)
+        )
+        current_bytes = int(round(raw_samples * bytes_per_raw + rollup_rows * _BYTES_PER_ROLLUP))
+        saved = max(0, current_bytes - bytes_after)
+        return {
+            "raw_kept": raw_kept,
+            "raw_deleted": raw_deleted,
+            "rollups": rollups,
+            "bytes_after_est": bytes_after,
+            "bytes_saved_est": saved,
+            "pct_saved": (100.0 * saved / current_bytes) if current_bytes > 0 else 0.0,
+            "details": {
+                "kind": "adaptive",
+                "raw_days": params.raw_days,
+                "temp_epsilon_c": params.temp_epsilon_c,
+                "min_stable_samples": params.min_stable_samples,
+                "min_stable_secs": params.min_stable_secs,
+                "samples_hot_raw": samples_hot,
+                "samples_old_window": samples_old,
+                **summary,
+            },
+        }
+
+    async def compact_device(
+        self,
+        address: str,
+        policy: str,
+        *,
+        max_delete: int = 50_000,
+        now: float | None = None,
+    ) -> dict[str, int]:
+        """Roll up raw readings for one device according to ``policy``.
+
+        Fixed-tier policies use closed time buckets. ``adaptive`` merges flat
+        temperature stretches (min/max/avg) and keeps swinging periods raw.
+        Returns counts of upserted rollups and deleted raw rows.
+        """
+        from govee_charts.compaction import POLICY_TIERS, normalize_policy
+
+        address_u = address.upper()
+        policy_n = normalize_policy(policy)
+        if policy_n == "none":
+            return {"rollups_upserted": 0, "raw_deleted": 0, "saved_bytes_est": 0}
+        if policy_n == "adaptive":
+            return await self._compact_device_adaptive(
+                address_u, max_delete=max_delete, now=now
+            )
+
+        tiers = POLICY_TIERS[policy_n]
+        t_now = float(now if now is not None else time.time())
+        rollups_upserted = 0
+        raw_deleted = 0
+        remaining = max(1, int(max_delete))
+
+        for older_days, younger_days, bucket_secs in tiers.tiers:
+            if remaining <= 0:
+                break
+            # Age window: [older_days, younger_days) → ts in (now-younger, now-older]
+            older_ts = t_now - float(older_days) * 86400.0
+            if younger_days is None:
+                younger_ts = 0.0
+            else:
+                younger_ts = t_now - float(younger_days) * 86400.0
+            # Only closed buckets fully older than older_ts boundary...
+            # Window of raw timestamps to compact:
+            # ts >= younger_ts AND ts < older_ts, and bucket fully closed:
+            # floor(ts/bucket)*bucket + bucket <= older_ts  (approx: ts < older_ts)
+            win_start = float(younger_ts)
+            win_end = float(older_ts)
+            if win_end <= win_start:
+                continue
+
+            # Cap how many buckets we process this pass via remaining deletes.
+            agg_cur = await self.db.execute(
+                """
+                SELECT
+                    CAST(ts / ? AS INTEGER) * ? AS bucket_start,
+                    COUNT(*) AS n,
+                    AVG(temperature_c) AS temp_avg,
+                    MIN(temperature_c) AS temp_min,
+                    MAX(temperature_c) AS temp_max,
+                    AVG(humidity) AS hum_avg,
+                    MIN(humidity) AS hum_min,
+                    MAX(humidity) AS hum_max
+                FROM readings
+                WHERE address = ?
+                  AND ts >= ?
+                  AND ts < ?
+                GROUP BY bucket_start
+                ORDER BY bucket_start ASC
+                """,
+                (
+                    float(bucket_secs),
+                    float(bucket_secs),
+                    address_u,
+                    win_start,
+                    win_end,
+                ),
+            )
+            buckets = await agg_cur.fetchall()
+            if not buckets:
+                continue
+
+            deleted_this_tier = 0
+            for brow in buckets:
+                if remaining <= 0:
+                    break
+                b_start = float(brow[0])
+                b_end = b_start + float(bucket_secs)
+                # Skip incomplete trailing bucket still inside the window edge.
+                if b_end > win_end:
+                    continue
+                n = int(brow[1] or 0)
+                if n <= 0:
+                    continue
+                await self.db.execute(
+                    """
+                    INSERT INTO readings_rollup (
+                        address, bucket_start, bucket_secs,
+                        temp_avg, temp_min, temp_max,
+                        hum_avg, hum_min, hum_max, n, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(address, bucket_start, bucket_secs) DO UPDATE SET
+                        temp_avg = excluded.temp_avg,
+                        temp_min = excluded.temp_min,
+                        temp_max = excluded.temp_max,
+                        hum_avg = excluded.hum_avg,
+                        hum_min = excluded.hum_min,
+                        hum_max = excluded.hum_max,
+                        n = excluded.n,
+                        source = excluded.source
+                    """,
+                    (
+                        address_u,
+                        b_start,
+                        int(bucket_secs),
+                        float(brow[2]),
+                        float(brow[3]),
+                        float(brow[4]),
+                        float(brow[5]),
+                        float(brow[6]),
+                        float(brow[7]),
+                        n,
+                        "compact",
+                    ),
+                )
+                rollups_upserted += 1
+                del_cur = await self.db.execute(
+                    """
+                    DELETE FROM readings
+                    WHERE address = ? AND ts >= ? AND ts < ?
+                    """,
+                    (address_u, b_start, b_end),
+                )
+                deleted_n = int(del_cur.rowcount or 0)
+                raw_deleted += deleted_n
+                deleted_this_tier += deleted_n
+                remaining -= deleted_n
+
+            # Coarsen existing finer rollups that fall in this age window.
+            if remaining > 0:
+                fine_cur = await self.db.execute(
+                    """
+                    SELECT
+                        CAST(bucket_start / ? AS INTEGER) * ? AS new_start,
+                        SUM(n) AS n,
+                        SUM(temp_avg * n) / SUM(n) AS temp_avg,
+                        MIN(temp_min) AS temp_min,
+                        MAX(temp_max) AS temp_max,
+                        SUM(hum_avg * n) / SUM(n) AS hum_avg,
+                        MIN(hum_min) AS hum_min,
+                        MAX(hum_max) AS hum_max
+                    FROM readings_rollup
+                    WHERE address = ?
+                      AND bucket_secs < ?
+                      AND bucket_start >= ?
+                      AND bucket_start < ?
+                    GROUP BY new_start
+                    """,
+                    (
+                        float(bucket_secs),
+                        float(bucket_secs),
+                        address_u,
+                        int(bucket_secs),
+                        win_start,
+                        win_end,
+                    ),
+                )
+                for frow in await fine_cur.fetchall():
+                    new_start = float(frow[0])
+                    new_end = new_start + float(bucket_secs)
+                    if new_end > win_end:
+                        continue
+                    n_fine = int(frow[1] or 0)
+                    if n_fine <= 0:
+                        continue
+                    existing = await (
+                        await self.db.execute(
+                            """
+                            SELECT n, temp_avg, temp_min, temp_max,
+                                   hum_avg, hum_min, hum_max
+                            FROM readings_rollup
+                            WHERE address = ? AND bucket_start = ? AND bucket_secs = ?
+                            """,
+                            (address_u, new_start, int(bucket_secs)),
+                        )
+                    ).fetchone()
+                    if existing is not None:
+                        n_old = int(existing[0] or 0)
+                        n_tot = n_old + n_fine
+                        temp_avg = (
+                            (float(existing[1]) * n_old + float(frow[2]) * n_fine)
+                            / n_tot
+                        )
+                        hum_avg = (
+                            (float(existing[4]) * n_old + float(frow[5]) * n_fine)
+                            / n_tot
+                        )
+                        temp_min = min(float(existing[2]), float(frow[3]))
+                        temp_max = max(float(existing[3]), float(frow[4]))
+                        hum_min = min(float(existing[5]), float(frow[6]))
+                        hum_max = max(float(existing[6]), float(frow[7]))
+                    else:
+                        n_tot = n_fine
+                        temp_avg = float(frow[2])
+                        temp_min = float(frow[3])
+                        temp_max = float(frow[4])
+                        hum_avg = float(frow[5])
+                        hum_min = float(frow[6])
+                        hum_max = float(frow[7])
+                    await self.db.execute(
+                        """
+                        INSERT INTO readings_rollup (
+                            address, bucket_start, bucket_secs,
+                            temp_avg, temp_min, temp_max,
+                            hum_avg, hum_min, hum_max, n, source
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(address, bucket_start, bucket_secs) DO UPDATE SET
+                            temp_avg = excluded.temp_avg,
+                            temp_min = excluded.temp_min,
+                            temp_max = excluded.temp_max,
+                            hum_avg = excluded.hum_avg,
+                            hum_min = excluded.hum_min,
+                            hum_max = excluded.hum_max,
+                            n = excluded.n,
+                            source = excluded.source
+                        """,
+                        (
+                            address_u,
+                            new_start,
+                            int(bucket_secs),
+                            temp_avg,
+                            temp_min,
+                            temp_max,
+                            hum_avg,
+                            hum_min,
+                            hum_max,
+                            n_tot,
+                            "compact",
+                        ),
+                    )
+                    rollups_upserted += 1
+                    await self.db.execute(
+                        """
+                        DELETE FROM readings_rollup
+                        WHERE address = ?
+                          AND bucket_secs < ?
+                          AND bucket_start >= ?
+                          AND bucket_start < ?
+                        """,
+                        (address_u, int(bucket_secs), new_start, new_end),
+                    )
+
+        saved_est = int(raw_deleted * 120)
+        await self._touch_compaction_run(
+            address_u, policy_n, t_now, saved_est, raw_deleted
+        )
+        return {
+            "rollups_upserted": rollups_upserted,
+            "raw_deleted": raw_deleted,
+            "saved_bytes_est": saved_est,
+        }
+
+    async def _touch_compaction_run(
+        self,
+        address_u: str,
+        policy_n: str,
+        t_now: float,
+        saved_est: int,
+        raw_deleted: int,
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO compaction_state
+                (address, policy, last_run_ts, last_saved_bytes,
+                 last_raw_deleted, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                policy = excluded.policy,
+                last_run_ts = excluded.last_run_ts,
+                last_saved_bytes = COALESCE(compaction_state.last_saved_bytes, 0)
+                    + excluded.last_saved_bytes,
+                last_raw_deleted = excluded.last_raw_deleted,
+                updated_at = excluded.updated_at
+            """,
+            (address_u, policy_n, t_now, saved_est, raw_deleted, t_now),
+        )
+        await self.db.commit()
+
+    async def _compact_device_adaptive(
+        self,
+        address_u: str,
+        *,
+        max_delete: int = 50_000,
+        now: float | None = None,
+    ) -> dict[str, int]:
+        from govee_charts.compaction import ADAPTIVE_PARAMS, find_stable_segments
+
+        params = ADAPTIVE_PARAMS
+        t_now = float(now if now is not None else time.time())
+        win_end = t_now - float(params.raw_days) * 86400.0
+        win_start = 0.0
+        if win_end <= win_start:
+            return {"rollups_upserted": 0, "raw_deleted": 0, "saved_bytes_est": 0}
+
+        limit = max(1, int(max_delete))
+        # One extra row detects truncation — then skip flushing a trailing
+        # open segment that may still grow on the next pass.
+        cur = await self.db.execute(
+            """
+            SELECT ts, temperature_c, humidity
+            FROM readings
+            WHERE address = ? AND ts >= ? AND ts < ?
+            ORDER BY ts ASC
+            LIMIT ?
+            """,
+            (address_u, win_start, win_end, limit + 1),
+        )
+        fetched = [dict(row) for row in await cur.fetchall()]
+        truncated = len(fetched) > limit
+        rows = fetched[:limit]
+        if not rows:
+            await self._touch_compaction_run(address_u, "adaptive", t_now, 0, 0)
+            return {"rollups_upserted": 0, "raw_deleted": 0, "saved_bytes_est": 0}
+
+        segments = find_stable_segments(
+            rows, params, flush_trailing=not truncated
+        )
+        rollups_upserted = 0
+        raw_deleted = 0
+        for seg in segments:
+            b_secs = seg.bucket_secs
+            await self.db.execute(
+                """
+                INSERT INTO readings_rollup (
+                    address, bucket_start, bucket_secs,
+                    temp_avg, temp_min, temp_max,
+                    hum_avg, hum_min, hum_max, n, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(address, bucket_start, bucket_secs) DO UPDATE SET
+                    temp_avg = excluded.temp_avg,
+                    temp_min = excluded.temp_min,
+                    temp_max = excluded.temp_max,
+                    hum_avg = excluded.hum_avg,
+                    hum_min = excluded.hum_min,
+                    hum_max = excluded.hum_max,
+                    n = excluded.n,
+                    source = excluded.source
+                """,
+                (
+                    address_u,
+                    float(seg.start_ts),
+                    int(b_secs),
+                    float(seg.temp_avg),
+                    float(seg.temp_min),
+                    float(seg.temp_max),
+                    float(seg.hum_avg),
+                    float(seg.hum_min),
+                    float(seg.hum_max),
+                    int(seg.n),
+                    "compact/adaptive",
+                ),
+            )
+            rollups_upserted += 1
+            del_cur = await self.db.execute(
+                """
+                DELETE FROM readings
+                WHERE address = ? AND ts >= ? AND ts <= ?
+                """,
+                (address_u, float(seg.start_ts), float(seg.end_ts)),
+            )
+            raw_deleted += int(del_cur.rowcount or 0)
+
+        saved_est = int(raw_deleted * 120)
+        await self._touch_compaction_run(
+            address_u, "adaptive", t_now, saved_est, raw_deleted
+        )
+        return {
+            "rollups_upserted": rollups_upserted,
+            "raw_deleted": raw_deleted,
+            "saved_bytes_est": saved_est,
+        }
+
+    async def device_source_series(
+        self,
+        addresses: list[str],
+        start_ts: float,
+        end_ts: float,
+        node_id: str,
+        *,
+        grain: str = "day",
+    ) -> list[dict[str, Any]]:
+        """Sample counts by provenance for one or more devices.
+
+        ``grain`` is ``day`` (UTC calendar day) or ``hour`` (UTC hour buckets).
+        Counts are summed across all ``addresses``.
+        """
+        addrs = sorted({str(a).strip().upper() for a in addresses if str(a).strip()})
+        if not addrs:
+            return []
+        grain_l = str(grain or "day").strip().lower()
+        if grain_l not in ("day", "hour"):
+            raise ValueError("grain must be 'day' or 'hour'")
+
+        if grain_l == "hour":
+            # SQLite: floor to hour as unix epoch, then format.
+            period_sql = (
+                "strftime('%Y-%m-%dT%H:00:00Z', "
+                "CAST(ts / 3600 AS INTEGER) * 3600, 'unixepoch')"
+            )
+        else:
+            period_sql = "strftime('%Y-%m-%d', ts, 'unixepoch')"
+
+        bucket_sql = source_bucket_sql("source")
+        placeholders = ",".join("?" for _ in addrs)
+        cursor = await self.db.execute(
+            f"""
+            SELECT
+                {period_sql} AS period,
+                {bucket_sql} AS bucket,
+                COUNT(*) AS n
+            FROM readings
+            WHERE address IN ({placeholders})
+              AND ts >= ? AND ts < ?
+            GROUP BY period, bucket
+            ORDER BY period ASC
+            """,
+            (str(node_id).strip(), *addrs, float(start_ts), float(end_ts)),
+        )
+        by_period: dict[str, dict[str, int]] = {}
+        for row in await cursor.fetchall():
+            period = str(row[0])
+            bucket = str(row[1] or "other")
+            if bucket not in ("direct", "backfill", "federation", "other"):
+                bucket = "other"
+            entry = by_period.setdefault(
+                period,
+                {"direct": 0, "backfill": 0, "federation": 0, "other": 0},
+            )
+            entry[bucket] = int(row[2] or 0)
+
+        out: list[dict[str, Any]] = []
+        empty = {"direct": 0, "backfill": 0, "federation": 0, "other": 0}
+        start = datetime.fromtimestamp(float(start_ts), tz=timezone.utc)
+        end = datetime.fromtimestamp(
+            max(float(start_ts), float(end_ts) - 1e-6), tz=timezone.utc
+        )
+        if grain_l == "hour":
+            cur = start.replace(minute=0, second=0, microsecond=0)
+            step = timedelta(hours=1)
+            while cur <= end:
+                key = cur.strftime("%Y-%m-%dT%H:00:00Z")
+                out.append({"t": key, **by_period.get(key, empty)})
+                cur = cur + step
+        else:
+            cur_d = start.date()
+            end_d = end.date()
+            while cur_d <= end_d:
+                key = cur_d.isoformat()
+                out.append({"t": key, **by_period.get(key, empty)})
+                cur_d = cur_d + timedelta(days=1)
+        return out
+
+    async def device_source_daily(
+        self,
+        address: str,
+        start_ts: float,
+        end_ts: float,
+        node_id: str,
+    ) -> list[dict[str, Any]]:
+        """Daily sample counts by provenance for one device (compat wrapper)."""
+        series = await self.device_source_series(
+            [address], start_ts, end_ts, node_id, grain="day"
+        )
+        return [{"day": row["t"], **{k: row[k] for k in ("direct", "backfill", "federation", "other")}} for row in series]
 
     @property
     def db(self) -> aiosqlite.Connection:
@@ -376,8 +1704,14 @@ class Database:
             "DELETE FROM readings WHERE ts < ?",
             (cutoff,),
         )
+        deleted = int(cursor.rowcount or 0)
+        roll_cur = await self.db.execute(
+            "DELETE FROM readings_rollup WHERE bucket_start < ?",
+            (cutoff,),
+        )
+        deleted += int(roll_cur.rowcount or 0)
         await self.db.commit()
-        return cursor.rowcount
+        return deleted
 
     async def list_devices(self, *, include_stats: bool = True) -> list[dict[str, Any]]:
         # ~120 B/row incl. indexes — rough SQLite footprint for one readings row.
@@ -578,6 +1912,7 @@ class Database:
         """
         Return readings in [since, until] (or last `hours` ending now).
 
+        Merges raw samples with compacted rollups (avg as the series value).
         Downsamples to at most max_points buckets (mean temp/humidity) when denser.
         """
         now = time.time()
@@ -591,6 +1926,7 @@ class Database:
         if end < start:
             start, end = end, start
 
+        address_u = address.upper()
         cursor = await self.db.execute(
             """
             SELECT ts, temperature_c, humidity, battery, rssi, source
@@ -598,9 +1934,37 @@ class Database:
             WHERE address = ? AND ts >= ? AND ts <= ?
             ORDER BY ts ASC
             """,
-            (address.upper(), start, end),
+            (address_u, start, end),
         )
         rows = [dict(row) for row in await cursor.fetchall()]
+        roll_cur = await self.db.execute(
+            """
+            SELECT
+                bucket_start + (bucket_secs / 2.0) AS ts,
+                temp_avg AS temperature_c,
+                hum_avg AS humidity,
+                temp_min,
+                temp_max,
+                hum_min,
+                hum_max,
+                n,
+                bucket_secs,
+                source
+            FROM readings_rollup
+            WHERE address = ?
+              AND bucket_start + bucket_secs >= ?
+              AND bucket_start <= ?
+            ORDER BY bucket_start ASC
+            """,
+            (address_u, start, end),
+        )
+        for row in await roll_cur.fetchall():
+            item = dict(row)
+            item["battery"] = None
+            item["rssi"] = None
+            item["rollup"] = True
+            rows.append(item)
+        rows.sort(key=lambda r: float(r["ts"]))
         return _downsample_readings(rows, max_points=max(100, int(max_points)))
 
     async def recent_readings(
@@ -633,6 +1997,7 @@ class Database:
         """
         Aggregate temperature/humidity by calendar day, week, or month (local time).
 
+        Combines raw readings and compacted rollups (weighted by sample count).
         Returns rows with avg/min/max for both metrics plus sample count.
         """
         address = address.upper()
@@ -646,21 +2011,24 @@ class Database:
             raise ValueError("bucket must be day, week, or month")
 
         if key == "day":
-            period_expr = "strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime')"
+            period_expr = "strftime('%Y-%m-%d', {ts}, 'unixepoch', 'localtime')"
         elif key == "week":
             # ISO week-year + week number (Monday-based).
             period_expr = (
                 "printf('%s-W%02d', "
-                "strftime('%G', ts, 'unixepoch', 'localtime'), "
-                "CAST(strftime('%V', ts, 'unixepoch', 'localtime') AS INTEGER))"
+                "strftime('%G', {ts}, 'unixepoch', 'localtime'), "
+                "CAST(strftime('%V', {ts}, 'unixepoch', 'localtime') AS INTEGER))"
             )
         else:
-            period_expr = "strftime('%Y-%m', ts, 'unixepoch', 'localtime')"
+            period_expr = "strftime('%Y-%m', {ts}, 'unixepoch', 'localtime')"
+
+        raw_period = period_expr.format(ts="ts")
+        roll_period = period_expr.format(ts="bucket_start + (bucket_secs / 2.0)")
 
         cursor = await self.db.execute(
             f"""
             SELECT
-                {period_expr} AS period,
+                {raw_period} AS period,
                 COUNT(*) AS n,
                 AVG(temperature_c) AS temp_avg,
                 MIN(temperature_c) AS temp_min,
@@ -677,26 +2045,111 @@ class Database:
             """,
             (address, start_ts, end_ts),
         )
-        rows = await cursor.fetchall()
+        merged: dict[str, dict[str, Any]] = {}
+        for row in await cursor.fetchall():
+            period = str(row[0])
+            n = int(row[1] or 0)
+            merged[period] = {
+                "period": period,
+                "count": n,
+                "temp_sum": float(row[2] or 0) * n,
+                "temp_min": float(row[3]) if row[3] is not None else None,
+                "temp_max": float(row[4]) if row[4] is not None else None,
+                "hum_sum": float(row[5] or 0) * n,
+                "hum_min": float(row[6]) if row[6] is not None else None,
+                "hum_max": float(row[7]) if row[7] is not None else None,
+                "ts_min": float(row[8]) if row[8] is not None else None,
+                "ts_max": float(row[9]) if row[9] is not None else None,
+            }
+
+        roll_cur = await self.db.execute(
+            f"""
+            SELECT
+                {roll_period} AS period,
+                SUM(n) AS n,
+                SUM(temp_avg * n) / SUM(n) AS temp_avg,
+                MIN(temp_min) AS temp_min,
+                MAX(temp_max) AS temp_max,
+                SUM(hum_avg * n) / SUM(n) AS hum_avg,
+                MIN(hum_min) AS hum_min,
+                MAX(hum_max) AS hum_max,
+                MIN(bucket_start) AS ts_min,
+                MAX(bucket_start + bucket_secs) AS ts_max
+            FROM readings_rollup
+            WHERE address = ?
+              AND bucket_start + bucket_secs > ?
+              AND bucket_start < ?
+            GROUP BY period
+            ORDER BY period ASC
+            """,
+            (address, start_ts, end_ts),
+        )
+        for row in await roll_cur.fetchall():
+            period = str(row[0])
+            n = int(row[1] or 0)
+            if n <= 0:
+                continue
+            entry = merged.get(period)
+            if entry is None:
+                merged[period] = {
+                    "period": period,
+                    "count": n,
+                    "temp_sum": float(row[2] or 0) * n,
+                    "temp_min": float(row[3]) if row[3] is not None else None,
+                    "temp_max": float(row[4]) if row[4] is not None else None,
+                    "hum_sum": float(row[5] or 0) * n,
+                    "hum_min": float(row[6]) if row[6] is not None else None,
+                    "hum_max": float(row[7]) if row[7] is not None else None,
+                    "ts_min": float(row[8]) if row[8] is not None else None,
+                    "ts_max": float(row[9]) if row[9] is not None else None,
+                }
+                continue
+            entry["count"] += n
+            entry["temp_sum"] += float(row[2] or 0) * n
+            entry["hum_sum"] += float(row[5] or 0) * n
+            for field, val, op in (
+                ("temp_min", row[3], min),
+                ("temp_max", row[4], max),
+                ("hum_min", row[6], min),
+                ("hum_max", row[7], max),
+                ("ts_min", row[8], min),
+                ("ts_max", row[9], max),
+            ):
+                if val is None:
+                    continue
+                fv = float(val)
+                cur = entry[field]
+                entry[field] = fv if cur is None else op(cur, fv)
+
         out: list[dict[str, Any]] = []
-        for row in rows:
+        for period in sorted(merged.keys()):
+            e = merged[period]
+            n = int(e["count"])
             out.append(
                 {
-                    "period": str(row[0]),
-                    "count": int(row[1] or 0),
+                    "period": period,
+                    "count": n,
                     "temperature_c": {
-                        "avg": round(float(row[2]), 2) if row[2] is not None else None,
-                        "min": round(float(row[3]), 2) if row[3] is not None else None,
-                        "max": round(float(row[4]), 2) if row[4] is not None else None,
+                        "avg": round(e["temp_sum"] / n, 2) if n else None,
+                        "min": round(e["temp_min"], 2)
+                        if e["temp_min"] is not None
+                        else None,
+                        "max": round(e["temp_max"], 2)
+                        if e["temp_max"] is not None
+                        else None,
                     },
                     "humidity": {
-                        "avg": round(float(row[5]), 2) if row[5] is not None else None,
-                        "min": round(float(row[6]), 2) if row[6] is not None else None,
-                        "max": round(float(row[7]), 2) if row[7] is not None else None,
+                        "avg": round(e["hum_sum"] / n, 2) if n else None,
+                        "min": round(e["hum_min"], 2)
+                        if e["hum_min"] is not None
+                        else None,
+                        "max": round(e["hum_max"], 2)
+                        if e["hum_max"] is not None
+                        else None,
                     },
                     "range": {
-                        "start": float(row[8]) if row[8] is not None else None,
-                        "end": float(row[9]) if row[9] is not None else None,
+                        "start": e["ts_min"],
+                        "end": e["ts_max"],
                     },
                 }
             )

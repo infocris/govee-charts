@@ -28,6 +28,17 @@ alert_stale_after = 300.0
 [database]
 path = "data/readings.db"
 
+# Per-device readings compaction (min/max/avg rollups for old data).
+# Policies are chosen per sensor in System → Sensor storage (default: none).
+# Presets: none | balanced | aggressive | archive | adaptive
+# adaptive: keep 30d raw; older flat ΔT≤0.3°C stretches → one rollup; keep swings.
+# adaptive: keep 30d raw; older flat ΔT≤0.3°C stretches → one rollup; keep swings.
+[compaction]
+enabled = true
+interval_s = 3600
+default_policy = "none"
+max_delete_per_device = 50000
+
 # Share readings with other Govee Charts instances on the LAN.
 # Each node pushes only its locally scanned samples (no re-forward loops).
 [federation]

@@ -165,7 +165,14 @@ class GoveeScanner:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self.db.touch_runtime_heartbeat("ble"))
+
+        async def _touch() -> None:
+            try:
+                await self.db.touch_runtime_heartbeat("ble")
+            except Exception:
+                logger.debug("BLE heartbeat failed", exc_info=True)
+
+        loop.create_task(_touch(), name="ble-heartbeat")
 
     @property
     def gatt_paused(self) -> bool:

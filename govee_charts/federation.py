@@ -32,6 +32,44 @@ def fed_pull_source(node_id: str) -> str:
     return f"{node_id.strip()}/pull"
 
 
+def classify_reading_source(source: str | None, node_id: str) -> str:
+    """Bucket a readings.source value: direct | backfill | federation | other."""
+    raw = (source or "").strip()
+    local = (node_id or "").strip()
+    if not raw:
+        return "other"
+    lower = raw.lower()
+    if lower == "gatt-history" or lower.endswith("/gatt"):
+        return "backfill"
+    if lower.endswith("/pull"):
+        return "federation"
+    if lower.endswith("/csv") or lower.endswith("/ha"):
+        return "other"
+    if "/" in raw:
+        return "other"
+    if local and raw == local:
+        return "direct"
+    return "federation"
+
+
+def source_bucket_sql(source_expr: str = "source") -> str:
+    """SQL CASE expression classifying source; bind local node_id as first param."""
+    # Placeholders: ? = local node_id (compared for direct).
+    return f"""
+    CASE
+      WHEN {source_expr} = ? THEN 'direct'
+      WHEN lower(COALESCE({source_expr}, '')) = 'gatt-history'
+        OR lower(COALESCE({source_expr}, '')) LIKE '%/gatt' THEN 'backfill'
+      WHEN lower(COALESCE({source_expr}, '')) LIKE '%/pull' THEN 'federation'
+      WHEN lower(COALESCE({source_expr}, '')) LIKE '%/csv'
+        OR lower(COALESCE({source_expr}, '')) LIKE '%/ha'
+        OR TRIM(COALESCE({source_expr}, '')) = '' THEN 'other'
+      WHEN instr(COALESCE({source_expr}, ''), '/') = 0 THEN 'federation'
+      ELSE 'other'
+    END
+    """
+
+
 class PeerPublisher:
     """Fire-and-forget fan-out of locally produced readings to peer nodes."""
 

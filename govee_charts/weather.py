@@ -251,6 +251,74 @@ def simulate_rc_temp(
     return out
 
 
+def simulate_window_strategy(
+    outdoor_future: list[dict[str, Any]],
+    *,
+    t0: float,
+    ts0: float,
+    closed_delta: float,
+    closed_tau_hours: float,
+    open_delta: float,
+    open_tau_hours: float,
+    goal: str,
+    open_outdoor_future: list[dict[str, Any]] | None = None,
+) -> tuple[list[float], list[str]]:
+    """Greedy open/close policy that min or max indoor temperature each step.
+
+    At every forecast hour, both RC steps (windows open vs closed) are evaluated
+    from the current indoor state; the action that yields the cooler (``goal=min``)
+    or warmer (``goal=max``) temperature is kept. Ties keep the previous state
+    (default closed).
+    """
+    goal_l = str(goal or "min").strip().lower()
+    if goal_l not in {"min", "max"}:
+        raise ValueError("goal must be 'min' or 'max'")
+    closed_tau_s = max(1e-3, float(closed_tau_hours)) * 3600.0
+    open_tau_s = max(1e-3, float(open_tau_hours)) * 3600.0
+    open_series = open_outdoor_future if open_outdoor_future is not None else outdoor_future
+    open_by_ts = {
+        float(p["ts"]): float(p["temperature_c"]) for p in open_series
+    }
+
+    t = float(t0)
+    prev_ts = float(ts0)
+    temps: list[float] = []
+    states: list[str] = []
+    for p in outdoor_future:
+        ts = float(p["ts"])
+        dt = ts - prev_ts
+        t_ext_closed = float(p["temperature_c"])
+        t_ext_open = open_by_ts.get(ts, t_ext_closed)
+        t_closed = _rc_step(
+            t, t_ext_closed + float(closed_delta), dt, closed_tau_s
+        )
+        t_open = _rc_step(t, t_ext_open + float(open_delta), dt, open_tau_s)
+        prev_state = states[-1] if states else "closed"
+        if goal_l == "max":
+            if t_open > t_closed + 1e-6:
+                pick_open = True
+            elif t_closed > t_open + 1e-6:
+                pick_open = False
+            else:
+                pick_open = prev_state == "open"
+        else:
+            if t_open < t_closed - 1e-6:
+                pick_open = True
+            elif t_closed < t_open - 1e-6:
+                pick_open = False
+            else:
+                pick_open = prev_state == "open"
+        if pick_open:
+            t = t_open
+            states.append("open")
+        else:
+            t = t_closed
+            states.append("closed")
+        temps.append(t)
+        prev_ts = ts
+    return temps, states
+
+
 def _future_outdoor_from(
     forecast_outdoor: list[dict[str, Any]],
     *,
@@ -342,6 +410,8 @@ def build_window_scenarios(
     - windows_open: fast exchange toward outdoor air; when
       ``open_outdoor_future`` is set (façade-effective T), Δ is forced to 0
       so solar bias is not double-counted with a meteo-calibrated delta
+    - strategy_coolest / strategy_warmest: greedy hourly open/close policy
+      that minimises or maximises indoor temperature (includes opening_plan)
     """
     closed_tau = max(1e-3, float(closed_tau_hours))
     open_tau = max(1e-3, float(open_tau_hours))
@@ -371,6 +441,8 @@ def build_window_scenarios(
         delta: float,
         tau: float,
         source: str,
+        *,
+        opening_plan: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         points = _anchor_temp_points(
             [
@@ -381,7 +453,7 @@ def build_window_scenarios(
             t0=t0,
         )
         vals = [pt["temperature_c"] for pt in points]
-        return {
+        packed: dict[str, Any] = {
             "tau_hours": round(tau, 2),
             "bias_temp": round(delta, 2),
             "source": source,
@@ -391,6 +463,41 @@ def build_window_scenarios(
                 "temp_max": max(vals) if vals else None,
             },
         }
+        if opening_plan is not None:
+            packed["opening_plan"] = opening_plan
+            open_h = sum(1 for step in opening_plan if step.get("state") == "open")
+            packed["summary"]["hours_open"] = open_h
+            packed["summary"]["hours_closed"] = max(0, len(opening_plan) - open_h)
+        return packed
+
+    cool_temps, cool_states = simulate_window_strategy(
+        outdoor_future,
+        t0=t0,
+        ts0=ts0,
+        closed_delta=float(closed_delta),
+        closed_tau_hours=closed_tau,
+        open_delta=eff_open_delta,
+        open_tau_hours=open_tau,
+        goal="min",
+        open_outdoor_future=open_series if use_facade else None,
+    )
+    warm_temps, warm_states = simulate_window_strategy(
+        outdoor_future,
+        t0=t0,
+        ts0=ts0,
+        closed_delta=float(closed_delta),
+        closed_tau_hours=closed_tau,
+        open_delta=eff_open_delta,
+        open_tau_hours=open_tau,
+        goal="max",
+        open_outdoor_future=open_series if use_facade else None,
+    )
+
+    def _plan(states: list[str]) -> list[dict[str, Any]]:
+        return [
+            {"ts": float(p["ts"]), "state": st}
+            for p, st in zip(outdoor_future, states)
+        ]
 
     return {
         "windows_closed": _pack(
@@ -406,6 +513,22 @@ def build_window_scenarios(
             eff_open_delta,
             open_tau,
             eff_open_source,
+        ),
+        "strategy_coolest": _pack(
+            cool_temps,
+            outdoor_future,
+            closed_delta,
+            closed_tau,
+            "greedy_min",
+            opening_plan=_plan(cool_states),
+        ),
+        "strategy_warmest": _pack(
+            warm_temps,
+            outdoor_future,
+            closed_delta,
+            closed_tau,
+            "greedy_max",
+            opening_plan=_plan(warm_states),
         ),
     }
 

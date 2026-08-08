@@ -34,7 +34,7 @@ from govee_charts.apartment import (
 from govee_charts.backfill import BackfillService
 from govee_charts.categories import normalize_door_patch, normalize_patch, taxonomy
 from govee_charts.csv_import import MAX_UPLOAD_BYTES, parse_upload, summarize_samples
-from govee_charts.db import Database, coverage_from_minute_set
+from govee_charts.db import Database, coverage_from_minute_set, is_db_locked
 from govee_charts.decode import Reading
 from govee_charts.federation import csv_source
 from govee_charts.energy import build_energy_summary, estimate_live_ac_watts
@@ -287,6 +287,12 @@ class BackfillDevicePatch(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class CompactionPatch(BaseModel):
+    policy: str = Field(..., min_length=1, max_length=32)
+
+    model_config = {"extra": "forbid"}
+
+
 class MailInboxSet(BaseModel):
     """Create a new disposable inbox, or register an existing address."""
 
@@ -483,6 +489,7 @@ def create_app(
     @app.get("/network")
     @app.get("/coverage")
     @app.get("/backfill")
+    @app.get("/system")
     async def index_views() -> HTMLResponse:
         """Client-side routes for direct URL navigation."""
         return index_html_response()
@@ -526,6 +533,127 @@ def create_app(
                 "stale_after_s": stale_after,
                 "ok": ble_ok,
             },
+        }
+
+    @app.get("/api/system")
+    async def api_system() -> dict[str, Any]:
+        """Storage history, table inventory, and readings provenance summary."""
+        node_id = str(app.state.node_id or "")
+        inventory = await db.inventory_stats(node_id)
+        daily = await db.list_db_size_daily(limit=365)
+        current = {
+            "day": Database.utc_day(),
+            "db_bytes": inventory["db_file"]["db_bytes"],
+            "wal_bytes": inventory["db_file"]["wal_bytes"],
+            "total_bytes": inventory["db_file"]["total_bytes"],
+            "readings_count": next(
+                (
+                    t["rows"]
+                    for t in inventory["tables"]
+                    if t["name"] == "readings"
+                ),
+                None,
+            ),
+            "recorded_at": time.time(),
+        }
+        devices = await db.list_devices(include_stats=True)
+        labels: dict[str, str] = app.state.labels
+        device_opts = [
+            {
+                "address": d["address"],
+                "name": device_display_name(d, labels),
+                "sample_count": int(d.get("sample_count") or 0),
+            }
+            for d in devices
+        ]
+        device_opts.sort(
+            key=lambda d: (str(d["name"]).lower(), str(d["address"]))
+        )
+        sensor_storage = await db.sensor_storage_stats(labels=labels)
+        return {
+            "node_id": node_id,
+            "storage": {"current": current, "daily": daily},
+            "inventory": inventory,
+            "devices": device_opts,
+            "sensor_storage": sensor_storage,
+        }
+
+    @app.get("/api/system/device-sources")
+    async def api_system_device_sources(
+        address: list[str] | None = Query(default=None),
+        addresses: str | None = Query(
+            default=None,
+            description="Comma-separated addresses (alternative to repeated address=)",
+        ),
+        days: float = Query(30, ge=0.04, le=366),
+        grain: str = Query("day", pattern="^(day|hour)$"),
+    ) -> dict[str, Any]:
+        """Sample counts by provenance for one or more devices.
+
+        ``grain=day`` buckets by UTC day; ``grain=hour`` by UTC hour.
+        Pass multiple ``address`` query params and/or a comma-separated ``addresses``.
+        """
+        addrs: list[str] = []
+        for raw in address or []:
+            part = str(raw).strip()
+            if part:
+                addrs.append(part.upper())
+        if addresses:
+            for part in str(addresses).split(","):
+                p = part.strip()
+                if p:
+                    addrs.append(p.upper())
+        # Preserve order, unique.
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for a in addrs:
+            if a not in seen:
+                seen.add(a)
+                uniq.append(a)
+        if not uniq:
+            raise HTTPException(status_code=400, detail="At least one address required")
+        if len(uniq) > 40:
+            raise HTTPException(status_code=400, detail="Too many addresses (max 40)")
+
+        labels: dict[str, str] = app.state.labels
+        devices_out: list[dict[str, str]] = []
+        for addr in uniq:
+            device = await db.get_device(addr)
+            if device is None:
+                raise HTTPException(status_code=404, detail=f"Unknown device {addr}")
+            devices_out.append(
+                {
+                    "address": addr,
+                    "name": device_display_name(device, labels),
+                }
+            )
+
+        grain_l = grain.strip().lower()
+        # Hour grain: keep the window practical (max 14 days of hourly points).
+        lookback_days = float(days)
+        if grain_l == "hour" and lookback_days > 14:
+            lookback_days = 14.0
+        end_ts = time.time()
+        start_ts = end_ts - lookback_days * 86400.0
+        node_id = str(app.state.node_id or "")
+
+        async def _one(addr: str, name: str) -> dict[str, Any]:
+            series = await db.device_source_series(
+                [addr], start_ts, end_ts, node_id, grain=grain_l
+            )
+            return {"address": addr, "name": name, "series": series}
+
+        devices_series = await asyncio.gather(
+            *[_one(d["address"], d["name"]) for d in devices_out]
+        )
+        return {
+            "addresses": uniq,
+            "devices": list(devices_series),
+            "node_id": node_id,
+            "days": lookback_days,
+            "grain": grain_l,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
         }
 
     @app.get("/api/backfill")
@@ -1333,7 +1461,7 @@ def create_app(
 
     @app.get("/api/apartment")
     async def api_apartment(
-        hours: float = Query(24.0, gt=0, le=384),
+        hours: float = Query(24.0, gt=0, le=26280),
         future_hours: float | None = Query(default=None, gt=0, le=384),
         latitude: float | None = Query(default=None, ge=-90, le=90),
         longitude: float | None = Query(default=None, ge=-180, le=180),
@@ -1594,6 +1722,8 @@ def create_app(
                             "hours": past_h,
                             "future_hours": fut_h,
                             "points": proj.get("points") or [],
+                            "window_scenarios": proj.get("window_scenarios") or {},
+                            "opening_state": proj.get("opening_state"),
                         }
                 except Exception as exc:
                     logger.warning("Apartment room projections failed: %s", exc)
@@ -1955,6 +2085,40 @@ def create_app(
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         return enrich_device(updated, app.state.labels)
+
+    @app.patch("/api/devices/{address}/compaction")
+    async def api_patch_compaction(
+        address: str,
+        payload: CompactionPatch,
+    ) -> dict[str, Any]:
+        """Set per-device readings compaction policy."""
+        from govee_charts.compaction import normalize_policy, POLICY_LABELS
+
+        try:
+            policy = normalize_policy(payload.policy)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        state = await db.set_compaction_policy(address, policy)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        return {
+            "address": state["address"],
+            "policy": state["policy"],
+            "label": POLICY_LABELS.get(state["policy"], state["policy"]),
+            "last_run_ts": state.get("last_run_ts"),
+            "last_saved_bytes": state.get("last_saved_bytes"),
+            "updated_at": state.get("updated_at"),
+        }
+
+    @app.get("/api/devices/{address}/compaction/preview")
+    async def api_compaction_preview(address: str) -> dict[str, Any]:
+        """Dry-run report for every compaction policy (no data changes)."""
+        report = await db.preview_compaction(
+            address, labels=app.state.labels
+        )
+        if report is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        return report
 
     def _check_federation_token(
         request: Request,
@@ -2334,12 +2498,20 @@ def create_app(
             )
             item_source = (item.source or "").strip() or payload.node_id
             # Allow "{peer}/gatt" provenance; never trust empty.
-            ok = await db.upsert_reading(
-                reading,
-                display,
-                ts=item.ts,
-                source=item_source,
-            )
+            ok = False
+            for attempt in range(3):
+                try:
+                    ok = await db.upsert_reading(
+                        reading,
+                        display,
+                        ts=item.ts,
+                        source=item_source,
+                    )
+                    break
+                except Exception as exc:
+                    if not is_db_locked(exc) or attempt >= 2:
+                        raise
+                    await asyncio.sleep(0.05 * (attempt + 1))
             if ok:
                 inserted += 1
 

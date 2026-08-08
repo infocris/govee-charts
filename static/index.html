@@ -59,8 +59,22 @@
     <a href="/compare" data-view="compare">Compare</a>
     <a href="/facades" data-view="facades">Facades</a>
     <a href="/map" data-view="network">Map</a>
-    <a href="/coverage" data-view="coverage">Coverage</a>
-    <a href="/backfill" data-view="backfill">Backfill</a>
+    <div class="nav-mega" data-mega="data">
+      <button
+        type="button"
+        class="nav-mega-toggle"
+        id="nav-mega-data-toggle"
+        aria-expanded="false"
+        aria-controls="nav-mega-data-panel"
+      >
+        Data
+      </button>
+      <div class="nav-mega-panel" id="nav-mega-data-panel" role="group" aria-label="Data" hidden>
+        <a href="/coverage" data-view="coverage">Coverage</a>
+        <a href="/backfill" data-view="backfill">Backfill</a>
+        <a href="/system" data-view="system">System</a>
+      </div>
+    </div>
     <span class="nav-actions">
       <button type="button" id="git-pull-btn" class="restart-btn" title="git pull --ff-only">Git pull</button>
       <button type="button" id="restart-ui-btn" class="restart-btn" title="Restart UI service">Restart UI</button>
@@ -73,8 +87,19 @@
     <section id="view-overview" class="view" role="tabpanel" aria-label="Overview">
       <div class="overview-head">
         <h2>All sensors</h2>
-        <p class="overview-hint">Edit name / zone / height / height cm / room inline — click a card to compare charts</p>
+        <p class="overview-hint">Edit name / zone / height / height cm / room inline — use Charts to open compare graphs</p>
       </div>
+
+      <label class="overview-text-filter" for="overview-device-filter">
+        <span class="overview-text-filter-label">Filter</span>
+        <input
+          type="search"
+          id="overview-device-filter"
+          placeholder="Name or MAC…"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </label>
 
       <div class="model-filters" id="model-filters" role="group" aria-label="Filter by model"></div>
       <div class="category-filters" id="category-filters" aria-label="Filter by category">
@@ -216,6 +241,8 @@
             <option value="closed" selected>Windows closed</option>
             <option value="open">Windows open</option>
             <option value="both">Closed + open</option>
+            <option value="coolest">Coolest (open/close)</option>
+            <option value="warmest">Warmest (open/close)</option>
           </select>
         </label>
         <label class="forecast-toggle">
@@ -288,6 +315,46 @@
           Set which compass orientations each room faces outdoors.
           Empty = no exterior contact (e.g. corridor). Saved immediately.
         </p>
+      </div>
+
+      <section class="controls facade-controls" aria-label="Facade chart range">
+        <div class="ranges" role="group" aria-label="Time range">
+          <button type="button" data-hours="1">1 h</button>
+          <button type="button" data-hours="6">6 h</button>
+          <button type="button" data-hours="12">12 h</button>
+          <button type="button" data-hours="24" class="active">24 h</button>
+          <button type="button" data-hours="72">3 d</button>
+          <button type="button" data-hours="168">7 d</button>
+          <button type="button" data-hours="336">14 d</button>
+          <label class="range-more">
+            <span class="visually-hidden">Longer range</span>
+            <select id="facade-range-select" aria-label="Longer time range">
+              <option value="">More…</option>
+              <option value="720">30 d</option>
+              <option value="2160">90 d</option>
+              <option value="4320">180 d</option>
+              <option value="8760">1 y</option>
+              <option value="17520">2 y</option>
+              <option value="26280">3 y</option>
+              <option value="custom">Custom…</option>
+            </select>
+          </label>
+          <div id="facade-range-custom" class="range-custom" hidden>
+            <label>
+              <span>From</span>
+              <input type="datetime-local" id="facade-range-since" step="60">
+            </label>
+            <label>
+              <span>To</span>
+              <input type="datetime-local" id="facade-range-until" step="60">
+            </label>
+            <button type="button" id="facade-range-apply">Apply</button>
+          </div>
+        </div>
+        <label class="forecast-toggle">
+          <input type="checkbox" id="facade-show-forecast" checked>
+          <span>Forecast &amp; projections</span>
+        </label>
         <div class="ranges forecast-future-ranges" role="group" aria-label="Forecast horizon">
           <span class="forecast-future-label">Future</span>
           <button type="button" data-forecast-future="12">+12 h</button>
@@ -296,7 +363,25 @@
           <button type="button" data-forecast-future="168">+7 d</button>
           <button type="button" data-forecast-future="384">+16 d</button>
         </div>
-      </div>
+        <label class="forecast-toggle projection-scenario-toggle" for="facade-projection-scenario">
+          <span>Scenario</span>
+          <select id="facade-projection-scenario" title="Which window scenario to plot">
+            <option value="auto">Current opening</option>
+            <option value="closed" selected>Windows closed</option>
+            <option value="open">Windows open</option>
+            <option value="both">Closed + open</option>
+            <option value="coolest">Coolest (open/close)</option>
+            <option value="warmest">Warmest (open/close)</option>
+          </select>
+        </label>
+        <label class="forecast-toggle">
+          <input type="checkbox" id="facade-show-window-bands" checked>
+          <span>Window open / close</span>
+        </label>
+        <button type="button" id="facade-locate-btn" class="linkish locate-btn" title="Use browser location">Locate</button>
+        <span class="geo-status" id="facade-geo-status" aria-live="polite"></span>
+      </section>
+
       <p class="facade-meta" id="facade-meta" aria-live="polite">Loading…</p>
       <div class="facade-outdoor" id="facade-outdoor" hidden aria-live="polite"></div>
 
@@ -849,6 +934,140 @@
           </tbody>
         </table>
       </div>
+    </section>
+
+    <section id="view-system" class="view" role="tabpanel" aria-label="System" hidden>
+      <div class="overview-head">
+        <h2>System</h2>
+        <p class="overview-hint">
+          SQLite storage growth, table inventory, and per-device sample provenance
+          (direct BLE, GATT backfill, federation).
+        </p>
+      </div>
+
+      <div class="overview-head overview-head-secondary">
+        <h2>Storage</h2>
+        <p class="overview-hint" id="system-storage-hint">Daily DB + WAL size (UTC)</p>
+      </div>
+      <p class="system-storage-summary" id="system-storage-summary">Loading…</p>
+      <div class="system-chart-wrap">
+        <canvas id="system-storage-chart" aria-label="Database size over time"></canvas>
+      </div>
+
+      <div class="overview-head overview-head-secondary">
+        <h2>Inventory</h2>
+        <p class="overview-hint" id="system-inventory-hint">
+          What is stored in this node’s database — size includes indexes
+        </p>
+      </div>
+      <div class="system-source-summary" id="system-source-summary" aria-live="polite"></div>
+      <div class="overview-table-wrap">
+        <table class="overview-table system-inventory-table" id="system-inventory-table">
+          <thead>
+            <tr>
+              <th scope="col">Table</th>
+              <th scope="col" class="num">Rows</th>
+              <th scope="col" class="num">Size</th>
+              <th scope="col" class="num">%</th>
+              <th scope="col">Notes</th>
+            </tr>
+          </thead>
+          <tbody id="system-inventory-body">
+            <tr><td colspan="5" class="overview-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="overview-head overview-head-secondary">
+        <h2>Sensor storage</h2>
+        <p class="overview-hint" id="system-sensor-storage-hint">
+          Per-sensor readings footprint and compaction policy (min/max/avg rollups).
+          Adaptive keeps swings raw and merges flat ΔT stretches after 30 days.
+          Compaction runs on the workers schedule — not instantly. DELETE frees pages;
+          reclaim may need an occasional VACUUM.
+        </p>
+      </div>
+      <div class="overview-table-wrap">
+        <table class="overview-table system-sensor-storage-table" id="system-sensor-storage-table">
+          <thead>
+            <tr>
+              <th scope="col">Sensor</th>
+              <th scope="col" class="num">Samples</th>
+              <th scope="col" class="num">Size</th>
+              <th scope="col" class="num">%</th>
+              <th scope="col">Age mix</th>
+              <th scope="col">Policy</th>
+              <th scope="col" class="num">After (est.)</th>
+              <th scope="col">Preview</th>
+            </tr>
+          </thead>
+          <tbody id="system-sensor-storage-body">
+            <tr><td colspan="8" class="overview-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div
+        id="system-compaction-preview"
+        class="system-compaction-preview"
+        hidden
+        aria-live="polite"
+      ></div>
+
+      <div class="overview-head overview-head-secondary">
+        <h2>Samples by provenance</h2>
+        <p class="overview-hint">
+          One chart per selected sensor — direct / backfill / federation (Ctrl/Cmd multi-select)
+        </p>
+      </div>
+      <div class="system-device-controls">
+        <div class="system-device-picker">
+          <label class="system-device-label" for="system-device-filter">
+            Filter
+            <input
+              type="search"
+              id="system-device-filter"
+              placeholder="Name or MAC…"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <label class="system-device-label" for="system-device">
+            Sensors
+            <select
+              id="system-device"
+              multiple
+              size="8"
+              aria-label="Sensors for provenance chart"
+            ></select>
+          </label>
+        </div>
+        <div class="system-device-side">
+          <div class="system-ranges coverage-ranges" role="group" aria-label="Bucket size">
+            <span class="system-ctrl-label">Bucket</span>
+            <button type="button" data-sys-grain="hour">Hour</button>
+            <button type="button" data-sys-grain="day" class="active">Day</button>
+          </div>
+          <div
+            class="system-ranges coverage-ranges"
+            id="system-range-buttons"
+            role="group"
+            aria-label="Provenance range"
+          >
+            <span class="system-ctrl-label">Range</span>
+            <button type="button" data-sys-days="1" hidden>24h</button>
+            <button type="button" data-sys-days="2" hidden>48h</button>
+            <button type="button" data-sys-days="7">7d</button>
+            <button type="button" data-sys-days="30" class="active">30d</button>
+            <button type="button" data-sys-days="90">90d</button>
+          </div>
+          <div class="system-device-actions">
+            <button type="button" class="backfill-btn" id="system-select-all">Select all</button>
+            <button type="button" class="backfill-btn" id="system-clear-all">Clear</button>
+          </div>
+        </div>
+      </div>
+      <p class="status" id="system-device-status"></p>
+      <div class="system-source-charts" id="system-source-charts"></div>
     </section>
   </main>
 
