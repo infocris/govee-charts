@@ -295,6 +295,7 @@
   const WINDOW_NOTIFY_KEY = "govee-charts.windowNotify";
   const WINDOW_NOTIFY_STATE_KEY = "govee-charts.windowNotifyState";
   const TTS_KEY = "govee-charts.tts";
+  const TTS_VOICE_KEY = "govee-charts.ttsVoice";
   const FOLD_CURRENT_KEY = "govee-charts.foldCurrent";
   const FOLD_PROJ_KEY = "govee-charts.foldProjections";
   const GEO_KEY = "govee-charts.geo";
@@ -388,6 +389,7 @@
   let showHvac = localStorage.getItem(HVAC_KEY) !== "0";
   let windowNotify = localStorage.getItem(WINDOW_NOTIFY_KEY) === "1";
   let ttsEnabled = localStorage.getItem(TTS_KEY) === "1";
+  let ttsVoiceURI = localStorage.getItem(TTS_VOICE_KEY) || "";
   let lastSpokenSystemBannerTitle = null;
   /** @type {{hidden?: boolean, tone?: string, title?: string, detail?: string} | null} */
   let windowBannerModel = null;
@@ -427,6 +429,8 @@
   const showHvacEl = document.getElementById("show-hvac");
   const windowNotifyEl = document.getElementById("window-notify-btn");
   const ttsEl = document.getElementById("tts-btn");
+  const ttsVoicePickerEl = document.getElementById("tts-voice-picker");
+  const ttsVoiceSelectEl = document.getElementById("tts-voice-select");
   const windowLegendEl = document.getElementById("window-legend");
   const hvacLegendEl = document.getElementById("hvac-legend");
   const hvacStatusEl = document.getElementById("hvac-status");
@@ -8343,11 +8347,40 @@
     }
     try {
       const utter = new SpeechSynthesisUtterance(text);
-      utter.lang = "en-US";
+      const voice = ttsVoiceURI
+        ? window.speechSynthesis
+            .getVoices()
+            .find((v) => v.voiceURI === ttsVoiceURI)
+        : null;
+      utter.lang = voice ? voice.lang : "en-US";
+      if (voice) utter.voice = voice;
       window.speechSynthesis.speak(utter);
     } catch (err) {
       console.warn("Speech synthesis failed", err);
     }
+  }
+
+  function populateTtsVoiceOptions() {
+    if (!ttsVoiceSelectEl || !("speechSynthesis" in window)) return;
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices.length) return;
+    const sorted = [...voices].sort((a, b) =>
+      `${a.lang} ${a.name}`.localeCompare(`${b.lang} ${b.name}`)
+    );
+    ttsVoiceSelectEl.innerHTML = "";
+    const defaultOpt = document.createElement("option");
+    defaultOpt.value = "";
+    defaultOpt.textContent = "Browser default";
+    ttsVoiceSelectEl.appendChild(defaultOpt);
+    for (const v of sorted) {
+      const opt = document.createElement("option");
+      opt.value = v.voiceURI;
+      opt.textContent = `${v.name} (${v.lang})`;
+      ttsVoiceSelectEl.appendChild(opt);
+    }
+    ttsVoiceSelectEl.value = sorted.some((v) => v.voiceURI === ttsVoiceURI)
+      ? ttsVoiceURI
+      : "";
   }
 
   function sendWindowNotification(title, body, tag) {
@@ -10296,6 +10329,7 @@
       "aria-label",
       ttsEnabled ? "Disable voice alerts" : "Enable voice alerts"
     );
+    if (ttsVoicePickerEl) ttsVoicePickerEl.hidden = !ttsEnabled;
   }
 
   if (ttsEl) {
@@ -10303,6 +10337,11 @@
       ttsEl.disabled = true;
       ttsEl.title = "Voice alerts not supported by this browser";
     } else {
+      populateTtsVoiceOptions();
+      window.speechSynthesis.addEventListener?.(
+        "voiceschanged",
+        populateTtsVoiceOptions
+      );
       syncTtsBtn();
       ttsEl.addEventListener("click", () => {
         ttsEnabled = !ttsEnabled;
@@ -10311,6 +10350,14 @@
         if (ttsEnabled) speak("Voice alerts enabled");
       });
     }
+  }
+
+  if (ttsVoiceSelectEl) {
+    ttsVoiceSelectEl.addEventListener("change", () => {
+      ttsVoiceURI = ttsVoiceSelectEl.value;
+      localStorage.setItem(TTS_VOICE_KEY, ttsVoiceURI);
+      speak("Voice alerts enabled");
+    });
   }
 
   if (windowNotifyEl) {
