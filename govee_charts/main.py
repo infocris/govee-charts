@@ -644,8 +644,43 @@ def _build_weather(cfg: dict[str, Any]) -> WeatherService:
     return weather
 
 
+def _systemd_unit_pid(unit: str) -> int | None:
+    """Look up a unit's MainPID via the read-only ``systemctl show`` (no
+    privilege needed, unlike ``systemctl restart``)."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", unit, "--property=MainPID", "--value"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    try:
+        pid = int(result.stdout.strip())
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
 def _restart_workers_via_systemd() -> tuple[bool, str]:
-    cmd = ["systemctl", "restart", "govee-charts-workers.service"]
+    unit = "govee-charts-workers.service"
+    # Prefer signaling the worker process directly: SIGTERM triggers the same
+    # graceful shutdown as `systemctl stop`, and `Restart=always` relaunches
+    # it — no polkit authorization needed (unlike the privileged `restart`
+    # verb, which requires an interactive session on some hosts).
+    pid = _systemd_unit_pid(unit)
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            return True, "Workers restarting — UI remains available"
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            return False, f"Workers restart failed: could not signal PID {pid} ({exc})"
+
+    cmd = ["systemctl", "restart", unit]
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except FileNotFoundError:
