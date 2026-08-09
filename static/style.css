@@ -349,6 +349,11 @@ body.sticky-views-enabled .views {
   border-color: var(--muted);
 }
 
+.header-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .header-icon-btn[aria-pressed="true"] {
   color: #f0d48a;
   border-color: color-mix(in srgb, #f0d48a 55%, var(--line));

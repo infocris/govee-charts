@@ -294,6 +294,7 @@
   const HVAC_KEY = "govee-charts.hvac";
   const WINDOW_NOTIFY_KEY = "govee-charts.windowNotify";
   const WINDOW_NOTIFY_STATE_KEY = "govee-charts.windowNotifyState";
+  const TTS_KEY = "govee-charts.tts";
   const FOLD_CURRENT_KEY = "govee-charts.foldCurrent";
   const FOLD_PROJ_KEY = "govee-charts.foldProjections";
   const GEO_KEY = "govee-charts.geo";
@@ -386,6 +387,8 @@
   let showWindowBands = localStorage.getItem(WINDOW_BANDS_KEY) !== "0";
   let showHvac = localStorage.getItem(HVAC_KEY) !== "0";
   let windowNotify = localStorage.getItem(WINDOW_NOTIFY_KEY) === "1";
+  let ttsEnabled = localStorage.getItem(TTS_KEY) === "1";
+  let lastSpokenSystemBannerTitle = null;
   /** @type {{hidden?: boolean, tone?: string, title?: string, detail?: string} | null} */
   let windowBannerModel = null;
   /** @type {{hidden?: boolean, tone?: string, title?: string, detail?: string} | null} */
@@ -423,6 +426,7 @@
   const facadeGeoStatusEl = document.getElementById("facade-geo-status");
   const showHvacEl = document.getElementById("show-hvac");
   const windowNotifyEl = document.getElementById("window-notify-btn");
+  const ttsEl = document.getElementById("tts-btn");
   const windowLegendEl = document.getElementById("window-legend");
   const hvacLegendEl = document.getElementById("hvac-legend");
   const hvacStatusEl = document.getElementById("hvac-status");
@@ -8218,6 +8222,7 @@
       systemBannerEl.hidden = true;
       systemBannerEl.className = "window-banner system-banner";
       systemBannerModel = null;
+      lastSpokenSystemBannerTitle = null;
       syncTopBarTones();
       requestAnimationFrame(refreshViewsStickyState);
       return;
@@ -8227,6 +8232,11 @@
     systemBannerModel = model;
     if (systemBannerTitleEl) systemBannerTitleEl.textContent = model.title || "";
     if (systemBannerDetailEl) systemBannerDetailEl.textContent = model.detail || "";
+    // Speak only on a fresh alert (not on every 30s poll while it stays active).
+    if (model.title && model.title !== lastSpokenSystemBannerTitle) {
+      speak(model.detail ? `${model.title}. ${model.detail}` : model.title);
+      lastSpokenSystemBannerTitle = model.title;
+    }
     syncTopBarTones();
     requestAnimationFrame(refreshViewsStickyState);
   }
@@ -8326,7 +8336,22 @@
     return result;
   }
 
+  function speak(text) {
+    if (!ttsEnabled || !text) return;
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+      return;
+    }
+    try {
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = "en-US";
+      window.speechSynthesis.speak(utter);
+    } catch (err) {
+      console.warn("Speech synthesis failed", err);
+    }
+  }
+
   function sendWindowNotification(title, body, tag) {
+    speak(body ? `${title}. ${body}` : title);
     if (!("Notification" in window) || Notification.permission !== "granted") {
       return;
     }
@@ -10259,6 +10284,33 @@
       "aria-label",
       windowNotify ? "Disable window alerts" : "Enable window alerts"
     );
+  }
+
+  function syncTtsBtn() {
+    if (!ttsEl) return;
+    ttsEl.setAttribute("aria-pressed", ttsEnabled ? "true" : "false");
+    ttsEl.title = ttsEnabled
+      ? "Voice alerts on — click to disable"
+      : "Voice alerts off — click to enable";
+    ttsEl.setAttribute(
+      "aria-label",
+      ttsEnabled ? "Disable voice alerts" : "Enable voice alerts"
+    );
+  }
+
+  if (ttsEl) {
+    if (!("speechSynthesis" in window)) {
+      ttsEl.disabled = true;
+      ttsEl.title = "Voice alerts not supported by this browser";
+    } else {
+      syncTtsBtn();
+      ttsEl.addEventListener("click", () => {
+        ttsEnabled = !ttsEnabled;
+        localStorage.setItem(TTS_KEY, ttsEnabled ? "1" : "0");
+        syncTtsBtn();
+        if (ttsEnabled) speak("Voice alerts enabled");
+      });
+    }
   }
 
   if (windowNotifyEl) {
