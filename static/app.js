@@ -10342,6 +10342,13 @@
     return false;
   }
 
+  const homeBtn = document.getElementById("home-btn");
+  if (homeBtn) {
+    // Portal lives on plain HTTP port 80 of the same host, regardless of
+    // which protocol/port this dashboard itself was reached on.
+    homeBtn.href = `http://${window.location.hostname}/`;
+  }
+
   if (gitPullBtn) {
     gitPullBtn.addEventListener("click", async () => {
       if (
