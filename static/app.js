@@ -296,6 +296,7 @@
   const WINDOW_NOTIFY_STATE_KEY = "govee-charts.windowNotifyState";
   const TTS_KEY = "govee-charts.tts";
   const TTS_VOICE_KEY = "govee-charts.ttsVoice";
+  const DOOR_BEEP_KEY = "govee-charts.doorBeep";
   const FOLD_CURRENT_KEY = "govee-charts.foldCurrent";
   const FOLD_PROJ_KEY = "govee-charts.foldProjections";
   const GEO_KEY = "govee-charts.geo";
@@ -326,6 +327,9 @@
   let taxonomyData = { zones: [], heights: [], rooms: [], contact_kinds: [] };
   /** @type {Array<{sensor_id:string,name:string,state:string,ts:number,room?:string,kind?:string}>} */
   let doorSensors = [];
+  let doorBeepEnabled = localStorage.getItem(DOOR_BEEP_KEY) === "1";
+  /** @type {Map<string, string>} sensor_id → last seen state, to detect transitions */
+  const doorBeepSeenStates = new Map();
   let selected = new Set();
   /** @type {string[]} empty = all models */
   let activeModels = loadActiveModels();
@@ -431,6 +435,7 @@
   const ttsEl = document.getElementById("tts-btn");
   const ttsVoicePickerEl = document.getElementById("tts-voice-picker");
   const ttsVoiceSelectEl = document.getElementById("tts-voice-select");
+  const doorBeepEl = document.getElementById("door-beep-btn");
   const windowLegendEl = document.getElementById("window-legend");
   const hvacLegendEl = document.getElementById("hvac-legend");
   const hvacStatusEl = document.getElementById("hvac-status");
@@ -4425,6 +4430,7 @@
       if (!res.ok) throw new Error(`doors HTTP ${res.status}`);
       const data = await res.json();
       doorSensors = data.sensors || [];
+      evaluateDoorBeeps(doorSensors);
       updateDoorsTable();
     } catch (err) {
       if (doorsBody) {
@@ -8360,6 +8366,52 @@
     }
   }
 
+  /** @type {AudioContext|null} */
+  let doorBeepAudioCtx = null;
+
+  function beepDoor(opened) {
+    if (!doorBeepEnabled) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      if (!doorBeepAudioCtx) doorBeepAudioCtx = new Ctx();
+      const ctx = doorBeepAudioCtx;
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const now = ctx.currentTime;
+      // Two quick ascending notes for "open", one descending note for "close".
+      const notes = opened ? [660, 880] : [660, 440];
+      let t = now;
+      for (const freq of notes) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        gain.gain.value = 0.0001;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        gain.gain.exponentialRampToValueAtTime(0.2, t + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+        osc.start(t);
+        osc.stop(t + 0.16);
+        t += 0.15;
+      }
+    } catch (err) {
+      console.warn("Door beep failed", err);
+    }
+  }
+
+  function evaluateDoorBeeps(sensors) {
+    for (const sensor of sensors) {
+      const id = sensor.sensor_id;
+      const state = sensor.state || "";
+      const prev = doorBeepSeenStates.get(id);
+      if (prev !== undefined && prev !== state && (state === "open" || state === "closed")) {
+        beepDoor(state === "open");
+      }
+      doorBeepSeenStates.set(id, state);
+    }
+  }
+
   function populateTtsVoiceOptions() {
     if (!ttsVoiceSelectEl || !("speechSynthesis" in window)) return;
     const voices = window.speechSynthesis.getVoices();
@@ -10357,6 +10409,28 @@
       ttsVoiceURI = ttsVoiceSelectEl.value;
       localStorage.setItem(TTS_VOICE_KEY, ttsVoiceURI);
       speak("Voice alerts enabled");
+    });
+  }
+
+  function syncDoorBeepBtn() {
+    if (!doorBeepEl) return;
+    doorBeepEl.setAttribute("aria-pressed", doorBeepEnabled ? "true" : "false");
+    doorBeepEl.title = doorBeepEnabled
+      ? "Door / window beep on — click to disable"
+      : "Door / window beep off — click to enable";
+    doorBeepEl.setAttribute(
+      "aria-label",
+      doorBeepEnabled ? "Disable door / window beep" : "Enable door / window beep"
+    );
+  }
+
+  if (doorBeepEl) {
+    syncDoorBeepBtn();
+    doorBeepEl.addEventListener("click", () => {
+      doorBeepEnabled = !doorBeepEnabled;
+      localStorage.setItem(DOOR_BEEP_KEY, doorBeepEnabled ? "1" : "0");
+      syncDoorBeepBtn();
+      if (doorBeepEnabled) beepDoor(true);
     });
   }
 
