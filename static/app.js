@@ -8245,6 +8245,7 @@
     // Speak only on a fresh alert (not on every 30s poll while it stays active).
     if (model.title && model.title !== lastSpokenSystemBannerTitle) {
       speak(model.detail ? `${model.title}. ${model.detail}` : model.title);
+      bumpBadge();
       lastSpokenSystemBannerTitle = model.title;
     }
     syncTopBarTones();
@@ -8333,6 +8334,44 @@
     renderWindowBanner(buildWindowBannerModel(fc));
   }
 
+  const BADGE_COUNT_KEY = "govee-charts.badgeCount";
+  let badgeCount = parseInt(localStorage.getItem(BADGE_COUNT_KEY) || "0", 10) || 0;
+
+  function applyBadge() {
+    if (!("setAppBadge" in navigator)) return;
+    try {
+      if (badgeCount > 0) {
+        navigator.setAppBadge(badgeCount).catch(() => {});
+      } else if ("clearAppBadge" in navigator) {
+        navigator.clearAppBadge().catch(() => {});
+      }
+    } catch (err) {
+      console.warn("App badge failed", err);
+    }
+  }
+
+  function bumpBadge() {
+    // Only bump while the app/tab is in the background — no need to badge
+    // something the user is already looking at.
+    if (document.visibilityState === "visible" && document.hasFocus()) return;
+    badgeCount += 1;
+    localStorage.setItem(BADGE_COUNT_KEY, String(badgeCount));
+    applyBadge();
+  }
+
+  function clearBadge() {
+    if (badgeCount === 0) return;
+    badgeCount = 0;
+    localStorage.setItem(BADGE_COUNT_KEY, "0");
+    applyBadge();
+  }
+
+  applyBadge();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") clearBadge();
+  });
+  window.addEventListener("focus", clearBadge);
+
   async function ensureNotifyPermission() {
     if (!("Notification" in window)) {
       return "unsupported";
@@ -8407,6 +8446,7 @@
       const prev = doorBeepSeenStates.get(id);
       if (prev !== undefined && prev !== state && (state === "open" || state === "closed")) {
         beepDoor(state === "open");
+        bumpBadge();
       }
       doorBeepSeenStates.set(id, state);
     }
@@ -8450,6 +8490,7 @@
 
   function sendWindowNotification(title, body, tag) {
     speak(body ? `${title}. ${body}` : title);
+    bumpBadge();
     if (!("Notification" in window) || Notification.permission !== "granted") {
       return;
     }
