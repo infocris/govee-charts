@@ -100,10 +100,14 @@
   const sectionPathClearBtn = document.getElementById("section-path-clear");
   const NETWORK_VB_W = 920;
   const NETWORK_VB_H = 640;
+  const SECTION_VB_W = 960;
   const NETWORK_ZOOM_MIN = 0.6;
   const NETWORK_ZOOM_MAX = 4;
   /** @type {number} */
-  let networkZoom = 1.1;
+  // Same viewBox on every screen size means text shrinks a lot more on a
+  // narrow phone than the rest of the UI — start pre-zoomed there so
+  // room names/temperatures are legible without an extra manual zoom step.
+  let networkZoom = window.innerWidth <= 640 ? 2.2 : 1.1;
   /** @type {{x:number,y:number}} viewBox top-left offset at current zoom */
   let networkPan = { x: 0, y: 0 };
   /** @type {{x:number,y:number}|null} */
@@ -5949,6 +5953,23 @@
     return cols;
   }
 
+  /**
+   * The map SVGs use a fixed-size viewBox that gets shrunk to fit the
+   * container width. On a narrow phone that shrink is much larger than
+   * anywhere else in the UI, so in-map text becomes unreadable. Measure
+   * the actual rendered-vs-viewBox ratio and expose it as a CSS variable
+   * so label font-size rules (see style.css) can compensate and keep a
+   * legible on-screen size regardless of device width.
+   */
+  function applyMapFontScale(svgEl, viewBoxWidth) {
+    if (!svgEl || !viewBoxWidth) return;
+    const rendered = svgEl.getBoundingClientRect().width;
+    if (!rendered) return;
+    const rawScale = rendered / viewBoxWidth;
+    const compensation = rawScale > 0 ? Math.min(3, Math.max(1, 1 / rawScale)) : 1;
+    svgEl.style.setProperty("--map-font-scale", compensation.toFixed(2));
+  }
+
   function renderOpenRoomSection(data) {
     if (!sectionSvgEl) return;
     const NS = "http://www.w3.org/2000/svg";
@@ -6360,6 +6381,7 @@
         }
       });
     }
+    requestAnimationFrame(() => applyMapFontScale(sectionSvgEl, W));
   }
 
   function renderNetwork(data) {
@@ -7154,6 +7176,9 @@
     if (networkStatusEl) {
       networkStatusEl.textContent = `Updated ${new Date().toLocaleTimeString("en-GB")}`;
     }
+    requestAnimationFrame(() =>
+      applyMapFontScale(networkSvgEl, NETWORK_VB_W / networkZoom)
+    );
   }
 
   function destroyFacadeCharts() {
@@ -10100,6 +10125,15 @@
   window.addEventListener("popstate", () => {
     const fromPath = pathToView(window.location.pathname) || "overview";
     setView(fromPath, { url: "none" });
+  });
+
+  let mapFontScaleResizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(mapFontScaleResizeTimer);
+    mapFontScaleResizeTimer = setTimeout(() => {
+      applyMapFontScale(sectionSvgEl, SECTION_VB_W);
+      applyMapFontScale(networkSvgEl, NETWORK_VB_W / networkZoom);
+    }, 150);
   });
 
   if (networkZoomInBtn) {
