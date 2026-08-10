@@ -8412,13 +8412,25 @@
     }
   }
 
+  let ttsVoicePollAttempts = 0;
+
   function populateTtsVoiceOptions() {
     if (!ttsVoiceSelectEl || !("speechSynthesis" in window)) return;
     const voices = window.speechSynthesis.getVoices();
-    if (!voices.length) return;
+    if (!voices.length) {
+      // Safari often fires no "voiceschanged" event and returns an empty
+      // list on the very first call — retry for a few seconds.
+      if (ttsVoicePollAttempts < 20) {
+        ttsVoicePollAttempts += 1;
+        setTimeout(populateTtsVoiceOptions, 250);
+      }
+      return;
+    }
+    ttsVoicePollAttempts = 20;
     const sorted = [...voices].sort((a, b) =>
       `${a.lang} ${a.name}`.localeCompare(`${b.lang} ${b.name}`)
     );
+    const previousValue = ttsVoiceSelectEl.value;
     ttsVoiceSelectEl.innerHTML = "";
     const defaultOpt = document.createElement("option");
     defaultOpt.value = "";
@@ -8430,8 +8442,9 @@
       opt.textContent = `${v.name} (${v.lang})`;
       ttsVoiceSelectEl.appendChild(opt);
     }
-    ttsVoiceSelectEl.value = sorted.some((v) => v.voiceURI === ttsVoiceURI)
-      ? ttsVoiceURI
+    const wanted = previousValue || ttsVoiceURI;
+    ttsVoiceSelectEl.value = sorted.some((v) => v.voiceURI === wanted)
+      ? wanted
       : "";
   }
 
@@ -10399,6 +10412,9 @@
         ttsEnabled = !ttsEnabled;
         localStorage.setItem(TTS_KEY, ttsEnabled ? "1" : "0");
         syncTtsBtn();
+        // A user gesture sometimes unblocks Safari's voice list.
+        ttsVoicePollAttempts = 0;
+        populateTtsVoiceOptions();
         if (ttsEnabled) speak("Voice alerts enabled");
       });
     }
