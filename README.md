@@ -242,9 +242,16 @@ temperature, amber = opening would heat, blue-grey = outdoor is cooler but
 too humid (keep closed). Past + projected future.
 
 Toggle via **Forecast & projections** / **Window open / close**. Optional
-**Window alerts** uses the browser Notification API (HTTPS or localhost) and
+Optional **Window alerts** uses the browser Notification API (HTTPS or localhost) and
 notifies when advice changes per interior room (open / close / too humid),
-checked about every 30 s while the page is open.
+checked about every 30 s while the page is open. Safari standalone / Home Screen
+apps need HTTPS and a service worker (`/sw.js`); enable via the bell after OS
+permission is allowed. Settings → **Window notifications** diagnoses permission
+issues and offers fixes (reload, test, copy HTTPS link). Soft-reload after
+granting permission usually avoids quitting the web app.
+
+Agent playbook for implementing web notifications (Safari PWA quirks): Cursor
+skill `web-notifications` (`~/.cursor/skills/web-notifications/`).
 
 ### Door / window history
 
@@ -317,6 +324,8 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `POST /api/backfill/import` — confirm ingest (same form fields); with `overwrite=true`, updates conflicting minutes
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
 - `POST /api/restart?target=ui|workers` — restart UI or workers (when available)
+- `GET /widget?metric=temp&addr=…&past=24&future=24&transparent=0|1` — standalone embeddable chart (iframe / share link)
+- `GET /api/tts/voices?lang=fr` / `POST /api/tts` — edge-tts voices + MP3 synthesis for alert speech; voice `home-tts` plays on the configured Home TTS edge server (`[tts].home_url`)
 - `POST /api/git/pull` — `git pull --ff-only` from the UI (does not restart services)
 - `GET /api/mail/inbox` / `POST /api/mail/inbox` / `DELETE /api/mail/inbox` — disposable inbox for Govee CSV email export (myagentinbox, 24h)
 - `POST /api/mail/fetch` — poll inbox and return CSV/ZIP attachments (base64) for Coverage import

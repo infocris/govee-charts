@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Govee Charts</title>
   <link rel="manifest" href="/static/manifest.json">
   <meta name="theme-color" content="#0f1410">
@@ -11,6 +11,7 @@
   <link rel="apple-touch-icon" href="/static/icons/icon-180.png">
   <meta name="apple-mobile-web-app-title" content="Govee Charts">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -358,6 +359,100 @@
           <canvas id="spread-chart"></canvas>
         </figure>
       </section>
+
+      <details class="compare-fold" id="fold-widget-export">
+        <summary class="compare-fold-summary">
+          <span data-i18n="compare.widget.title">Export widget</span>
+          <span class="compare-fold-meta" data-i18n="compare.widget.meta">shareable chart link</span>
+        </summary>
+        <div class="widget-export" id="widget-export">
+          <p class="widget-export-hint" data-i18n="compare.widget.hint">
+            Build a standalone chart URL for iframes or bookmarks. Curves default to the current Compare selection.
+          </p>
+          <div class="widget-export-grid">
+            <label class="widget-export-field">
+              <span data-i18n="compare.widget.metric">Metric</span>
+              <select id="widget-metric">
+                <option value="temp" data-i18n="compare.widget.metric.temp">Temperature</option>
+                <option value="hum" data-i18n="compare.widget.metric.hum">Humidity</option>
+                <option value="dew" data-i18n="compare.widget.metric.dew">Dew point</option>
+              </select>
+            </label>
+            <label class="widget-export-field">
+              <span data-i18n="compare.widget.past">Past</span>
+              <select id="widget-past">
+                <option value="6">6 h</option>
+                <option value="12">12 h</option>
+                <option value="24" selected>24 h</option>
+                <option value="72">3 d</option>
+                <option value="168">7 d</option>
+                <option value="336">14 d</option>
+                <option value="720">30 d</option>
+              </select>
+            </label>
+            <label class="widget-export-field">
+              <span data-i18n="compare.widget.future">Future</span>
+              <select id="widget-future">
+                <option value="0" data-i18n="compare.widget.futureOff">Off</option>
+                <option value="12">+12 h</option>
+                <option value="24" selected>+1 d</option>
+                <option value="72">+3 d</option>
+                <option value="168">+7 d</option>
+                <option value="384">+16 d</option>
+              </select>
+            </label>
+            <label class="widget-export-check">
+              <input type="checkbox" id="widget-forecast" checked>
+              <span data-i18n="compare.widget.forecast">Include forecast</span>
+            </label>
+            <label class="widget-export-check">
+              <input type="checkbox" id="widget-transparent">
+              <span data-i18n="compare.widget.transparent">Transparent background</span>
+            </label>
+            <label class="widget-export-check">
+              <input type="checkbox" id="widget-legend" checked>
+              <span data-i18n="compare.widget.legend">Show legend</span>
+            </label>
+            <label class="widget-export-field">
+              <span data-i18n="compare.widget.refresh">Auto-refresh</span>
+              <select id="widget-refresh">
+                <option value="0" selected data-i18n="compare.widget.refreshOff">Off</option>
+                <option value="60">1 min</option>
+                <option value="300">5 min</option>
+                <option value="900">15 min</option>
+              </select>
+            </label>
+          </div>
+          <fieldset class="widget-export-curves">
+            <legend data-i18n="compare.widget.curves">Curves</legend>
+            <div class="widget-export-curve-actions">
+              <button type="button" id="widget-curves-selection" class="linkish" data-i18n="compare.widget.useSelection">Use selection</button>
+              <button type="button" id="widget-curves-all" class="linkish" data-i18n="compare.widget.allVisible">All visible</button>
+              <button type="button" id="widget-curves-none" class="linkish" data-i18n="compare.widget.none">None</button>
+            </div>
+            <div id="widget-curve-list" class="widget-curve-list" role="group" data-i18n-aria-label="compare.widget.curves" aria-label="Curves"></div>
+          </fieldset>
+          <div class="widget-export-link-row">
+            <label class="widget-export-field widget-export-url-field" for="widget-url">
+              <span data-i18n="compare.widget.link">Link</span>
+              <input type="text" id="widget-url" readonly>
+            </label>
+            <button type="button" id="widget-copy-btn" class="backfill-btn" data-i18n="compare.widget.copy">Copy</button>
+            <a id="widget-open-btn" class="backfill-btn" href="/widget" target="_blank" rel="noopener" data-i18n="compare.widget.open">Open</a>
+          </div>
+          <p class="widget-export-status" id="widget-export-status" aria-live="polite"></p>
+          <div class="widget-export-preview-wrap">
+            <span class="widget-export-preview-label" data-i18n="compare.widget.preview">Preview</span>
+            <iframe
+              id="widget-preview"
+              class="widget-export-preview"
+              title="Widget preview"
+              loading="lazy"
+              referrerpolicy="no-referrer"
+            ></iframe>
+          </div>
+        </div>
+      </details>
 
       <p class="status" id="status" data-i18n="compare.loading">Loading…</p>
     </section>
@@ -1159,6 +1254,15 @@
             Voices matching the selected language. Enable voice alerts with the speaker button in the alert bar.
           </span>
         </label>
+        <fieldset class="settings-field settings-notify-field">
+          <legend class="settings-field-label" data-i18n="settings.notify">Window notifications</legend>
+          <p id="settings-notify-status" class="settings-notify-status" aria-live="polite"></p>
+          <p id="settings-notify-fix" class="settings-notify-fix" hidden></p>
+          <div class="settings-service-actions" id="settings-notify-actions"></div>
+          <span class="settings-field-help" data-i18n="settings.notifyHelp">
+            Diagnoses browser permission issues (especially Safari standalone) and offers fixes.
+          </span>
+        </fieldset>
         <fieldset class="settings-field settings-stations-field">
           <legend class="settings-field-label" data-i18n="settings.stations">Weather stations</legend>
           <div

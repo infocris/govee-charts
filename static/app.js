@@ -196,6 +196,28 @@
   const restartUiBtn = document.getElementById("restart-ui-btn");
   const restartWorkersBtn = document.getElementById("restart-workers-btn");
   const restartStatusEl = document.getElementById("restart-status");
+  const widgetMetricEl = document.getElementById("widget-metric");
+  const widgetPastEl = document.getElementById("widget-past");
+  const widgetFutureEl = document.getElementById("widget-future");
+  const widgetForecastEl = document.getElementById("widget-forecast");
+  const widgetTransparentEl = document.getElementById("widget-transparent");
+  const widgetLegendEl = document.getElementById("widget-legend");
+  const widgetRefreshEl = document.getElementById("widget-refresh");
+  const widgetCurveListEl = document.getElementById("widget-curve-list");
+  const widgetUrlEl = document.getElementById("widget-url");
+  const widgetCopyBtn = document.getElementById("widget-copy-btn");
+  const widgetOpenBtn = document.getElementById("widget-open-btn");
+  const widgetPreviewEl = document.getElementById("widget-preview");
+  const widgetExportStatusEl = document.getElementById("widget-export-status");
+  const foldWidgetExportEl = document.getElementById("fold-widget-export");
+  const widgetCurvesSelectionBtn = document.getElementById(
+    "widget-curves-selection"
+  );
+  const widgetCurvesAllBtn = document.getElementById("widget-curves-all");
+  const widgetCurvesNoneBtn = document.getElementById("widget-curves-none");
+  /** @type {Set<string>} */
+  let widgetSelected = new Set();
+  let widgetPreviewTimer = null;
   const facadeBody = document.getElementById("facade-body");
   const facadeMetaEl = document.getElementById("facade-meta");
   const facadeOutdoorEl = document.getElementById("facade-outdoor");
@@ -317,6 +339,8 @@
   const HVAC_KEY = "govee-charts.hvac";
   const WINDOW_NOTIFY_KEY = "govee-charts.windowNotify";
   const WINDOW_NOTIFY_STATE_KEY = "govee-charts.windowNotifyState";
+  /** "wait" = user wants alerts; "reloaded" = already did one soft reload for Safari. */
+  const WINDOW_NOTIFY_PENDING_KEY = "govee-charts.windowNotifyPending";
   const TTS_KEY = "govee-charts.tts";
   const TTS_VOICE_KEY = "govee-charts.ttsVoice";
   const DOOR_BEEP_KEY = "govee-charts.doorBeep";
@@ -8685,40 +8709,411 @@
   });
   window.addEventListener("focus", clearBadge);
 
-  async function ensureNotifyPermission() {
-    if (!("Notification" in window)) {
-      return "unsupported";
-    }
-    if (!window.isSecureContext) {
-      return "insecure";
-    }
-    if (Notification.permission === "granted") return "granted";
-    if (Notification.permission === "denied") return "denied";
-    const result = await Notification.requestPermission();
-    return result;
+  /** Promise-based permission request; call only from a user gesture on Safari. */
+  function requestNotifyPermission() {
+    const TIMEOUT_MS = 2500;
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (perm) => {
+        if (done) return;
+        done = true;
+        const out = perm || Notification.permission || "denied";
+        console.info("[notify] permission result", out);
+        resolve(out);
+      };
+      try {
+        // Prefer promise API; always race a timeout (Safari can hang after OS Settings).
+        const ret = Notification.requestPermission(finish);
+        if (ret && typeof ret.then === "function") {
+          ret.then(finish, () => finish(Notification.permission));
+        }
+      } catch (err) {
+        console.warn("[notify] requestPermission failed", err);
+        finish(Notification.permission || "denied");
+        return;
+      }
+      setTimeout(() => {
+        console.warn("[notify] requestPermission timed out", Notification.permission);
+        finish(Notification.permission || "denied");
+      }, TIMEOUT_MS);
+    });
   }
 
-  function speak(text, opts = {}) {
-    const force = !!opts.force;
-    if ((!ttsEnabled && !force) || !text) return;
-    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
-      return;
+  /** @type {ServiceWorkerRegistration|null} */
+  let notifySwReg = null;
+
+  async function ensureNotifyServiceWorker() {
+    if (!("serviceWorker" in navigator) || !window.isSecureContext) {
+      return null;
     }
     try {
-      if (force) {
-        window.speechSynthesis.cancel();
+      if (notifySwReg && notifySwReg.active) return notifySwReg;
+      const existing = await navigator.serviceWorker.getRegistration("/");
+      if (existing) {
+        notifySwReg = existing;
+        return existing;
       }
+      const ver = document.querySelector('script[src*="app.js"]')?.src.match(/[?&]v=([^&]+)/)?.[1];
+      const url = ver ? `/sw.js?v=${encodeURIComponent(ver)}` : "/sw.js";
+      notifySwReg = await navigator.serviceWorker.register(url, { scope: "/" });
+      await navigator.serviceWorker.ready;
+      return notifySwReg;
+    } catch (err) {
+      console.warn("Service worker registration failed", err);
+      return null;
+    }
+  }
+
+  // Register early so Safari standalone can show notifications via SW.
+  if ("serviceWorker" in navigator && window.isSecureContext) {
+    ensureNotifyServiceWorker().catch(() => {});
+  }
+
+  // browser-tts skill: Chromium lists Mac voices but often "ghost speaks"
+  // (speaking=true, no onstart, silence). Prefer edge-tts there.
+  const _ua = navigator.userAgent || "";
+  const isChromium = /\bChrome\/|\bChromium\/|\bEdg\//.test(_ua);
+  const isSafari = /\bSafari\//.test(_ua) && !isChromium;
+  const useMacVoices = !isChromium && !!window.speechSynthesis;
+  const EDGE_DEFAULT = { fr: "fr-FR-DeniseNeural", en: "en-US-JennyNeural" };
+
+  /** @type {HTMLAudioElement|null} */
+  let ttsAudioEl = null;
+  /** @type {string|null} */
+  let ttsObjectUrl = null;
+  let ttsSpeakGen = 0;
+  /** @type {Array<{id:string,locale:string,gender:string,name:string}>} */
+  let edgeVoicesCache = [];
+  let edgeVoicesLang = "";
+  let homeTtsEnabled = false;
+  const HOME_TTS_VOICE_ID = "home-tts";
+
+  function ttsLog(...args) {
+    console.info("[tts]", ...args);
+  }
+
+  function defaultEdgeVoice() {
+    const lang = I18n.getLocale() === "en" ? "en" : "fr";
+    return EDGE_DEFAULT[lang] || EDGE_DEFAULT.fr;
+  }
+
+  function isHomeTtsVoice(id) {
+    return String(id || "") === HOME_TTS_VOICE_ID;
+  }
+
+  function browserVoiceId(voice) {
+    return `browser:${encodeURIComponent(`${voice.name}||${voice.lang}`)}`;
+  }
+
+  function parseBrowserVoiceId(id) {
+    if (!String(id || "").startsWith("browser:")) return null;
+    try {
+      const raw = decodeURIComponent(String(id).slice("browser:".length));
+      const sep = raw.lastIndexOf("||");
+      if (sep < 0) return null;
+      return { name: raw.slice(0, sep), lang: raw.slice(sep + 2) };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function migrateStoredTtsVoice() {
+    // Old storage used raw voiceURI; Chromium Mac URIs must migrate to edge.
+    const raw = ttsVoiceURI || "";
+    if (!raw) {
+      ttsVoiceURI = defaultEdgeVoice();
+      try {
+        localStorage.setItem(TTS_VOICE_KEY, ttsVoiceURI);
+      } catch (_) {}
+      return;
+    }
+    if (isHomeTtsVoice(raw)) return;
+    if (raw.startsWith("browser:")) {
+      if (!useMacVoices) {
+        ttsLog("migrate browser voice → edge (Chromium)");
+        ttsVoiceURI = defaultEdgeVoice();
+        try {
+          localStorage.setItem(TTS_VOICE_KEY, ttsVoiceURI);
+        } catch (_) {}
+      }
+      return;
+    }
+    // Legacy voiceURI (not browser:/edge/home-tts id) → edge default on Chromium.
+    if (!raw.includes("-") || raw.includes(" ") || raw.startsWith("com.")) {
+      ttsLog("migrate legacy voiceURI → edge");
+      ttsVoiceURI = defaultEdgeVoice();
+      try {
+        localStorage.setItem(TTS_VOICE_KEY, ttsVoiceURI);
+      } catch (_) {}
+    }
+  }
+
+  function stopTtsAudio() {
+    if (ttsAudioEl) {
+      try {
+        ttsAudioEl.pause();
+        ttsAudioEl.removeAttribute("src");
+        ttsAudioEl.load();
+      } catch (_) {}
+    }
+    if (ttsObjectUrl) {
+      try {
+        URL.revokeObjectURL(ttsObjectUrl);
+      } catch (_) {}
+      ttsObjectUrl = null;
+    }
+  }
+
+  function cancelSpeechIfBusy() {
+    const syn = window.speechSynthesis;
+    // Skill: never cancel() when idle — breaks the next speak() on Chrome.
+    if (syn && (syn.speaking || syn.pending)) {
+      syn.cancel();
+    }
+  }
+
+  function b64ToBlob(b64, mime) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime || "audio/mpeg" });
+  }
+
+  async function fetchEdgeVoices(lang) {
+    const prefix = (lang || I18n.getLocale() || "fr").split("-")[0];
+    if (edgeVoicesLang === prefix && edgeVoicesCache.length) {
+      return edgeVoicesCache;
+    }
+    const res = await fetch(
+      `/api/tts/voices?lang=${encodeURIComponent(prefix)}`
+    );
+    if (!res.ok) throw new Error(`tts voices HTTP ${res.status}`);
+    const data = await res.json();
+    edgeVoicesCache = Array.isArray(data.voices) ? data.voices : [];
+    edgeVoicesLang = prefix;
+    homeTtsEnabled = !!(data.home_tts && data.home_tts.enabled);
+    if (data.default_voice && !ttsVoiceURI) {
+      ttsVoiceURI = data.default_voice;
+    }
+    return edgeVoicesCache;
+  }
+
+  async function speakHomeTts(text, gen) {
+    const lang = I18n.getLocale() === "en" ? "en" : "fr";
+    const res = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        voice: HOME_TTS_VOICE_ID,
+        lang,
+      }),
+    });
+    if (gen !== ttsSpeakGen) return { spoken: false, reason: "interrupted" };
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (gen !== ttsSpeakGen) return { spoken: false, reason: "interrupted" };
+    if (data.play_error) {
+      ttsLog("home-tts play_error", data.play_error);
+    }
+    ttsLog("home-tts ok", {
+      voice: data.voice,
+      played: data.played,
+      channel: data.channel,
+      hasAudio: !!data.audio_base64,
+    });
+    // Play in this browser (same as Home TTS admin UI). Host may also
+    // play=local for speakers attached to the Home TTS machine.
+    if (data.audio_base64) {
+      stopTtsAudio();
+      const blob = b64ToBlob(data.audio_base64, data.mime || "audio/mpeg");
+      ttsObjectUrl = URL.createObjectURL(blob);
+      if (!ttsAudioEl) ttsAudioEl = new Audio();
+      ttsAudioEl.src = ttsObjectUrl;
+      ttsAudioEl.volume = 1;
+      try {
+        await ttsAudioEl.play();
+      } catch (err) {
+        if (err && err.name === "NotAllowedError") {
+          ttsLog("audio blocked — need a user gesture");
+          return {
+            spoken: !!data.played,
+            reason: "NotAllowedError",
+          };
+        }
+        throw err;
+      }
+      return { spoken: true, reason: "" };
+    }
+    return { spoken: !!data.played, reason: data.played ? "" : "no audio" };
+  }
+
+  async function speakEdge(text, voiceId, gen) {
+    const res = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        voice: voiceId || defaultEdgeVoice(),
+      }),
+    });
+    if (gen !== ttsSpeakGen) return { spoken: false, reason: "interrupted" };
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (gen !== ttsSpeakGen) return { spoken: false, reason: "interrupted" };
+    if (!data.audio_base64) throw new Error("empty audio");
+    stopTtsAudio();
+    const blob = b64ToBlob(data.audio_base64, data.mime || "audio/mpeg");
+    ttsObjectUrl = URL.createObjectURL(blob);
+    if (!ttsAudioEl) ttsAudioEl = new Audio();
+    ttsAudioEl.src = ttsObjectUrl;
+    ttsAudioEl.volume = 1;
+    try {
+      await ttsAudioEl.play();
+    } catch (err) {
+      if (err && err.name === "NotAllowedError") {
+        ttsLog("audio blocked — need a user gesture");
+        return { spoken: false, reason: "NotAllowedError" };
+      }
+      throw err;
+    }
+    return { spoken: true, reason: "" };
+  }
+
+  /**
+   * Web Speech path (Safari / non-Chromium). Detects ghost speaking.
+   * @returns {Promise<{spoken:boolean, ghost?:boolean, reason?:string}>}
+   */
+  function speakBrowser(text, voiceId) {
+    return new Promise((resolve) => {
+      if (!useMacVoices || !window.speechSynthesis) {
+        resolve({ spoken: false, reason: "no mac voices" });
+        return;
+      }
+      const syn = window.speechSynthesis;
       const utter = new SpeechSynthesisUtterance(text);
-      const voice = ttsVoiceURI
-        ? window.speechSynthesis
-            .getVoices()
-            .find((v) => v.voiceURI === ttsVoiceURI)
-        : null;
+      const parsed = parseBrowserVoiceId(voiceId);
+      let voice = null;
+      if (parsed) {
+        voice = syn
+          .getVoices()
+          .find(
+            (v) =>
+              v.name === parsed.name &&
+              normalizeVoiceLang(v.lang) === normalizeVoiceLang(parsed.lang)
+          );
+      }
       utter.lang = voice ? voice.lang : I18n.speechLang();
       if (voice) utter.voice = voice;
-      window.speechSynthesis.speak(utter);
+
+      let started = false;
+      let settled = false;
+      const done = (result) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+      utter.onstart = () => {
+        started = true;
+        ttsLog("browser onstart");
+      };
+      utter.onend = () => done({ spoken: started, reason: started ? "" : "silent" });
+      utter.onerror = (ev) => {
+        const err = (ev && ev.error) || "error";
+        if (err === "canceled" || err === "interrupted") {
+          done({ spoken: false, reason: err });
+          return;
+        }
+        done({ spoken: false, reason: err });
+      };
+
+      try {
+        syn.speak(utter);
+      } catch (err) {
+        done({ spoken: false, reason: String(err) });
+        return;
+      }
+
+      setTimeout(() => {
+        if (started || settled) return;
+        const ghost = syn.speaking || syn.pending;
+        ttsLog("browser ghost/silent", { ghost, speaking: syn.speaking });
+        if (ghost) cancelSpeechIfBusy();
+        done({ spoken: false, ghost: !!ghost, reason: ghost ? "ghost" : "silent" });
+      }, 700);
+    });
+  }
+
+  async function speak(text, opts = {}) {
+    const force = !!opts.force;
+    if ((!ttsEnabled && !force) || !text) return;
+    const cleaned = String(text).trim();
+    if (!cleaned) return;
+
+    ttsSpeakGen += 1;
+    const gen = ttsSpeakGen;
+    cancelSpeechIfBusy();
+    stopTtsAudio();
+
+    migrateStoredTtsVoice();
+    let voiceId = ttsVoiceURI || defaultEdgeVoice();
+    if (voiceId.startsWith("browser:") && !useMacVoices) {
+      voiceId = defaultEdgeVoice();
+    }
+    if (isHomeTtsVoice(voiceId) && !homeTtsEnabled) {
+      ttsLog("home-tts not configured — falling back to edge");
+      voiceId = defaultEdgeVoice();
+    }
+
+    const engine = isHomeTtsVoice(voiceId)
+      ? "home-tts"
+      : voiceId.startsWith("browser:")
+        ? "browser"
+        : "edge";
+    ttsLog("speak", {
+      engine,
+      voiceId,
+      isChromium,
+      useMacVoices,
+    });
+
+    try {
+      if (isHomeTtsVoice(voiceId)) {
+        await speakHomeTts(cleaned, gen);
+        return;
+      }
+      if (voiceId.startsWith("browser:") && useMacVoices) {
+        const result = await speakBrowser(cleaned, voiceId);
+        if (gen !== ttsSpeakGen) return;
+        if (result.spoken) return;
+        if (result.ghost || result.reason === "silent") {
+          ttsLog("fallback edge after ghost");
+          await speakEdge(cleaned, defaultEdgeVoice(), gen);
+        }
+        return;
+      }
+      await speakEdge(cleaned, voiceId, gen);
     } catch (err) {
-      console.warn("Speech synthesis failed", err);
+      console.warn("[tts] speak failed", err);
+      // Chromium: never fall back to Web Speech if edge fails.
+      // Home TTS: do not fall back to browser audio (user chose house speakers).
+      if (
+        useMacVoices &&
+        !voiceId.startsWith("browser:") &&
+        !isHomeTtsVoice(voiceId)
+      ) {
+        try {
+          await speakBrowser(cleaned, null);
+        } catch (err2) {
+          console.warn("[tts] browser fallback failed", err2);
+        }
+      }
     }
   }
 
@@ -8783,52 +9178,108 @@
   }
 
   function populateTtsVoiceOptions() {
-    if (!ttsVoiceSelectEl || !("speechSynthesis" in window)) return;
-    const voices = window.speechSynthesis.getVoices();
-    if (!voices.length) {
-      // Safari often fires no "voiceschanged" event and returns an empty
-      // list on the very first call — retry for a few seconds.
-      if (ttsVoicePollAttempts < 20) {
+    if (!ttsVoiceSelectEl) return;
+    // Async fill (edge + optional Mac). Keep sync entry for voiceschanged.
+    populateTtsVoiceOptionsAsync().catch((err) =>
+      console.warn("[tts] populate voices failed", err)
+    );
+  }
+
+  async function populateTtsVoiceOptionsAsync() {
+    if (!ttsVoiceSelectEl) return;
+    migrateStoredTtsVoice();
+    const locale = I18n.getLocale();
+    const previousValue = ttsVoiceSelectEl.value || ttsVoiceURI;
+
+    let edgeVoices = [];
+    try {
+      edgeVoices = await fetchEdgeVoices(locale);
+    } catch (err) {
+      console.warn("[tts] edge voices unavailable", err);
+    }
+
+    /** @type {SpeechSynthesisVoice[]} */
+    let macVoices = [];
+    if (useMacVoices && window.speechSynthesis) {
+      macVoices = window.speechSynthesis.getVoices();
+      if (!macVoices.length && ttsVoicePollAttempts < 20) {
         ttsVoicePollAttempts += 1;
         setTimeout(populateTtsVoiceOptions, 250);
+      } else {
+        ttsVoicePollAttempts = 20;
       }
-      return;
+      macVoices = macVoices
+        .filter((v) => voiceMatchesLocale(v, locale))
+        .sort((a, b) =>
+          `${a.lang} ${a.name}`.localeCompare(`${b.lang} ${b.name}`, locale)
+        );
     }
-    ttsVoicePollAttempts = 20;
-    const locale = I18n.getLocale();
-    const matching = [...voices]
-      .filter((v) => voiceMatchesLocale(v, locale))
-      .sort((a, b) =>
-        `${a.lang} ${a.name}`.localeCompare(
-          `${b.lang} ${b.name}`,
-          locale
-        )
-      );
 
-    const previousValue = ttsVoiceSelectEl.value;
     ttsVoiceSelectEl.innerHTML = "";
-    const defaultOpt = document.createElement("option");
-    defaultOpt.value = "";
-    defaultOpt.textContent = t("tts.voiceDefault");
-    ttsVoiceSelectEl.appendChild(defaultOpt);
-    for (const v of matching) {
-      const opt = document.createElement("option");
-      opt.value = v.voiceURI;
-      opt.textContent = `${v.name} (${v.lang || "?"})`;
-      ttsVoiceSelectEl.appendChild(opt);
+
+    if (homeTtsEnabled) {
+      const homeGroup = document.createElement("optgroup");
+      homeGroup.label = t("tts.groupHome");
+      const homeOpt = document.createElement("option");
+      homeOpt.value = HOME_TTS_VOICE_ID;
+      homeOpt.textContent = t("tts.homeSpeakers");
+      homeGroup.appendChild(homeOpt);
+      ttsVoiceSelectEl.appendChild(homeGroup);
     }
 
-    const wanted = previousValue || ttsVoiceURI;
-    const stillValid = matching.some((v) => v.voiceURI === wanted);
-    if (wanted && !stillValid) {
-      ttsVoiceURI = "";
-      try {
-        localStorage.setItem(TTS_VOICE_KEY, "");
-      } catch (_) {
-        /* ignore */
+    if (useMacVoices && macVoices.length) {
+      const macGroup = document.createElement("optgroup");
+      macGroup.label = t("tts.groupMac");
+      for (const v of macVoices) {
+        const opt = document.createElement("option");
+        opt.value = browserVoiceId(v);
+        opt.textContent = `${v.name} (${v.lang || "?"})`;
+        macGroup.appendChild(opt);
+      }
+      ttsVoiceSelectEl.appendChild(macGroup);
+    }
+
+    const edgeGroup = document.createElement("optgroup");
+    edgeGroup.label = t("tts.groupServer");
+    if (!edgeVoices.length) {
+      const opt = document.createElement("option");
+      opt.value = defaultEdgeVoice();
+      opt.textContent = defaultEdgeVoice();
+      edgeGroup.appendChild(opt);
+    } else {
+      for (const v of edgeVoices) {
+        const opt = document.createElement("option");
+        opt.value = v.id;
+        const short = v.id.replace(/^[a-z]{2}-[A-Z]{2}-/, "");
+        const gender = v.gender ? ` · ${String(v.gender)[0]}` : "";
+        opt.textContent = `${short} (${v.locale}${gender})`;
+        edgeGroup.appendChild(opt);
       }
     }
-    ttsVoiceSelectEl.value = stillValid ? wanted : "";
+    ttsVoiceSelectEl.appendChild(edgeGroup);
+
+    const validIds = new Set(
+      [...ttsVoiceSelectEl.querySelectorAll("option")].map((o) => o.value)
+    );
+    let wanted = previousValue || ttsVoiceURI || defaultEdgeVoice();
+    if (wanted.startsWith("browser:") && !useMacVoices) {
+      wanted = defaultEdgeVoice();
+    }
+    if (isHomeTtsVoice(wanted) && !homeTtsEnabled) {
+      wanted = defaultEdgeVoice();
+    }
+    if (!validIds.has(wanted)) {
+      wanted = defaultEdgeVoice();
+      if (!validIds.has(wanted) && edgeVoices[0]) wanted = edgeVoices[0].id;
+      if (!validIds.has(wanted) && homeTtsEnabled) wanted = HOME_TTS_VOICE_ID;
+    }
+    ttsVoiceURI = wanted;
+    ttsVoiceSelectEl.value = wanted;
+    try {
+      localStorage.setItem(TTS_VOICE_KEY, ttsVoiceURI);
+    } catch (_) {
+      /* ignore */
+    }
   }
 
   function sendWindowNotification(title, body, tag) {
@@ -8838,19 +9289,31 @@
     if (!("Notification" in window) || Notification.permission !== "granted") {
       return;
     }
-    try {
-      const n = new Notification(title, {
-        body,
-        tag: tag || "govee-window",
-        renotify: true,
-      });
-      n.onclick = () => {
-        window.focus();
-        n.close();
-      };
-    } catch (err) {
-      console.warn("Notification failed", err);
-    }
+    const opts = {
+      body: body || "",
+      tag: tag || "govee-window",
+    };
+    // Safari / WebKit PWA: prefer SW showNotification (new Notification is flaky).
+    void (async () => {
+      try {
+        const reg = await ensureNotifyServiceWorker();
+        if (reg && typeof reg.showNotification === "function") {
+          await reg.showNotification(title, opts);
+          return;
+        }
+      } catch (err) {
+        console.warn("SW notification failed", err);
+      }
+      try {
+        const n = new Notification(title, opts);
+        n.onclick = () => {
+          window.focus();
+          n.close();
+        };
+      } catch (err) {
+        console.warn("Notification failed", err);
+      }
+    })();
   }
 
   /**
@@ -10212,6 +10675,134 @@
     }
 
     persistSelection();
+    renderWidgetCurveList();
+  }
+
+  function syncWidgetRangeFromCompare() {
+    if (widgetPastEl) {
+      const past = isCustomRange()
+        ? Math.max(1, Math.round((customUntil - customSince) / 3600))
+        : hours;
+      const pastOpt = [...widgetPastEl.options].find(
+        (o) => Number(o.value) === Number(past)
+      );
+      if (pastOpt) {
+        widgetPastEl.value = pastOpt.value;
+      } else if (past > 0) {
+        let best = widgetPastEl.options[0];
+        let bestDiff = Infinity;
+        for (const o of widgetPastEl.options) {
+          const d = Math.abs(Number(o.value) - past);
+          if (d < bestDiff) {
+            bestDiff = d;
+            best = o;
+          }
+        }
+        widgetPastEl.value = best.value;
+      }
+    }
+    if (widgetFutureEl) {
+      const fut = Number(forecastFutureHours) || 0;
+      const futOpt = [...widgetFutureEl.options].find(
+        (o) => Number(o.value) === fut
+      );
+      if (futOpt) widgetFutureEl.value = futOpt.value;
+    }
+    if (widgetForecastEl) {
+      widgetForecastEl.checked =
+        !!showForecast && Number(widgetFutureEl?.value || 0) > 0;
+    }
+  }
+
+  function renderWidgetCurveList() {
+    if (!widgetCurveListEl) return;
+    const visible = filteredDevices();
+    const previous = new Set(widgetSelected);
+    widgetCurveListEl.innerHTML = "";
+    if (!visible.length) {
+      widgetSelected = new Set();
+      updateWidgetExport();
+      return;
+    }
+    const known = new Set(visible.map((d) => d.address));
+    widgetSelected = new Set([...previous].filter((a) => known.has(a)));
+    if (!widgetSelected.size) {
+      for (const d of selectedDevices()) widgetSelected.add(d.address);
+    }
+    if (!widgetSelected.size && visible[0]) {
+      widgetSelected.add(visible[0].address);
+    }
+
+    for (const d of visible) {
+      const id = `widget-curve-${d.address.replaceAll(":", "")}`;
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.id = id;
+      input.value = d.address;
+      input.checked = widgetSelected.has(d.address);
+      input.addEventListener("change", () => {
+        if (input.checked) widgetSelected.add(d.address);
+        else widgetSelected.delete(d.address);
+        updateWidgetExport();
+      });
+      const text = document.createElement("span");
+      text.textContent = deviceLabel(d);
+      text.style.color = colorFor(d.address);
+      label.append(input, text);
+      widgetCurveListEl.appendChild(label);
+    }
+    updateWidgetExport();
+  }
+
+  function buildWidgetUrl() {
+    const addrs = [...widgetSelected];
+    if (!addrs.length) return "";
+    const q = new URLSearchParams();
+    q.set("metric", (widgetMetricEl && widgetMetricEl.value) || "temp");
+    q.set("addr", addrs.join(","));
+    q.set("past", String((widgetPastEl && widgetPastEl.value) || "24"));
+    const future = Number((widgetFutureEl && widgetFutureEl.value) || 0);
+    q.set("future", String(future));
+    const forecastOn =
+      widgetForecastEl && widgetForecastEl.checked && future > 0;
+    q.set("forecast", forecastOn ? "1" : "0");
+    q.set(
+      "transparent",
+      widgetTransparentEl && widgetTransparentEl.checked ? "1" : "0"
+    );
+    q.set("legend", widgetLegendEl && !widgetLegendEl.checked ? "0" : "1");
+    const refresh = Number((widgetRefreshEl && widgetRefreshEl.value) || 0);
+    if (refresh > 0) q.set("refresh", String(refresh));
+    return `${window.location.origin}/widget?${q.toString()}`;
+  }
+
+  function updateWidgetExport() {
+    if (!widgetUrlEl) return;
+    const url = buildWidgetUrl();
+    widgetUrlEl.value = url;
+    if (widgetOpenBtn) {
+      widgetOpenBtn.href = url || "/widget";
+      widgetOpenBtn.toggleAttribute("aria-disabled", !url);
+    }
+    if (widgetExportStatusEl) {
+      widgetExportStatusEl.textContent = url
+        ? ""
+        : t("compare.widget.needCurves");
+    }
+    if (widgetPreviewEl) {
+      if (widgetPreviewTimer) clearTimeout(widgetPreviewTimer);
+      widgetPreviewTimer = setTimeout(() => {
+        if (!url) {
+          widgetPreviewEl.removeAttribute("src");
+          return;
+        }
+        if (foldWidgetExportEl && !foldWidgetExportEl.open) return;
+        if (widgetPreviewEl.getAttribute("src") !== url) {
+          widgetPreviewEl.src = url;
+        }
+      }, 350);
+    }
   }
 
   async function loadDevices() {
@@ -10776,6 +11367,12 @@
     );
     persistSelection();
     updateCurrent();
+    // Keep widget curves in sync with Compare selection when the export panel
+    // is closed (user is still picking sensors); leave manual picks alone when open.
+    if (!foldWidgetExportEl || !foldWidgetExportEl.open) {
+      widgetSelected = new Set(selected);
+      renderWidgetCurveList();
+    }
     loadHistory().catch((err) => {
       statusEl.textContent = `Error: ${err.message}`;
     });
@@ -11142,22 +11739,466 @@
   function syncWindowNotifyBtn() {
     if (!windowNotifyEl) return;
     windowNotifyEl.setAttribute("aria-pressed", windowNotify ? "true" : "false");
-    windowNotifyEl.title = windowNotify
-      ? t("windowNotify.on")
-      : t("windowNotify.off");
+    const diag = diagnoseWindowNotify();
+    let title = windowNotify ? t("windowNotify.on") : t("windowNotify.off");
+    if (!windowNotify && diag.code !== "ok" && diag.code !== "granted_off") {
+      title = diag.status;
+    } else if (!windowNotify && diag.code === "granted_off") {
+      title = t("windowNotify.readyClick");
+    }
+    windowNotifyEl.title = title;
     windowNotifyEl.setAttribute(
       "aria-label",
       windowNotify ? t("windowNotify.disable") : t("windowNotify.enable")
     );
   }
 
+  function isNotifyStandalone() {
+    return (
+      window.matchMedia("(display-mode: standalone)").matches ||
+      window.navigator.standalone === true
+    );
+  }
+
+  function notifyHttpsHintUrl() {
+    if (location.protocol === "https:") return location.origin;
+    const host = location.hostname || "127.0.0.1";
+    return `https://${host}:8081`;
+  }
+
+  /**
+   * Detect notification problems and propose fixes (Safari standalone friendly).
+   * @returns {{
+   *   ok: boolean,
+   *   code: string,
+   *   tone: "ok"|"warn"|"bad",
+   *   status: string,
+   *   fix: string,
+   *   actions: string[]
+   * }}
+   */
+  function diagnoseWindowNotify() {
+    const standalone = isNotifyStandalone();
+    const secure = !!window.isSecureContext;
+    const hasApi = "Notification" in window;
+    const hasSw = "serviceWorker" in navigator;
+    const perm = hasApi ? Notification.permission : "missing";
+    const pending = getWindowNotifyPending();
+    const httpsUrl = notifyHttpsHintUrl();
+
+    if (!hasApi) {
+      return {
+        ok: false,
+        code: "unsupported",
+        tone: "bad",
+        status: t("windowNotify.diag.unsupported.status"),
+        fix: t("windowNotify.diag.unsupported.fix"),
+        actions: [],
+      };
+    }
+    if (!secure) {
+      return {
+        ok: false,
+        code: "insecure",
+        tone: "bad",
+        status: t("windowNotify.diag.insecure.status"),
+        fix: t("windowNotify.diag.insecure.fix", { url: httpsUrl }),
+        actions: ["copyHttps", "reload"],
+      };
+    }
+    if (perm === "denied") {
+      return {
+        ok: false,
+        code: "denied",
+        tone: "bad",
+        status: t("windowNotify.diag.denied.status"),
+        fix: t(
+          pending === "reloaded"
+            ? "windowNotify.diag.denied.fixQuit"
+            : "windowNotify.diag.denied.fix",
+          { app: "Govee Charts" }
+        ),
+        actions: pending === "reloaded" ? ["reload"] : ["reload", "retry"],
+      };
+    }
+    if (perm === "default") {
+      return {
+        ok: false,
+        code: "prompt",
+        tone: "warn",
+        status: t("windowNotify.diag.prompt.status"),
+        fix: t("windowNotify.diag.prompt.fix"),
+        actions: ["enable"],
+      };
+    }
+    if (perm === "granted" && !windowNotify) {
+      return {
+        ok: true,
+        code: "granted_off",
+        tone: "warn",
+        status: t("windowNotify.diag.grantedOff.status"),
+        fix: t("windowNotify.diag.grantedOff.fix"),
+        actions: ["enable"],
+      };
+    }
+    if (!hasSw) {
+      return {
+        ok: true,
+        code: "no_sw",
+        tone: "warn",
+        status: t("windowNotify.diag.noSw.status"),
+        fix: t("windowNotify.diag.noSw.fix"),
+        actions: ["test", "reload"],
+      };
+    }
+    if (!standalone) {
+      return {
+        ok: true,
+        code: "browser_tab",
+        tone: "ok",
+        status: t("windowNotify.diag.okTab.status"),
+        fix: t("windowNotify.diag.okTab.fix"),
+        actions: ["test", "disable"],
+      };
+    }
+    return {
+      ok: true,
+      code: "ok",
+      tone: "ok",
+      status: t("windowNotify.diag.ok.status"),
+      fix: t("windowNotify.diag.ok.fix"),
+      actions: ["test", "disable"],
+    };
+  }
+
+  function showWindowNotifyHint(code, extraFix) {
+    const diag = diagnoseWindowNotify();
+    const key =
+      code === "unsupported"
+        ? "windowNotify.unsupported"
+        : code === "insecure"
+          ? "windowNotify.insecure"
+          : code === "denied"
+            ? "windowNotify.denied"
+            : code === "pending"
+              ? "windowNotify.pending"
+              : code === "ready"
+                ? "windowNotify.ready"
+                : code === "reloading"
+                  ? "windowNotify.reloading"
+                  : "windowNotify.blocked";
+    const status = code === "ready" ? t("windowNotify.ready") : t(key);
+    const fix =
+      extraFix ||
+      (code === "ready" || code === "pending" || code === "reloading"
+        ? ""
+        : diag.fix);
+    const detail = fix ? `${status}\n\n${fix}` : status;
+    console.info("[notify] hint", code, { status, fix, diag });
+    if (geoStatusEl) geoStatusEl.textContent = status;
+    if (statusEl) statusEl.textContent = status;
+    if (overviewStatus) overviewStatus.textContent = status;
+    const banner = document.getElementById("window-banner");
+    const titleEl = document.getElementById("window-banner-title");
+    const detailEl = document.getElementById("window-banner-detail");
+    if (banner && titleEl) {
+      banner.classList.add("notify-fix-banner");
+      titleEl.textContent = t("windowNotify.title");
+      if (detailEl) detailEl.textContent = detail;
+      banner.hidden = false;
+    }
+    if (windowNotifyEl) windowNotifyEl.title = status;
+    renderSettingsNotify();
+  }
+
+  function setWindowNotifyPending(value) {
+    try {
+      if (!value) localStorage.removeItem(WINDOW_NOTIFY_PENDING_KEY);
+      else localStorage.setItem(WINDOW_NOTIFY_PENDING_KEY, value);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function getWindowNotifyPending() {
+    try {
+      return localStorage.getItem(WINDOW_NOTIFY_PENDING_KEY) || "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function softReloadForNotify() {
+    const url = new URL(window.location.href);
+    url.searchParams.set("_notify", String(Date.now()));
+    window.location.replace(url.pathname + url.search + url.hash);
+  }
+
+  function activateWindowNotify() {
+    windowNotify = true;
+    localStorage.setItem(WINDOW_NOTIFY_KEY, "1");
+    setWindowNotifyPending("");
+    syncWindowNotifyBtn();
+    console.info("[notify] enabled");
+    renderSettingsNotify();
+    ensureNotifyServiceWorker()
+      .then(() => evaluateWindowNotifications(null))
+      .catch((err) => console.warn("[notify] evaluate failed", err));
+  }
+
+  function testWindowNotify() {
+    sendWindowNotification(
+      t("windowNotify.testTitle"),
+      t("windowNotify.testBody"),
+      "govee-window-test"
+    );
+  }
+
+  /**
+   * Safari standalone often keeps a stale Notification.permission after the user
+   * flips the OS toggle — a document reload usually picks up "granted" without
+   * quitting the web app. Auto-enable once permission is visible.
+   * @param {{allowSoftReload?: boolean}} [opts]
+   */
+  function recoverWindowNotifyPermission(opts) {
+    if (!("Notification" in window)) return;
+    const allowSoftReload = !!(opts && opts.allowSoftReload);
+    const pending = getWindowNotifyPending();
+    const perm = Notification.permission;
+    console.info("[notify] recover", {
+      pending,
+      perm,
+      windowNotify,
+      allowSoftReload,
+    });
+
+    if (perm === "granted") {
+      if (pending || !windowNotify) {
+        activateWindowNotify();
+        showWindowNotifyHint("ready");
+      } else {
+        syncWindowNotifyBtn();
+        renderSettingsNotify();
+      }
+      return;
+    }
+
+    if (!pending) {
+      renderSettingsNotify();
+      return;
+    }
+
+    // Still not granted after returning from Settings — soft-reload once.
+    if (pending === "wait" && allowSoftReload) {
+      setWindowNotifyPending("reloaded");
+      showWindowNotifyHint("reloading");
+      console.info("[notify] soft-reload to refresh permission");
+      setTimeout(softReloadForNotify, 450);
+      return;
+    }
+
+    if (pending === "reloaded") {
+      showWindowNotifyHint("denied");
+      return;
+    }
+
+    renderSettingsNotify();
+  }
+
+  function runNotifyDiagAction(action) {
+    console.info("[notify] action", action);
+    if (action === "enable") {
+      onWindowNotifyClick();
+      return;
+    }
+    if (action === "disable") {
+      if (windowNotify) onWindowNotifyClick();
+      else renderSettingsNotify();
+      return;
+    }
+    if (action === "retry") {
+      setWindowNotifyPending("wait");
+      if (Notification.permission === "granted") {
+        activateWindowNotify();
+        return;
+      }
+      if (Notification.permission === "default") {
+        const pending = requestNotifyPermission();
+        Promise.resolve(pending).then((perm) => {
+          if (perm === "granted") activateWindowNotify();
+          else {
+            showWindowNotifyHint(perm === "denied" ? "denied" : "blocked");
+          }
+        });
+        return;
+      }
+      showWindowNotifyHint("denied");
+      return;
+    }
+    if (action === "reload") {
+      if (getWindowNotifyPending() === "wait") {
+        setWindowNotifyPending("reloaded");
+      }
+      showWindowNotifyHint("reloading");
+      setTimeout(softReloadForNotify, 250);
+      return;
+    }
+    if (action === "test") {
+      if (Notification.permission !== "granted") {
+        showWindowNotifyHint("denied");
+        return;
+      }
+      if (!windowNotify) activateWindowNotify();
+      testWindowNotify();
+      return;
+    }
+    if (action === "copyHttps") {
+      const url = notifyHttpsHintUrl();
+      const done = () => {
+        showWindowNotifyHint(
+          "insecure",
+          t("windowNotify.diag.insecure.copied", { url })
+        );
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(done).catch(done);
+      } else {
+        done();
+      }
+    }
+  }
+
+  function renderSettingsNotify() {
+    const statusElN = document.getElementById("settings-notify-status");
+    const fixEl = document.getElementById("settings-notify-fix");
+    const actionsEl = document.getElementById("settings-notify-actions");
+    if (!statusElN || !actionsEl) return;
+    const diag = diagnoseWindowNotify();
+    statusElN.textContent = diag.status;
+    statusElN.dataset.tone = diag.tone;
+    if (fixEl) {
+      fixEl.textContent = diag.fix || "";
+      fixEl.hidden = !diag.fix;
+    }
+    actionsEl.replaceChildren();
+    const labels = {
+      enable: t("windowNotify.action.enable"),
+      disable: t("windowNotify.action.disable"),
+      retry: t("windowNotify.action.retry"),
+      reload: t("windowNotify.action.reload"),
+      test: t("windowNotify.action.test"),
+      copyHttps: t("windowNotify.action.copyHttps"),
+    };
+    for (const action of diag.actions) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "backfill-btn";
+      btn.textContent = labels[action] || action;
+      btn.addEventListener("click", () => runNotifyDiagAction(action));
+      actionsEl.appendChild(btn);
+    }
+  }
+
+  function onWindowNotifyClick() {
+    const permNow =
+      "Notification" in window ? Notification.permission : "missing";
+    console.info("[notify] click", {
+      windowNotify,
+      permission: permNow,
+      secure: !!window.isSecureContext,
+      standalone: isNotifyStandalone(),
+    });
+    if (windowNotify) {
+      windowNotify = false;
+      localStorage.setItem(WINDOW_NOTIFY_KEY, "0");
+      setWindowNotifyPending("");
+      syncWindowNotifyBtn();
+      renderSettingsNotify();
+      console.info("[notify] disabled");
+      return;
+    }
+    if (!("Notification" in window)) {
+      showWindowNotifyHint("unsupported");
+      syncWindowNotifyBtn();
+      return;
+    }
+    if (!window.isSecureContext) {
+      showWindowNotifyHint("insecure");
+      syncWindowNotifyBtn();
+      return;
+    }
+    if (Notification.permission === "granted") {
+      activateWindowNotify();
+      showWindowNotifyHint("ready");
+      return;
+    }
+    // User intends to enable — remember so return-from-Settings can finish the job.
+    setWindowNotifyPending("wait");
+    if (Notification.permission === "denied") {
+      windowNotify = false;
+      localStorage.setItem(WINDOW_NOTIFY_KEY, "0");
+      syncWindowNotifyBtn();
+      showWindowNotifyHint("denied");
+      return;
+    }
+    showWindowNotifyHint("pending");
+    // Synchronous call from the click handler (do not await anything before this).
+    const pending = requestNotifyPermission();
+    Promise.resolve(pending).then((perm) => {
+      if (perm === "granted") {
+        activateWindowNotify();
+        showWindowNotifyHint("ready");
+        return;
+      }
+      windowNotify = false;
+      localStorage.setItem(WINDOW_NOTIFY_KEY, "0");
+      setWindowNotifyPending("wait");
+      syncWindowNotifyBtn();
+      showWindowNotifyHint(perm === "denied" ? "denied" : "blocked");
+    });
+  }
+
+  // Wire the bell immediately (before TTS/other init that might throw).
+  try {
+    if (windowNotifyEl) {
+      syncWindowNotifyBtn();
+      windowNotifyEl.addEventListener("click", onWindowNotifyClick);
+      console.info("[notify] handler ready");
+      let notifyWasHidden = document.visibilityState === "hidden";
+      const onForeground = () => {
+        const hidden = document.visibilityState === "hidden";
+        const returning = notifyWasHidden && !hidden;
+        notifyWasHidden = hidden;
+        if (hidden) return;
+        syncWindowNotifyBtn();
+        recoverWindowNotifyPermission({ allowSoftReload: returning });
+      };
+      document.addEventListener("visibilitychange", onForeground);
+      window.addEventListener("focus", () => {
+        if (document.visibilityState === "hidden") return;
+        syncWindowNotifyBtn();
+        recoverWindowNotifyPermission({ allowSoftReload: false });
+      });
+      window.addEventListener("pageshow", (ev) => {
+        recoverWindowNotifyPermission({
+          allowSoftReload: false,
+          fromPageShow: true,
+        });
+        // After our soft-reload, pending is "reloaded" — finish enable if granted.
+        if (ev.persisted) syncWindowNotifyBtn();
+      });
+      if (getWindowNotifyPending()) {
+        recoverWindowNotifyPermission({ allowSoftReload: false });
+      }
+    }
+    renderSettingsNotify();
+  } catch (err) {
+    console.error("[notify] failed to wire bell", err);
+  }
+
   function syncTtsBtn() {
     if (!ttsEl) return;
     ttsEl.setAttribute("aria-pressed", ttsEnabled ? "true" : "false");
-    if (!("speechSynthesis" in window)) {
-      ttsEl.title = t("tts.unsupported");
-      return;
-    }
     ttsEl.title = ttsEnabled ? t("tts.on") : t("tts.off");
     ttsEl.setAttribute(
       "aria-label",
@@ -11166,33 +12207,30 @@
   }
 
   if (ttsEl) {
-    if (!("speechSynthesis" in window)) {
-      ttsEl.disabled = true;
-      ttsEl.title = t("tts.unsupported");
-    } else {
-      populateTtsVoiceOptions();
+    populateTtsVoiceOptions();
+    if (useMacVoices && window.speechSynthesis) {
       window.speechSynthesis.addEventListener?.(
         "voiceschanged",
         populateTtsVoiceOptions
       );
-      syncTtsBtn();
-      ttsEl.addEventListener("click", () => {
-        ttsEnabled = !ttsEnabled;
-        localStorage.setItem(TTS_KEY, ttsEnabled ? "1" : "0");
-        syncTtsBtn();
-        // A user gesture sometimes unblocks Safari's voice list.
-        ttsVoicePollAttempts = 0;
-        populateTtsVoiceOptions();
-        if (ttsEnabled) speak(t("tts.enabledSpeak"));
-      });
     }
+    syncTtsBtn();
+    ttsEl.addEventListener("click", () => {
+      ttsEnabled = !ttsEnabled;
+      localStorage.setItem(TTS_KEY, ttsEnabled ? "1" : "0");
+      syncTtsBtn();
+      ttsVoicePollAttempts = 0;
+      populateTtsVoiceOptions();
+      if (ttsEnabled) speak(t("tts.enabledSpeak"), { force: true });
+    });
   }
 
   if (ttsVoiceSelectEl) {
     ttsVoiceSelectEl.addEventListener("change", () => {
       ttsVoiceURI = ttsVoiceSelectEl.value;
       localStorage.setItem(TTS_VOICE_KEY, ttsVoiceURI);
-      speak(t("tts.enabledSpeak"));
+      // Same user gesture: unlock audio + speak (Safari Mac / edge play()).
+      speak(t("tts.enabledSpeak"), { force: true });
     });
   }
 
@@ -11232,36 +12270,6 @@
       localStorage.setItem(DOOR_BEEP_KEY, doorBeepEnabled ? "1" : "0");
       syncDoorBeepBtn();
       if (doorBeepEnabled) beepDoor(true);
-    });
-  }
-
-  if (windowNotifyEl) {
-    syncWindowNotifyBtn();
-    windowNotifyEl.addEventListener("click", async () => {
-      if (!windowNotify) {
-        const perm = await ensureNotifyPermission();
-        if (perm === "granted") {
-          windowNotify = true;
-          localStorage.setItem(WINDOW_NOTIFY_KEY, "1");
-          syncWindowNotifyBtn();
-          evaluateWindowNotifications(null).catch((err) => console.warn(err));
-        } else {
-          windowNotify = false;
-          localStorage.setItem(WINDOW_NOTIFY_KEY, "0");
-          syncWindowNotifyBtn();
-          let hint = "Notifications blocked by the browser.";
-          if (perm === "unsupported") hint = "Notifications not supported.";
-          if (perm === "insecure") {
-            hint = "Notifications need HTTPS (or localhost).";
-          }
-          if (geoStatusEl) geoStatusEl.textContent = hint;
-          else if (statusEl) statusEl.textContent = hint;
-        }
-      } else {
-        windowNotify = false;
-        localStorage.setItem(WINDOW_NOTIFY_KEY, "0");
-        syncWindowNotifyBtn();
-      }
     });
   }
 
@@ -11821,6 +12829,88 @@
     });
   }
 
+  function bindWidgetExportControls() {
+    const controls = [
+      widgetMetricEl,
+      widgetPastEl,
+      widgetFutureEl,
+      widgetForecastEl,
+      widgetTransparentEl,
+      widgetLegendEl,
+      widgetRefreshEl,
+    ];
+    for (const el of controls) {
+      if (!el) continue;
+      el.addEventListener("change", () => {
+        if (el === widgetFutureEl && widgetForecastEl) {
+          if (Number(widgetFutureEl.value) === 0) {
+            widgetForecastEl.checked = false;
+          } else if (!widgetForecastEl.checked) {
+            widgetForecastEl.checked = true;
+          }
+        }
+        updateWidgetExport();
+      });
+    }
+    if (widgetCurvesSelectionBtn) {
+      widgetCurvesSelectionBtn.addEventListener("click", () => {
+        widgetSelected = new Set(selectedDevices().map((d) => d.address));
+        renderWidgetCurveList();
+      });
+    }
+    if (widgetCurvesAllBtn) {
+      widgetCurvesAllBtn.addEventListener("click", () => {
+        widgetSelected = new Set(filteredDevices().map((d) => d.address));
+        renderWidgetCurveList();
+      });
+    }
+    if (widgetCurvesNoneBtn) {
+      widgetCurvesNoneBtn.addEventListener("click", () => {
+        widgetSelected = new Set();
+        renderWidgetCurveList();
+      });
+    }
+    if (widgetCopyBtn) {
+      widgetCopyBtn.addEventListener("click", async () => {
+        const url = buildWidgetUrl();
+        if (!url) {
+          if (widgetExportStatusEl) {
+            widgetExportStatusEl.textContent = t("compare.widget.needCurves");
+          }
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(url);
+          if (widgetExportStatusEl) {
+            widgetExportStatusEl.textContent = t("compare.widget.copied");
+          }
+        } catch (_) {
+          widgetUrlEl?.select();
+          document.execCommand("copy");
+          if (widgetExportStatusEl) {
+            widgetExportStatusEl.textContent = t("compare.widget.copied");
+          }
+        }
+      });
+    }
+    if (foldWidgetExportEl) {
+      foldWidgetExportEl.addEventListener("toggle", () => {
+        if (foldWidgetExportEl.open) {
+          syncWidgetRangeFromCompare();
+          if (!widgetSelected.size) {
+            widgetSelected = new Set(selectedDevices().map((d) => d.address));
+          }
+          renderWidgetCurveList();
+          updateWidgetExport();
+        }
+      });
+    }
+    if (widgetUrlEl) {
+      widgetUrlEl.addEventListener("focus", () => widgetUrlEl.select());
+    }
+  }
+  bindWidgetExportControls();
+
   const savedCovHours = localStorage.getItem("govee-charts.coverageHours");
   if (savedCovHours && COVERAGE_RANGE_HOURS.has(savedCovHours)) {
     coverageHours = savedCovHours;
@@ -11876,7 +12966,10 @@
     syncTtsBtn();
     syncWindowNotifyBtn();
     syncDoorBeepBtn();
+    renderSettingsNotify();
     syncModelFilterButtons();
+    edgeVoicesCache = [];
+    edgeVoicesLang = "";
     populateTtsVoiceOptions();
     renderSettingsStations();
     updateOverview();

@@ -38,6 +38,13 @@ from govee_charts.db import Database, coverage_from_minute_set, is_db_locked
 from govee_charts.decode import Reading
 from govee_charts.federation import csv_source
 from govee_charts.energy import build_energy_summary, estimate_live_ac_watts
+from govee_charts.tts import (
+    HOME_TTS_VOICE_ID,
+    default_voice_for_lang,
+    list_edge_voices,
+    speak_via_home,
+    synthesize,
+)
 from govee_charts.hvac import HvacConfig, hvac_active_bands, is_hvac_active
 from govee_charts import mail_inbox
 from govee_charts.weather import WeatherService
@@ -57,7 +64,15 @@ _HTML_CACHE_HEADERS = {
 def static_asset_version() -> str:
     """Version token from static asset mtimes (changes after deploy / edit)."""
     stamp = 0
-    for name in ("app.js", "style.css", "index.html"):
+    for name in (
+        "app.js",
+        "style.css",
+        "index.html",
+        "widget.js",
+        "widget.html",
+        "i18n.js",
+        "sw.js",
+    ):
         path = STATIC / name
         try:
             stamp = max(stamp, int(path.stat().st_mtime))
@@ -72,6 +87,31 @@ def index_html_response() -> HTMLResponse:
     ver = static_asset_version()
     html = html.replace('href="/static/style.css"', f'href="/static/style.css?v={ver}"')
     html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={ver}"')
+    html = html.replace('src="/static/i18n.js"', f'src="/static/i18n.js?v={ver}"')
+    return HTMLResponse(content=html, headers=dict(_HTML_CACHE_HEADERS))
+
+
+def service_worker_response() -> Response:
+    """Serve the notification service worker at site root (Safari scope)."""
+    path = STATIC / "sw.js"
+    body = path.read_bytes() if path.is_file() else b""
+    return Response(
+        content=body,
+        media_type="application/javascript; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Service-Worker-Allowed": "/",
+        },
+    )
+
+
+def widget_html_response() -> HTMLResponse:
+    """Serve the embeddable widget page with cache-busted script URL."""
+    html = (STATIC / "widget.html").read_text(encoding="utf-8")
+    ver = static_asset_version()
+    html = html.replace(
+        'src="/static/widget.js"', f'src="/static/widget.js?v={ver}"'
+    )
     return HTMLResponse(content=html, headers=dict(_HTML_CACHE_HEADERS))
 
 
@@ -273,6 +313,14 @@ class DoorPatch(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class TtsBody(BaseModel):
+    text: str = Field(..., min_length=1)
+    voice: str | None = None
+    lang: str | None = None
+
+    model_config = {"extra": "forbid"}
+
+
 class FacadePatch(BaseModel):
     exterior: list[str] = Field(default_factory=list)
 
@@ -458,6 +506,7 @@ def create_app(
     hvac: HvacConfig | None = None,
     scanner_enabled: bool = True,
     ble_alert_stale_after: float = 300.0,
+    tts: dict[str, Any] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Govee Charts", docs_url=None, redoc_url=None)
     app.state.db = db
@@ -477,10 +526,32 @@ def create_app(
     app.state.hvac = hvac or HvacConfig()
     app.state.scanner_enabled = bool(scanner_enabled)
     app.state.ble_alert_stale_after = max(0.0, float(ble_alert_stale_after))
+    tts_cfg = dict(tts or {})
+    home_url = str(tts_cfg.get("home_url") or "").strip().rstrip("/")
+    play_raw = str(tts_cfg.get("play") or "local").strip().lower() or "local"
+    if play_raw not in ("local", "server", "here", "none", "client"):
+        play_raw = "local"
+    # "client" = browser only (no ffplay on the Home TTS host).
+    play_mode = "none" if play_raw == "client" else play_raw
+    return_audio = tts_cfg.get("return_audio")
+    if return_audio is None:
+        return_audio = True
+    app.state.tts = {
+        "home_url": home_url,
+        "app": str(tts_cfg.get("app") or "govee-charts").strip() or "govee-charts",
+        "channel": str(tts_cfg.get("channel") or "alerts").strip() or "alerts",
+        "play": play_mode,
+        "return_audio": bool(return_audio),
+    }
 
     @app.get("/")
     async def index() -> HTMLResponse:
         return index_html_response()
+
+    @app.get("/sw.js")
+    async def service_worker() -> Response:
+        """Root-scoped SW so Safari standalone can use showNotification()."""
+        return service_worker_response()
 
     @app.get("/overview")
     @app.get("/compare")
@@ -494,6 +565,11 @@ def create_app(
     async def index_views() -> HTMLResponse:
         """Client-side routes for direct URL navigation."""
         return index_html_response()
+
+    @app.get("/widget")
+    async def widget_view() -> HTMLResponse:
+        """Standalone embeddable chart (iframe / link share)."""
+        return widget_html_response()
 
     @app.get("/api/health")
     async def api_health() -> dict[str, Any]:
@@ -535,6 +611,79 @@ def create_app(
                 "ok": ble_ok,
             },
         }
+
+    @app.get("/api/tts/voices")
+    async def api_tts_voices(
+        lang: str = Query("fr", min_length=1, max_length=16),
+    ) -> dict[str, Any]:
+        """edge-tts voices filtered by language prefix (browser-tts skill)."""
+        try:
+            voices = await list_edge_voices(lang)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("TTS voices failed")
+            raise HTTPException(
+                status_code=502, detail=f"tts voices failed: {exc}"
+            ) from exc
+        prefix = (lang or "fr").strip().lower() or "fr"
+        tts_cfg: dict[str, Any] = app.state.tts or {}
+        home_enabled = bool(tts_cfg.get("home_url"))
+        return {
+            "ok": True,
+            "lang": prefix,
+            "default_voice": default_voice_for_lang(prefix),
+            "voices": voices,
+            "home_tts": {
+                "enabled": home_enabled,
+                "id": HOME_TTS_VOICE_ID,
+                "app": tts_cfg.get("app") or "govee-charts",
+                "channel": tts_cfg.get("channel") or "alerts",
+            },
+        }
+
+    @app.post("/api/tts")
+    async def api_tts(body: TtsBody) -> dict[str, Any]:
+        """Synthesize speech via edge-tts, or play on Home TTS speakers."""
+        voice_id = (body.voice or "").strip()
+        if voice_id == HOME_TTS_VOICE_ID:
+            tts_cfg: dict[str, Any] = app.state.tts or {}
+            home_url = str(tts_cfg.get("home_url") or "").strip()
+            if not home_url:
+                raise HTTPException(
+                    status_code=400, detail="home-tts is not configured"
+                )
+            lang = (body.lang or "fr").strip() or "fr"
+            try:
+                return await speak_via_home(
+                    home_url,
+                    body.text,
+                    lang=lang,
+                    app=str(tts_cfg.get("app") or "govee-charts"),
+                    channel=str(tts_cfg.get("channel") or "alerts"),
+                    play=str(tts_cfg.get("play") or "local"),
+                    return_audio=bool(tts_cfg.get("return_audio", True)),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            except Exception as exc:
+                logger.exception("home-tts speak failed")
+                raise HTTPException(
+                    status_code=502, detail=f"home-tts failed: {exc}"
+                ) from exc
+        try:
+            return await synthesize(body.text, body.voice)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("TTS synthesize failed")
+            raise HTTPException(
+                status_code=502, detail=f"tts failed: {exc}"
+            ) from exc
 
     @app.get("/api/system")
     async def api_system() -> dict[str, Any]:

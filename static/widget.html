@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Govee Charts · Widget</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="/static/icons/favicon.ico" sizes="any">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1410;
+      --ink: #e8efe6;
+      --muted: #8a9a88;
+      --line: #2a352c;
+      --grid: rgba(42, 53, 44, 0.7);
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    body.is-transparent {
+      background: transparent;
+    }
+    #wrap {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      padding: 0.4rem 0.55rem 0.35rem;
+      gap: 0.25rem;
+    }
+    #meta {
+      flex: 0 0 auto;
+      font-size: 0.75rem;
+      color: var(--muted);
+      line-height: 1.3;
+      min-height: 1em;
+    }
+    #chart-wrap {
+      flex: 1 1 auto;
+      position: relative;
+      min-height: 0;
+    }
+    #chart-wrap canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
+    #error {
+      color: #e06c75;
+      font-size: 0.9rem;
+      padding: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="meta" aria-live="polite"></div>
+    <div id="chart-wrap">
+      <canvas id="chart"></canvas>
+    </div>
+  </div>
+  <script src="/static/widget.js"></script>
+</body>
+</html>

@@ -48,6 +48,7 @@ Chat replies to the repository owner may follow their preferred language; projec
 - After dependency changes, update `requirements.txt`.
 - Keep the UI simple: overview table + compare charts; avoid heavy frameworks.
 - After adding or changing settings in `config.example.toml` / `DEFAULTS`, **also update the local gitignored `config.toml`** when it exists: merge new keys with the documented defaults (enable new optional features that are on by default in the example). Do not overwrite existing user values, secrets, labels, peers, or paths. Mention a restart if the running service must reload config.
+- **Web notifications** (window alerts): HTTPS + root `/sw.js` + `registration.showNotification()`; Safari standalone quirks and diagnostic UX are documented in the personal Cursor skill `web-notifications` (see `~/.cursor/skills/web-notifications/SKILL.md`).
 
 ## Useful commands
 

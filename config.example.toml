@@ -264,6 +264,17 @@ rssi_prefer_margin_db = 3
 peer_signal_cache_seconds = 45
 rebuild_seconds = 900
 
+# Voice alerts via Home TTS edge server (chrome-home-tts on :18765).
+# Uses the Home TTS channel voice; return_audio lets the browser play
+# (needed from a remote Mac). play=local also drives speakers on the host.
+# play = "local" | "client" | "none"
+[tts]
+home_url = "http://127.0.0.1:18765"
+app = "govee-charts"
+channel = "alerts"
+play = "local"
+return_audio = true
+
 # Optional friendly labels keyed by BLE MAC (uppercase).
 # Also used to map macOS UUID addresses to real MACs via the Govee name suffix
 # (e.g. GVH5075_1270 → A4:C1:38:???:12:70).

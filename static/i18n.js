@@ -41,12 +41,65 @@
       "tts.enabledSpeak": "Voice alerts enabled",
       "tts.voiceLabel": "Voice for alerts",
       "tts.voiceDefault": "Browser default",
+      "tts.groupMac": "Mac (Safari)",
+      "tts.groupServer": "Server (edge-tts)",
+      "tts.groupHome": "Home TTS",
+      "tts.homeSpeakers": "Home TTS (alerts channel)",
       "windowNotify.title": "Window alerts",
       "windowNotify.aria": "Toggle window alerts",
       "windowNotify.on": "Window alerts on — click to disable",
       "windowNotify.off": "Window alerts off — click to enable",
       "windowNotify.disable": "Disable window alerts",
       "windowNotify.enable": "Enable window alerts",
+      "windowNotify.ready": "Window alerts on",
+      "windowNotify.readyClick":
+        "Notifications allowed — click the bell to turn window alerts on",
+      "windowNotify.pending": "Waiting for notification permission…",
+      "windowNotify.reloading":
+        "Refreshing permission — reloading the app…",
+      "windowNotify.unsupported": "Notifications not supported in this browser",
+      "windowNotify.insecure":
+        "Notifications need HTTPS (open the app via https://…:8081, not http)",
+      "windowNotify.denied":
+        "Notifications blocked — allow them in system/Safari settings, then return here",
+      "windowNotify.blocked":
+        "Notifications were not granted — allow the prompt or enable them in Settings, then return here",
+      "windowNotify.testTitle": "Govee Charts — test",
+      "windowNotify.testBody": "Window alerts are working.",
+      "windowNotify.action.enable": "Enable bell",
+      "windowNotify.action.disable": "Disable bell",
+      "windowNotify.action.retry": "Ask again",
+      "windowNotify.action.reload": "Reload app",
+      "windowNotify.action.test": "Send test",
+      "windowNotify.action.copyHttps": "Copy HTTPS link",
+      "windowNotify.diag.unsupported.status": "This browser has no Notification API.",
+      "windowNotify.diag.unsupported.fix":
+        "Use Safari or Chrome on a desktop, or a Home Screen / Dock web app on Apple devices that support web notifications.",
+      "windowNotify.diag.insecure.status": "Not a secure context (HTTP).",
+      "windowNotify.diag.insecure.fix":
+        "Open the app over HTTPS, e.g. {url} (accept the certificate once), then add it to the Dock / Home Screen again if needed.",
+      "windowNotify.diag.insecure.copied":
+        "HTTPS link ready: {url} — open it, then use the bell again.",
+      "windowNotify.diag.denied.status": "Browser permission is denied.",
+      "windowNotify.diag.denied.fix":
+        "In System Settings → Notifications → {app} (or Safari → Settings → Websites → Notifications), set to Allow, then return to this app. It will reload and turn the bell on.",
+      "windowNotify.diag.denied.fixQuit":
+        "Permission still denied after reload. Quit the web app completely (Cmd+Q), reopen it, then use Reload or the bell.",
+      "windowNotify.diag.prompt.status": "Permission not requested yet.",
+      "windowNotify.diag.prompt.fix":
+        "Click Enable bell (or the header bell) and accept the Safari prompt.",
+      "windowNotify.diag.grantedOff.status": "Permission granted, alerts still off.",
+      "windowNotify.diag.grantedOff.fix":
+        "Click Enable bell to turn window alerts on.",
+      "windowNotify.diag.noSw.status": "Alerts on, but no service worker.",
+      "windowNotify.diag.noSw.fix":
+        "Safari standalone prefers a service worker. Reload the app on HTTPS; if it still fails, quit and reopen.",
+      "windowNotify.diag.okTab.status": "Window alerts are on (browser tab).",
+      "windowNotify.diag.okTab.fix":
+        "For background alerts on iPhone/iPad, add the site to the Home Screen and open it from there.",
+      "windowNotify.diag.ok.status": "Window alerts are on.",
+      "windowNotify.diag.ok.fix":
+        "You can send a test notification or disable the bell.",
       "doorBeep.title": "Beep on door / window open or close",
       "doorBeep.aria": "Toggle door / window beep",
       "doorBeep.on": "Door / window beep on — click to disable",
@@ -64,6 +117,9 @@
       "settings.voiceTest": "Test",
       "settings.voiceTestTitle": "Speak the last alert banner",
       "settings.voiceTestEmpty": "No alert banner to replay yet.",
+      "settings.notify": "Window notifications",
+      "settings.notifyHelp":
+        "Diagnoses browser permission issues (especially Safari standalone) and offers fixes.",
       "settings.stations": "Weather stations",
       "settings.stationsHelp":
         "Choose which stations appear on Compare charts and projection cards. Stored in this browser.",
@@ -208,6 +264,34 @@
       "compare.powerNote": "· power (W) on right axis",
       "compare.loading": "Loading…",
       "compare.selectDevice": "Select at least one device…",
+      "compare.widget.title": "Export widget",
+      "compare.widget.meta": "shareable chart link",
+      "compare.widget.hint":
+        "Build a standalone chart URL for iframes or bookmarks. Curves default to the current Compare selection.",
+      "compare.widget.metric": "Metric",
+      "compare.widget.metric.temp": "Temperature",
+      "compare.widget.metric.hum": "Humidity",
+      "compare.widget.metric.dew": "Dew point",
+      "compare.widget.past": "Past",
+      "compare.widget.future": "Future",
+      "compare.widget.futureOff": "Off",
+      "compare.widget.forecast": "Include forecast",
+      "compare.widget.transparent": "Transparent background",
+      "compare.widget.legend": "Show legend",
+      "compare.widget.refresh": "Auto-refresh",
+      "compare.widget.refreshOff": "Off",
+      "compare.widget.curves": "Curves",
+      "compare.widget.useSelection": "Use selection",
+      "compare.widget.allVisible": "All visible",
+      "compare.widget.none": "None",
+      "compare.widget.link": "Link",
+      "compare.widget.copy": "Copy",
+      "compare.widget.open": "Open",
+      "compare.widget.preview": "Preview",
+      "compare.widget.copied": "Link copied",
+      "compare.widget.needCurves": "Select at least one curve.",
+      "compare.widget.iframe":
+        '<iframe src="{url}" width="100%" height="320" style="border:0;background:transparent" loading="lazy"></iframe>',
       "compare.noDevices": "No devices detected",
       "compare.noDevicesMetric": "No devices",
       "compare.noSensorsModel": "No sensors for this model",
@@ -318,12 +402,68 @@
       "tts.enabledSpeak": "Alertes vocales activées",
       "tts.voiceLabel": "Voix des alertes",
       "tts.voiceDefault": "Défaut du navigateur",
+      "tts.groupMac": "Mac (Safari)",
+      "tts.groupServer": "Serveur (edge-tts)",
+      "tts.groupHome": "Home TTS",
+      "tts.homeSpeakers": "Home TTS (canal alerts)",
       "windowNotify.title": "Alertes fenêtres",
       "windowNotify.aria": "Activer/désactiver les alertes fenêtres",
       "windowNotify.on": "Alertes fenêtres activées — cliquer pour désactiver",
       "windowNotify.off": "Alertes fenêtres désactivées — cliquer pour activer",
       "windowNotify.disable": "Désactiver les alertes fenêtres",
       "windowNotify.enable": "Activer les alertes fenêtres",
+      "windowNotify.ready": "Alertes fenêtres activées",
+      "windowNotify.readyClick":
+        "Notifications autorisées — cliquez sur la cloche pour activer les alertes",
+      "windowNotify.pending": "En attente de l’autorisation des notifications…",
+      "windowNotify.reloading":
+        "Mise à jour de l’autorisation — rechargement de l’app…",
+      "windowNotify.unsupported":
+        "Notifications non prises en charge par ce navigateur",
+      "windowNotify.insecure":
+        "Les notifications nécessitent HTTPS (ouvrez l’app via https://…:8081, pas http)",
+      "windowNotify.denied":
+        "Notifications refusées — autorisez-les dans les réglages système/Safari, puis revenez ici",
+      "windowNotify.blocked":
+        "Notifications non accordées — acceptez l’invite ou activez-les dans Réglages, puis revenez ici",
+      "windowNotify.testTitle": "Govee Charts — test",
+      "windowNotify.testBody": "Les alertes fenêtres fonctionnent.",
+      "windowNotify.action.enable": "Activer la cloche",
+      "windowNotify.action.disable": "Désactiver la cloche",
+      "windowNotify.action.retry": "Redemander",
+      "windowNotify.action.reload": "Recharger l’app",
+      "windowNotify.action.test": "Envoyer un test",
+      "windowNotify.action.copyHttps": "Copier le lien HTTPS",
+      "windowNotify.diag.unsupported.status":
+        "Ce navigateur n’a pas d’API Notification.",
+      "windowNotify.diag.unsupported.fix":
+        "Utilisez Safari ou Chrome sur ordinateur, ou une app Dock / écran d’accueil sur appareil Apple compatible.",
+      "windowNotify.diag.insecure.status": "Contexte non sécurisé (HTTP).",
+      "windowNotify.diag.insecure.fix":
+        "Ouvrez l’app en HTTPS, p.ex. {url} (acceptez le certificat une fois), puis rajoutez-la au Dock / écran d’accueil si besoin.",
+      "windowNotify.diag.insecure.copied":
+        "Lien HTTPS prêt : {url} — ouvrez-le, puis réessayez la cloche.",
+      "windowNotify.diag.denied.status": "Permission navigateur refusée.",
+      "windowNotify.diag.denied.fix":
+        "Dans Réglages Système → Notifications → {app} (ou Safari → Réglages → Sites web → Notifications), choisissez Autoriser, puis revenez dans l’app : elle se recharge et allume la cloche.",
+      "windowNotify.diag.denied.fixQuit":
+        "Permission encore refusée après rechargement. Quittez complètement l’app web (Cmd+Q), rouvrez-la, puis utilisez Recharger ou la cloche.",
+      "windowNotify.diag.prompt.status": "Permission pas encore demandée.",
+      "windowNotify.diag.prompt.fix":
+        "Cliquez sur Activer la cloche (ou la cloche en haut) et acceptez l’invite Safari.",
+      "windowNotify.diag.grantedOff.status":
+        "Permission OK, mais les alertes sont encore off.",
+      "windowNotify.diag.grantedOff.fix":
+        "Cliquez sur Activer la cloche pour allumer les alertes fenêtres.",
+      "windowNotify.diag.noSw.status": "Alertes on, mais pas de service worker.",
+      "windowNotify.diag.noSw.fix":
+        "Safari standalone préfère un service worker. Rechargez l’app en HTTPS ; si ça échoue encore, quittez et rouvrez.",
+      "windowNotify.diag.okTab.status": "Alertes fenêtres activées (onglet).",
+      "windowNotify.diag.okTab.fix":
+        "Pour les alertes en arrière-plan sur iPhone/iPad, ajoutez le site à l’écran d’accueil et ouvrez-le depuis l’icône.",
+      "windowNotify.diag.ok.status": "Alertes fenêtres activées.",
+      "windowNotify.diag.ok.fix":
+        "Vous pouvez envoyer une notification test ou désactiver la cloche.",
       "doorBeep.title": "Bip à l’ouverture / fermeture porte ou fenêtre",
       "doorBeep.aria": "Activer/désactiver le bip porte / fenêtre",
       "doorBeep.on": "Bip porte / fenêtre activé — cliquer pour désactiver",
@@ -342,6 +482,9 @@
       "settings.voiceTest": "Tester",
       "settings.voiceTestTitle": "Lire la dernière bannière d’alerte",
       "settings.voiceTestEmpty": "Aucune bannière d’alerte à rejouer pour l’instant.",
+      "settings.notify": "Notifications fenêtres",
+      "settings.notifyHelp":
+        "Diagnostique les problèmes de permission (surtout Safari standalone) et propose des correctifs.",
       "settings.stations": "Stations météo",
       "settings.stationsHelp":
         "Choisir les stations affichées sur les graphiques Comparer et les cartes de projection. Enregistré dans ce navigateur.",
@@ -488,6 +631,34 @@
       "compare.powerNote": "· puissance (W) sur l’axe droit",
       "compare.loading": "Chargement…",
       "compare.selectDevice": "Sélectionnez au moins un appareil…",
+      "compare.widget.title": "Exporter un widget",
+      "compare.widget.meta": "lien de graphique partageable",
+      "compare.widget.hint":
+        "Construit une URL de graphique autonome pour iframe ou signet. Les courbes reprennent la sélection Compare.",
+      "compare.widget.metric": "Métrique",
+      "compare.widget.metric.temp": "Température",
+      "compare.widget.metric.hum": "Humidité",
+      "compare.widget.metric.dew": "Point de rosée",
+      "compare.widget.past": "Passé",
+      "compare.widget.future": "Futur",
+      "compare.widget.futureOff": "Désactivé",
+      "compare.widget.forecast": "Inclure la prévision",
+      "compare.widget.transparent": "Fond transparent",
+      "compare.widget.legend": "Afficher la légende",
+      "compare.widget.refresh": "Actualisation auto",
+      "compare.widget.refreshOff": "Désactivée",
+      "compare.widget.curves": "Courbes",
+      "compare.widget.useSelection": "Sélection",
+      "compare.widget.allVisible": "Tous visibles",
+      "compare.widget.none": "Aucun",
+      "compare.widget.link": "Lien",
+      "compare.widget.copy": "Copier",
+      "compare.widget.open": "Ouvrir",
+      "compare.widget.preview": "Aperçu",
+      "compare.widget.copied": "Lien copié",
+      "compare.widget.needCurves": "Sélectionnez au moins une courbe.",
+      "compare.widget.iframe":
+        '<iframe src="{url}" width="100%" height="320" style="border:0;background:transparent" loading="lazy"></iframe>',
       "compare.noDevices": "Aucun appareil détecté",
       "compare.noDevicesMetric": "Aucun appareil",
       "compare.noSensorsModel": "Aucun capteur pour ce modèle",

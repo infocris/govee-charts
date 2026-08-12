@@ -41,6 +41,9 @@ body {
   border-bottom: 1px solid var(--line);
   backdrop-filter: blur(12px);
   background: rgba(26, 34, 28, 0.92);
+  /* Standalone macOS/iOS: keep controls below titlebar / notch (clicks otherwise miss). */
+  padding-top: env(safe-area-inset-top, 0px);
+  -webkit-app-region: drag;
 }
 
 .top-bar-inner {
@@ -59,6 +62,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+  -webkit-app-region: no-drag;
 }
 
 .window-banner {
@@ -369,7 +373,7 @@ body.sticky-views-enabled .views {
 
 .header-icon-btn {
   flex: 0 0 auto;
-  margin-left: auto;
+  margin-left: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -381,6 +385,13 @@ body.sticky-views-enabled .views {
   background: color-mix(in srgb, var(--bg) 45%, transparent);
   color: var(--muted);
   cursor: pointer;
+  -webkit-app-region: no-drag;
+  position: relative;
+  z-index: 2;
+}
+
+#tts-btn {
+  margin-left: auto;
 }
 
 .header-icon-btn:hover {
@@ -439,6 +450,40 @@ body.sticky-views-enabled .views {
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
+}
+
+.settings-notify-status {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--ink);
+  line-height: 1.35;
+}
+
+.settings-notify-status[data-tone="ok"] {
+  color: color-mix(in srgb, #6dcaa0 70%, var(--ink));
+}
+
+.settings-notify-status[data-tone="warn"] {
+  color: color-mix(in srgb, #e0a860 75%, var(--ink));
+}
+
+.settings-notify-status[data-tone="bad"] {
+  color: color-mix(in srgb, #e07070 80%, var(--ink));
+}
+
+.settings-notify-fix {
+  margin: 0.35rem 0 0;
+  font-size: 0.88rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.settings-notify-field .settings-service-actions {
+  margin-top: 0.65rem;
+}
+
+.notify-fix-banner .window-banner-detail {
+  white-space: pre-wrap;
 }
 
 .settings-service-actions {
@@ -3871,3 +3916,138 @@ main {
   border-top: none;
   padding-top: 0;
 }
+
+/* ── Compare – Widget export ──────────────────────────────────────── */
+.widget-export {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding: 0.75rem 0.25rem 0.5rem;
+}
+
+.widget-export-hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted, #5a6570);
+  line-height: 1.4;
+}
+
+.widget-export-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+  align-items: flex-end;
+}
+
+.widget-export-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  min-width: 7rem;
+}
+
+.widget-export-field span {
+  color: var(--muted, #5a6570);
+}
+
+.widget-export-field select,
+.widget-export-field input[type="text"] {
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.widget-export-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.88rem;
+  cursor: pointer;
+  padding-bottom: 0.35rem;
+}
+
+.widget-export-curves {
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.widget-export-curves legend {
+  padding: 0 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.widget-export-curve-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.45rem;
+}
+
+.widget-curve-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.85rem;
+  max-height: 9rem;
+  overflow: auto;
+}
+
+.widget-curve-list label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.widget-export-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+.widget-export-url-field {
+  flex: 1 1 16rem;
+  min-width: 12rem;
+}
+
+.widget-export-url-field input {
+  width: 100%;
+}
+
+.widget-export-status {
+  margin: 0;
+  min-height: 1.1em;
+  font-size: 0.85rem;
+  color: var(--muted, #5a6570);
+}
+
+.widget-export-preview-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.widget-export-preview-label {
+  font-size: 0.85rem;
+  color: var(--muted, #5a6570);
+}
+
+.widget-export-preview {
+  width: 100%;
+  height: 280px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    repeating-conic-gradient(#2a352c 0% 25%, #1a221c 0% 50%)
+    0 0 / 16px 16px;
+}
+

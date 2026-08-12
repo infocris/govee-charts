@@ -165,6 +165,17 @@ DEFAULTS: dict[str, Any] = {
         "default_policy": "none",
         "max_delete_per_device": 50000,
     },
+    # Optional Home TTS edge server (channel voice + optional host speakers).
+    # Empty home_url hides the "Home TTS" voice option in Settings.
+    # play: local = ffplay on the Home TTS host; client = browser only; none = no host play.
+    # return_audio: true so a remote browser (Mac) can hear the alert.
+    "tts": {
+        "home_url": "http://127.0.0.1:18765",
+        "app": "govee-charts",
+        "channel": "alerts",
+        "play": "local",
+        "return_audio": True,
+    },
     "labels": {},
 }
 
@@ -750,6 +761,7 @@ async def run_ui_server(
         hvac=hvac_cfg,
         scanner_enabled=bool(cfg["scanner"].get("enabled", True)),
         ble_alert_stale_after=float(cfg["scanner"].get("alert_stale_after", 300.0)),
+        tts=cfg.get("tts") or {},
     )
 
     http_config = uvicorn.Config(
