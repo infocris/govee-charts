@@ -18,7 +18,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
 </head>
 <body>
-  <aside id="top-bar" class="top-bar" aria-label="Alerts">
+  <aside id="top-bar" class="top-bar" data-i18n-aria-label="alerts.bar" aria-label="Alerts">
     <div class="top-bar-inner">
       <div class="top-bar-banners">
         <div id="system-banner" class="window-banner system-banner" hidden aria-live="assertive">
@@ -41,6 +41,8 @@
         id="tts-btn"
         class="header-icon-btn"
         aria-pressed="false"
+        data-i18n-title="tts.title"
+        data-i18n-aria-label="tts.aria"
         title="Voice alerts (text-to-speech)"
         aria-label="Toggle voice alerts"
       >
@@ -52,17 +54,13 @@
           />
         </svg>
       </button>
-      <label class="tts-voice-picker" id="tts-voice-picker" hidden>
-        <span class="visually-hidden">Voice for alerts</span>
-        <select id="tts-voice-select" aria-label="Voice for alerts">
-          <option value="">Browser default</option>
-        </select>
-      </label>
       <button
         type="button"
         id="window-notify-btn"
         class="header-icon-btn"
         aria-pressed="false"
+        data-i18n-title="windowNotify.title"
+        data-i18n-aria-label="windowNotify.aria"
         title="Window alerts"
         aria-label="Toggle window alerts"
       >
@@ -79,6 +77,8 @@
         id="door-beep-btn"
         class="header-icon-btn"
         aria-pressed="false"
+        data-i18n-title="doorBeep.title"
+        data-i18n-aria-label="doorBeep.aria"
         title="Beep on door / window open or close"
         aria-label="Toggle door / window beep"
       >
@@ -94,16 +94,16 @@
   </aside>
   <header class="top">
     <div class="brand">Govee Charts</div>
-    <p class="tagline">Temperature and humidity — local BLE scan</p>
+    <p class="tagline" data-i18n="brand.tagline">Temperature and humidity — local BLE scan</p>
     <p class="node-line" id="node-line" hidden></p>
-    <nav class="peer-links" id="peer-links" aria-label="Federation peers" hidden></nav>
+    <nav class="peer-links" id="peer-links" data-i18n-aria-label="nav.peers" aria-label="Federation peers" hidden></nav>
   </header>
   <!-- Outside .top so sticky can span the whole page below the fixed alert bar -->
-  <nav class="views" aria-label="Views">
-    <a href="/overview" data-view="overview" class="active" aria-current="page">Overview</a>
-    <a href="/compare" data-view="compare">Compare</a>
-    <a href="/facades" data-view="facades">Facades</a>
-    <a href="/map" data-view="network">Map</a>
+  <nav class="views" data-i18n-aria-label="nav.views" aria-label="Views">
+    <a href="/overview" data-view="overview" class="active" aria-current="page" data-i18n="nav.overview">Overview</a>
+    <a href="/compare" data-view="compare" data-i18n="nav.compare">Compare</a>
+    <a href="/facades" data-view="facades" data-i18n="nav.facades">Facades</a>
+    <a href="/map" data-view="network" data-i18n="nav.map">Map</a>
     <div class="nav-mega" data-mega="data">
       <button
         type="button"
@@ -111,101 +111,100 @@
         id="nav-mega-data-toggle"
         aria-expanded="false"
         aria-controls="nav-mega-data-panel"
+        data-i18n="nav.data"
       >
         Data
       </button>
-      <div class="nav-mega-panel" id="nav-mega-data-panel" role="group" aria-label="Data" hidden>
-        <a href="/coverage" data-view="coverage">Coverage</a>
-        <a href="/backfill" data-view="backfill">Backfill</a>
-        <a href="/system" data-view="system">System</a>
+      <div class="nav-mega-panel" id="nav-mega-data-panel" role="group" data-i18n-aria-label="nav.data" aria-label="Data" hidden>
+        <a href="/coverage" data-view="coverage" data-i18n="nav.coverage">Coverage</a>
+        <a href="/backfill" data-view="backfill" data-i18n="nav.backfill">Backfill</a>
+        <a href="/system" data-view="system" data-i18n="nav.system">System</a>
       </div>
     </div>
+    <a href="/settings" data-view="settings" data-i18n="nav.settings">Settings</a>
     <span class="nav-actions">
-      <a id="home-btn" class="restart-btn" title="Back to the portal (port 80)">Home</a>
-      <button type="button" id="git-pull-btn" class="restart-btn" title="git pull --ff-only">Git pull</button>
-      <button type="button" id="restart-ui-btn" class="restart-btn" title="Restart UI service">Restart UI</button>
-      <button type="button" id="restart-workers-btn" class="restart-btn" title="Restart workers service">Restart workers</button>
+      <a id="home-btn" class="restart-btn" data-i18n="nav.home" data-i18n-title="nav.homeTitle" title="Back to the portal (port 80)">Home</a>
     </span>
   </nav>
-  <p class="restart-status" id="restart-status" hidden aria-live="polite"></p>
 
   <main>
-    <section id="view-overview" class="view" role="tabpanel" aria-label="Overview">
+    <section id="view-overview" class="view" role="tabpanel" data-i18n-aria-label="nav.overview" aria-label="Overview">
       <div class="overview-head">
-        <h2>All sensors</h2>
-        <p class="overview-hint">Edit name / zone / height / height cm / room inline — use Charts to open compare graphs</p>
+        <h2 data-i18n="overview.title">All sensors</h2>
+        <p class="overview-hint" data-i18n="overview.hint">Edit name / zone / height / height cm / room inline — use Charts to open compare graphs</p>
       </div>
 
       <label class="overview-text-filter" for="overview-device-filter">
-        <span class="overview-text-filter-label">Filter</span>
+        <span class="overview-text-filter-label" data-i18n="overview.filter">Filter</span>
         <input
           type="search"
           id="overview-device-filter"
+          data-i18n-placeholder="overview.filterPlaceholder"
           placeholder="Name or MAC…"
           autocomplete="off"
           spellcheck="false"
         />
       </label>
 
-      <div class="model-filters" id="model-filters" role="group" aria-label="Filter by model"></div>
-      <div class="category-filters" id="category-filters" aria-label="Filter by category">
-        <div class="filter-row" id="zone-filters" role="group" aria-label="Zone"></div>
-        <div class="filter-row" id="height-filters" role="group" aria-label="Height"></div>
-        <div class="filter-row" id="room-filters" role="group" aria-label="Room"></div>
+      <div class="model-filters" id="model-filters" role="group" data-i18n-aria-label="overview.filterModel" aria-label="Filter by model"></div>
+      <div class="category-filters" id="category-filters" data-i18n-aria-label="overview.filterCategory" aria-label="Filter by category">
+        <div class="filter-row" id="zone-filters" role="group" data-i18n-aria-label="overview.zone" aria-label="Zone"></div>
+        <div class="filter-row" id="height-filters" role="group" data-i18n-aria-label="overview.height" aria-label="Height"></div>
+        <div class="filter-row" id="room-filters" role="group" data-i18n-aria-label="overview.room" aria-label="Room"></div>
       </div>
-      <div class="overview-sort" role="group" aria-label="Sort sensors">
-        <span class="overview-sort-label">Sort</span>
-        <button type="button" class="sort-btn" data-sort="name">Name</button>
-        <button type="button" class="sort-btn" data-sort="temperature_c">Temp</button>
-        <button type="button" class="sort-btn" data-sort="humidity">Humidity</button>
-        <button type="button" class="sort-btn" data-sort="battery">Battery</button>
-        <button type="button" class="sort-btn" data-sort="rssi">Signal</button>
-        <button type="button" class="sort-btn" data-sort="zone">Zone</button>
-        <button type="button" class="sort-btn" data-sort="room">Room</button>
-        <button type="button" class="sort-btn" data-sort="last_reading_ts">Updated</button>
+      <div class="overview-sort" role="group" data-i18n-aria-label="overview.sort" aria-label="Sort sensors">
+        <span class="overview-sort-label" data-i18n="overview.sortLabel">Sort</span>
+        <button type="button" class="sort-btn" data-sort="name" data-i18n="overview.sort.name">Name</button>
+        <button type="button" class="sort-btn" data-sort="temperature_c" data-i18n="overview.sort.temp">Temp</button>
+        <button type="button" class="sort-btn" data-sort="humidity" data-i18n="overview.sort.humidity">Humidity</button>
+        <button type="button" class="sort-btn" data-sort="battery" data-i18n="overview.sort.battery">Battery</button>
+        <button type="button" class="sort-btn" data-sort="rssi" data-i18n="overview.sort.signal">Signal</button>
+        <button type="button" class="sort-btn" data-sort="zone" data-i18n="overview.sort.zone">Zone</button>
+        <button type="button" class="sort-btn" data-sort="room" data-i18n="overview.sort.room">Room</button>
+        <button type="button" class="sort-btn" data-sort="last_reading_ts" data-i18n="overview.sort.updated">Updated</button>
       </div>
       <div class="overview-sensor-list" id="overview-body" aria-live="polite">
-        <p class="overview-empty">Loading…</p>
+        <p class="overview-empty" data-i18n="overview.loading">Loading…</p>
       </div>
-      <p class="status" id="overview-status">Loading…</p>
+      <p class="status" id="overview-status" data-i18n="overview.loading">Loading…</p>
 
       <div class="overview-head overview-head-secondary">
-        <h2>Doors &amp; windows</h2>
-        <p class="overview-hint">Contact sensors — set kind/room; click a name for open/close log</p>
+        <h2 data-i18n="overview.doorsTitle">Doors &amp; windows</h2>
+        <p class="overview-hint" data-i18n="overview.doorsHint">Contact sensors — set kind/room; click a name for open/close log</p>
       </div>
       <div class="overview-table-wrap">
         <table class="overview-table" id="doors-table">
           <thead>
             <tr>
-              <th scope="col">Sensor</th>
-              <th scope="col">State</th>
-              <th scope="col">Kind</th>
-              <th scope="col">Room</th>
-              <th scope="col">Updated</th>
+              <th scope="col" data-i18n="overview.col.sensor">Sensor</th>
+              <th scope="col" data-i18n="overview.col.state">State</th>
+              <th scope="col" data-i18n="overview.col.kind">Kind</th>
+              <th scope="col" data-i18n="overview.col.room">Room</th>
+              <th scope="col" data-i18n="overview.col.updated">Updated</th>
             </tr>
           </thead>
           <tbody id="doors-body">
-            <tr><td colspan="5" class="overview-empty">Loading…</td></tr>
+            <tr><td colspan="5" class="overview-empty" data-i18n="overview.loading">Loading…</td></tr>
           </tbody>
         </table>
       </div>
       <div class="door-log" id="door-log" hidden>
         <div class="door-log-head">
-          <h3 id="door-log-title">Open / close log</h3>
-          <button type="button" class="backfill-btn" id="door-log-close" title="Close log">Close</button>
+          <h3 id="door-log-title" data-i18n="overview.doorLogTitle">Open / close log</h3>
+          <button type="button" class="backfill-btn" id="door-log-close" data-i18n="overview.doorLogClose" data-i18n-title="overview.doorLogCloseTitle" title="Close log">Close</button>
         </div>
-        <p class="overview-hint" id="door-log-hint">Last 7 days</p>
+        <p class="overview-hint" id="door-log-hint" data-i18n="overview.doorLogHint">Last 7 days</p>
         <div class="overview-table-wrap">
           <table class="overview-table door-log-table">
             <thead>
               <tr>
-                <th scope="col">Time</th>
-                <th scope="col">State</th>
-                <th scope="col">Source</th>
+                <th scope="col" data-i18n="overview.col.time">Time</th>
+                <th scope="col" data-i18n="overview.col.state">State</th>
+                <th scope="col" data-i18n="overview.col.source">Source</th>
               </tr>
             </thead>
             <tbody id="door-log-body">
-              <tr><td colspan="3" class="overview-empty">Select a contact…</td></tr>
+              <tr><td colspan="3" class="overview-empty" data-i18n="overview.selectContact">Select a contact…</td></tr>
             </tbody>
           </table>
         </div>
@@ -213,27 +212,28 @@
       <p class="status" id="doors-status" hidden></p>
     </section>
 
-    <section id="view-compare" class="view" role="tabpanel" aria-label="Compare" hidden>
-      <section class="controls" aria-label="Selection">
+    <section id="view-compare" class="view" role="tabpanel" data-i18n-aria-label="nav.compare" aria-label="Compare" hidden>
+      <section class="controls" data-i18n-aria-label="compare.selection" aria-label="Selection">
         <div class="field field-devices">
           <div class="field-head">
-            <span>Devices</span>
+            <span data-i18n="compare.devices">Devices</span>
           </div>
-          <div class="model-filters model-filters-inline" id="compare-model-filters" role="group" aria-label="Filter by model"></div>
-          <div class="category-filters category-filters-inline" id="compare-category-filters" aria-label="Filter by category">
-            <div class="filter-row" id="compare-zone-filters" role="group" aria-label="Zone"></div>
-            <div class="filter-row" id="compare-height-filters" role="group" aria-label="Height"></div>
-            <div class="filter-row" id="compare-room-filters" role="group" aria-label="Room"></div>
+          <div class="model-filters model-filters-inline" id="compare-model-filters" role="group" data-i18n-aria-label="overview.filterModel" aria-label="Filter by model"></div>
+          <div class="category-filters category-filters-inline" id="compare-category-filters" data-i18n-aria-label="overview.filterCategory" aria-label="Filter by category">
+            <div class="filter-row" id="compare-zone-filters" role="group" data-i18n-aria-label="overview.zone" aria-label="Zone"></div>
+            <div class="filter-row" id="compare-height-filters" role="group" data-i18n-aria-label="overview.height" aria-label="Height"></div>
+            <div class="filter-row" id="compare-room-filters" role="group" data-i18n-aria-label="overview.room" aria-label="Room"></div>
           </div>
           <div class="device-list-head">
             <div class="device-actions">
-              <button type="button" id="select-all" class="linkish">All</button>
-              <button type="button" id="select-none" class="linkish">None</button>
+              <button type="button" id="select-all" class="linkish" data-i18n="compare.all">All</button>
+              <button type="button" id="select-none" class="linkish" data-i18n="compare.none">None</button>
             </div>
+            <div id="facade-group-btns" class="facade-group-btns" hidden></div>
           </div>
-          <div id="device-list" class="device-list" role="group" aria-label="Devices to compare"></div>
+          <div id="device-list" class="device-list" role="group" data-i18n-aria-label="compare.devicesGroup" aria-label="Devices to compare"></div>
         </div>
-        <div class="ranges" role="group" aria-label="Time range">
+        <div class="ranges" role="group" data-i18n-aria-label="compare.timeRange" aria-label="Time range">
           <button type="button" data-hours="1">1 h</button>
           <button type="button" data-hours="6">6 h</button>
           <button type="button" data-hours="12">12 h</button>
@@ -242,38 +242,38 @@
           <button type="button" data-hours="168">7 d</button>
           <button type="button" data-hours="336">14 d</button>
           <label class="range-more">
-            <span class="visually-hidden">Longer range</span>
-            <select id="range-select" aria-label="Longer time range">
-              <option value="">More…</option>
+            <span class="visually-hidden" data-i18n="compare.longerRange">Longer range</span>
+            <select id="range-select" data-i18n-aria-label="compare.longerTimeRange" aria-label="Longer time range">
+              <option value="" data-i18n="compare.more">More…</option>
               <option value="720">30 d</option>
               <option value="2160">90 d</option>
               <option value="4320">180 d</option>
               <option value="8760">1 y</option>
               <option value="17520">2 y</option>
               <option value="26280">3 y</option>
-              <option value="custom">Custom…</option>
+              <option value="custom" data-i18n="compare.custom">Custom…</option>
             </select>
           </label>
           <div id="range-custom" class="range-custom" hidden>
             <label>
-              <span>From</span>
+              <span data-i18n="compare.from">From</span>
               <input type="datetime-local" id="range-since" step="60">
             </label>
             <label>
-              <span>To</span>
+              <span data-i18n="compare.to">To</span>
               <input type="datetime-local" id="range-until" step="60">
             </label>
-            <button type="button" id="range-apply">Apply</button>
+            <button type="button" id="range-apply" data-i18n="compare.apply">Apply</button>
           </div>
-          <button type="button" id="range-reset-zoom" class="range-reset-zoom" title="Reset chart zoom">Reset zoom</button>
-          <p class="range-zoom-hint">Drag on a chart to zoom · Shift-drag to pan · double-click to reset</p>
+          <button type="button" id="range-reset-zoom" class="range-reset-zoom" data-i18n="compare.resetZoom" data-i18n-title="compare.resetZoomTitle" title="Reset chart zoom">Reset zoom</button>
+          <p class="range-zoom-hint" data-i18n="compare.zoomHint">Drag on a chart to zoom · Shift-drag to pan · double-click to reset</p>
         </div>
         <label class="forecast-toggle">
           <input type="checkbox" id="show-forecast" checked>
-          <span>Forecast &amp; projections</span>
+          <span data-i18n="compare.forecast">Forecast &amp; projections</span>
         </label>
-        <div class="ranges forecast-future-ranges" role="group" aria-label="Forecast horizon">
-          <span class="forecast-future-label">Future</span>
+        <div class="ranges forecast-future-ranges" role="group" data-i18n-aria-label="compare.forecastHorizon" aria-label="Forecast horizon">
+          <span class="forecast-future-label" data-i18n="compare.future">Future</span>
           <button type="button" data-forecast-future="12">+12 h</button>
           <button type="button" data-forecast-future="24" class="active">+1 d</button>
           <button type="button" data-forecast-future="72">+3 d</button>
@@ -281,28 +281,28 @@
           <button type="button" data-forecast-future="384">+16 d</button>
         </div>
         <label class="forecast-toggle projection-scenario-toggle" for="projection-scenario">
-          <span>Scenario</span>
-          <select id="projection-scenario" title="Which window scenario to plot">
-            <option value="auto">Current opening</option>
-            <option value="closed" selected>Windows closed</option>
-            <option value="open">Windows open</option>
-            <option value="both">Closed + open</option>
-            <option value="coolest">Coolest (open/close)</option>
-            <option value="warmest">Warmest (open/close)</option>
+          <span data-i18n="compare.scenario">Scenario</span>
+          <select id="projection-scenario" data-i18n-title="compare.scenarioTitle" title="Which window scenario to plot">
+            <option value="auto" data-i18n="compare.scenario.auto">Current opening</option>
+            <option value="closed" selected data-i18n="compare.scenario.closed">Windows closed</option>
+            <option value="open" data-i18n="compare.scenario.open">Windows open</option>
+            <option value="both" data-i18n="compare.scenario.both">Closed + open</option>
+            <option value="coolest" data-i18n="compare.scenario.coolest">Coolest (open/close)</option>
+            <option value="warmest" data-i18n="compare.scenario.warmest">Warmest (open/close)</option>
           </select>
         </label>
         <label class="forecast-toggle">
           <input type="checkbox" id="show-window-bands" checked>
-          <span>Window open / close</span>
+          <span data-i18n="compare.windowBands">Window open / close</span>
         </label>
         <label class="forecast-toggle">
           <input type="checkbox" id="show-hvac" checked>
-          <span>AC &amp; power</span>
+          <span data-i18n="compare.hvac">AC &amp; power</span>
         </label>
-        <button type="button" id="locate-btn" class="linkish locate-btn" title="Use browser location">Locate</button>
+        <button type="button" id="locate-btn" class="linkish locate-btn" data-i18n="compare.locate" data-i18n-title="compare.locateTitle" title="Use browser location">Locate</button>
         <span class="geo-status" id="geo-status" aria-live="polite"></span>
         <label class="chart-height-control" for="chart-height">
-          <span>Chart height</span>
+          <span data-i18n="compare.chartHeight">Chart height</span>
           <input type="range" id="chart-height" min="160" max="520" step="20" value="260">
           <span class="chart-height-value" id="chart-height-value">260 px</span>
         </label>
@@ -312,14 +312,14 @@
 
       <details class="compare-fold" id="fold-current">
         <summary class="compare-fold-summary">
-          Current readings
+          <span data-i18n="compare.currentReadings">Current readings</span>
           <span class="compare-fold-meta" id="fold-current-meta"></span>
         </summary>
         <section class="current" id="current" aria-live="polite"></section>
       </details>
       <details class="compare-fold" id="fold-projections" hidden>
         <summary class="compare-fold-summary">
-          Forecast &amp; projections
+          <span data-i18n="compare.foldProjections">Forecast &amp; projections</span>
           <span class="compare-fold-meta" id="fold-projections-meta"></span>
         </summary>
         <section class="projections" id="projections" aria-live="polite"></section>
@@ -328,30 +328,38 @@
       <section class="charts">
         <figure class="chart-block">
           <figcaption>
-            Temperature (°C)
+            <span data-i18n="compare.temp">Temperature (°C)</span>
             <span class="window-legend" id="window-legend" hidden>
-              <span class="window-swatch window-swatch-open"></span> open cools
-              <span class="window-swatch window-swatch-close"></span> open heats
-              <span class="window-swatch window-swatch-humid"></span> too humid
+              <span class="window-swatch window-swatch-open"></span> <span data-i18n="compare.openCools">open cools</span>
+              <span class="window-swatch window-swatch-close"></span> <span data-i18n="compare.openHeats">open heats</span>
+              <span class="window-swatch window-swatch-humid"></span> <span data-i18n="compare.tooHumid">too humid</span>
             </span>
             <span class="window-legend hvac-legend" id="hvac-legend" hidden>
-              <span class="window-swatch window-swatch-hvac"></span> AC on
-              <span class="power-legend-note">· power (W) on right axis</span>
+              <span class="window-swatch window-swatch-hvac"></span> <span data-i18n="compare.acOn">AC on</span>
+              <span class="power-legend-note" data-i18n="compare.powerNote">· power (W) on right axis</span>
             </span>
           </figcaption>
           <canvas id="temp-chart"></canvas>
         </figure>
         <figure class="chart-block">
-          <figcaption>Humidity (%)</figcaption>
+          <figcaption data-i18n="compare.hum">Humidity (%)</figcaption>
           <canvas id="hum-chart"></canvas>
         </figure>
         <figure class="chart-block">
-          <figcaption>Dew point (°C)</figcaption>
+          <figcaption data-i18n="compare.dew">Dew point (°C)</figcaption>
           <canvas id="dew-chart"></canvas>
         </figure>
       </section>
 
-      <p class="status" id="status">Loading…</p>
+      <section id="spread-section" class="compare-spread-section" hidden>
+        <h3 class="spread-title" data-i18n="compare.spread.titleFacade">Temperature spread by façade (°C)</h3>
+        <p class="spread-hint" data-i18n="compare.spread.hintFacade">Max − min across all sensors (indoor + outdoor) sharing the same façade orientation.</p>
+        <figure class="chart-block">
+          <canvas id="spread-chart"></canvas>
+        </figure>
+      </section>
+
+      <p class="status" id="status" data-i18n="compare.loading">Loading…</p>
     </section>
 
     <section id="view-facades" class="view" role="tabpanel" aria-label="Facades" hidden>
@@ -433,7 +441,7 @@
 
       <section class="charts facade-charts" id="facade-charts" hidden></section>
 
-      <details class="compare-fold" id="fold-facade-setup" open>
+      <details class="compare-fold" id="fold-facade-setup">
         <summary class="compare-fold-summary">
           Façade setup
           <span class="compare-fold-meta">orientations &amp; sensors</span>
@@ -1115,8 +1123,107 @@
       <p class="status" id="system-device-status"></p>
       <div class="system-source-charts" id="system-source-charts"></div>
     </section>
+
+    <section id="view-settings" class="view" role="tabpanel" data-i18n-aria-label="nav.settings" aria-label="Settings" hidden>
+      <div class="overview-head">
+        <h2 data-i18n="settings.title">Settings</h2>
+        <p class="overview-hint" data-i18n="settings.hint">Language, voice, and weather station preferences are stored in this browser.</p>
+      </div>
+      <form class="settings-form" id="settings-form" onsubmit="return false;">
+        <label class="settings-field" for="settings-locale">
+          <span class="settings-field-label" data-i18n="settings.language">Language</span>
+          <select id="settings-locale" data-i18n-aria-label="settings.languageHelp" aria-label="User interface language">
+            <option value="en" data-i18n="settings.lang.en">English</option>
+            <option value="fr" data-i18n="settings.lang.fr">Français</option>
+          </select>
+          <span class="settings-field-help" data-i18n="settings.languageHelp">User interface language</span>
+        </label>
+        <label class="settings-field" for="tts-voice-select">
+          <span class="settings-field-label" data-i18n="settings.voice">Voice for alerts</span>
+          <div class="settings-voice-row">
+            <select id="tts-voice-select" data-i18n-aria-label="tts.voiceLabel" aria-label="Voice for alerts">
+              <option value="" data-i18n="tts.voiceDefault">Browser default</option>
+            </select>
+            <button
+              type="button"
+              id="tts-voice-test-btn"
+              class="backfill-btn"
+              data-i18n="settings.voiceTest"
+              data-i18n-title="settings.voiceTestTitle"
+              title="Speak the last alert banner"
+            >
+              Test
+            </button>
+          </div>
+          <span class="settings-field-help" data-i18n="settings.voiceHelp">
+            Voices matching the selected language. Enable voice alerts with the speaker button in the alert bar.
+          </span>
+        </label>
+        <fieldset class="settings-field settings-stations-field">
+          <legend class="settings-field-label" data-i18n="settings.stations">Weather stations</legend>
+          <div
+            id="settings-stations"
+            class="settings-stations-list"
+            role="group"
+            data-i18n-aria-label="settings.stationsHelp"
+            aria-label="Which Météo-France stations to show on Compare"
+          ></div>
+          <p
+            id="settings-stations-empty"
+            class="settings-field-help"
+            data-i18n="settings.stationsEmpty"
+            hidden
+          >
+            No weather stations configured on this node.
+          </p>
+          <span class="settings-field-help" data-i18n="settings.stationsHelp">
+            Choose which stations appear on Compare charts and projection cards. Stored in this browser.
+          </span>
+        </fieldset>
+        <fieldset class="settings-field settings-service-field">
+          <legend class="settings-field-label" data-i18n="settings.service">Service</legend>
+          <div class="settings-service-actions">
+            <button
+              type="button"
+              id="git-pull-btn"
+              class="restart-btn"
+              data-i18n="nav.gitPull"
+              data-i18n-title="nav.gitPullTitle"
+              title="git pull --ff-only"
+            >
+              Git pull
+            </button>
+            <button
+              type="button"
+              id="restart-ui-btn"
+              class="restart-btn"
+              data-i18n="nav.restartUi"
+              data-i18n-title="nav.restartUiTitle"
+              title="Restart UI service"
+            >
+              Restart UI
+            </button>
+            <button
+              type="button"
+              id="restart-workers-btn"
+              class="restart-btn"
+              data-i18n="nav.restartWorkers"
+              data-i18n-title="nav.restartWorkersTitle"
+              title="Restart workers service"
+            >
+              Restart workers
+            </button>
+          </div>
+          <p class="restart-status" id="restart-status" hidden aria-live="polite"></p>
+          <span class="settings-field-help" data-i18n="settings.serviceHelp">
+            Pull the latest code, then restart UI and/or workers to apply changes.
+          </span>
+        </fieldset>
+      </form>
+    </section>
   </main>
 
+  <script src="/static/i18n.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

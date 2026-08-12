@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -36,9 +38,39 @@ def _as_float(value: Any) -> float | None:
     if text in ("unavailable", "unknown", "none", "null"):
         return None
     try:
-        return float(value)
+        parsed = float(str(value).strip().replace(",", "."))
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _ha_state_ts(payload: dict[str, Any] | None) -> float | None:
+    """Parse HA entity last_changed / last_updated as Unix seconds."""
+    if not payload:
+        return None
+    for key in ("last_changed", "last_updated", "last_reported"):
+        raw = payload.get(key)
+        if not raw:
+            continue
+        text = str(raw).strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            ts = datetime.fromisoformat(text).timestamp()
+        except (TypeError, ValueError, OSError):
+            continue
+        if math.isfinite(ts):
+            return ts
+    return None
+
+
+def _reading_ts(
+    *payloads: dict[str, Any] | None,
+    fallback: float,
+) -> float:
+    """Best-effort sample time from HA entity payloads (newest wins)."""
+    stamps = [ts for p in payloads if (ts := _ha_state_ts(p)) is not None]
+    return max(stamps) if stamps else fallback
 
 
 def battery_from_ha(payload: dict[str, Any] | None) -> int:
@@ -219,10 +251,6 @@ class HaThPoller:
     async def _poll_device(
         self, client: httpx.AsyncClient, device: HaThDevice, *, now: float
     ) -> None:
-        last = self._last_store_ts.get(device.address, 0.0)
-        if now - last < self.cfg.sample_interval:
-            return
-
         temp_payload = await self._get_state(client, device.temperature_entity)
         if not temp_payload:
             return
@@ -230,6 +258,7 @@ class HaThPoller:
         if temp_c is None:
             return
 
+        hum_payload: dict[str, Any] | None = None
         humidity = 0.0
         if device.humidity_entity:
             hum_payload = await self._get_state(client, device.humidity_entity)
@@ -237,10 +266,34 @@ class HaThPoller:
             if hum is not None:
                 humidity = hum
 
+        bat_payload: dict[str, Any] | None = None
         battery = 0
         if device.battery_entity:
             bat_payload = await self._get_state(client, device.battery_entity)
             battery = battery_from_ha(bat_payload)
+
+        sample_ts = _reading_ts(
+            temp_payload, hum_payload, bat_payload, fallback=now
+        )
+        source = f"{self.node_id}/ha"
+
+        # Drop rows stored with poll time while HA state was already stale.
+        if sample_ts < now - 30.0:
+            removed = await self.db.delete_readings_after(
+                device.address, sample_ts, source=source
+            )
+            if removed:
+                logger.info(
+                    "HA T/H removed %d poll-time sample(s) for %s "
+                    "(HA state from %.0fs ago)",
+                    removed,
+                    device.address,
+                    now - sample_ts,
+                )
+
+        last_ha_ts = self._last_store_ts.get(device.address, 0.0)
+        if sample_ts <= last_ha_ts:
+            return
 
         reading = Reading(
             temperature_c=temp_c,
@@ -254,10 +307,10 @@ class HaThPoller:
         inserted = await self.db.upsert_reading(
             reading,
             device.label,
-            ts=now,
-            source=f"{self.node_id}/ha",
+            ts=sample_ts,
+            source=source,
         )
-        self._last_store_ts[device.address] = now
+        self._last_store_ts[device.address] = sample_ts
         await self._ensure_categories(device)
         if inserted:
             logger.info(

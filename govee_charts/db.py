@@ -1698,6 +1698,30 @@ class Database:
         await self.db.commit()
         return cursor.rowcount > 0
 
+    async def delete_readings_after(
+        self,
+        address: str,
+        after_ts: float,
+        *,
+        source: str | None = None,
+    ) -> int:
+        """Delete readings strictly newer than after_ts (optional source filter)."""
+        if source is not None:
+            cursor = await self.db.execute(
+                """
+                DELETE FROM readings
+                WHERE address = ? AND ts > ? AND source = ?
+                """,
+                (address, float(after_ts), source),
+            )
+        else:
+            cursor = await self.db.execute(
+                "DELETE FROM readings WHERE address = ? AND ts > ?",
+                (address, float(after_ts)),
+            )
+        await self.db.commit()
+        return int(cursor.rowcount or 0)
+
     async def prune(self, retention_days: float) -> int:
         cutoff = time.time() - retention_days * 86400.0
         cursor = await self.db.execute(

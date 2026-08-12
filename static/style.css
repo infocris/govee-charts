@@ -166,8 +166,7 @@ body {
     order: 1;
   }
 
-  .header-icon-btn,
-  .tts-voice-picker {
+  .header-icon-btn {
     order: 2;
   }
 
@@ -394,26 +393,128 @@ body.sticky-views-enabled .views {
   cursor: not-allowed;
 }
 
-.tts-voice-picker {
-  display: inline-flex;
-  align-items: center;
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 36rem;
+  margin-top: 0.75rem;
 }
 
-.tts-voice-picker select {
-  max-width: 11rem;
-  padding: 0.35rem 0.5rem;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--bg) 45%, transparent);
-  color: var(--muted);
-  font: inherit;
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.settings-field-label {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.settings-field-help {
   font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.settings-field select {
+  max-width: 100%;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.95rem;
   cursor: pointer;
 }
 
-.tts-voice-picker select:hover {
-  color: var(--ink);
+.settings-field select:hover {
   border-color: var(--muted);
+}
+
+.settings-voice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.settings-service-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.settings-service-field .restart-status {
+  max-width: none;
+  margin: 0.15rem 0 0;
+  padding: 0;
+}
+
+.settings-voice-row select {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.settings-voice-row .backfill-btn {
+  flex: 0 0 auto;
+}
+
+.settings-stations-field {
+  border: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.settings-stations-field > legend {
+  padding: 0;
+  margin-bottom: 0.35rem;
+}
+
+.settings-stations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.35rem;
+}
+
+.settings-station-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+  cursor: pointer;
+}
+
+.settings-station-option:hover {
+  border-color: var(--muted);
+}
+
+.settings-station-option-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+
+.settings-station-option-main input {
+  margin-top: 0.2rem;
+  flex: 0 0 auto;
+}
+
+.settings-station-meta {
+  margin-left: 1.35rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  line-height: 1.3;
 }
 
 .header-icon-btn[aria-pressed="true"] {
@@ -2113,9 +2214,42 @@ main {
 
 .device-list-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  gap: 0.4rem 0.75rem;
   justify-content: flex-start;
   margin-top: 0.35rem;
+}
+
+.facade-group-btns {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+}
+
+.facade-group-label {
+  color: var(--muted, #5a6570);
+  font-size: 0.8rem;
+  margin-right: 0.1rem;
+}
+
+.facade-group-btn {
+  background: none;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 3px;
+  padding: 0.1rem 0.45rem;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.facade-group-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
 }
 
 .linkish {
@@ -3711,4 +3845,29 @@ main {
   margin: 0 0 0.4rem;
   font-size: 0.85rem;
   color: var(--muted, #5a6570);
+}
+
+/* ── Compare – Spread section ─────────────────────────────────────── */
+.compare-spread-section {
+  margin-top: 1.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.compare-spread-section .spread-title {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.compare-spread-section .spread-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.83rem;
+  color: var(--muted, #5a6570);
+}
+
+.compare-spread-section .chart-block {
+  border-top: none;
+  padding-top: 0;
 }

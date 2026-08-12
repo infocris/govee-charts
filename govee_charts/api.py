@@ -490,6 +490,7 @@ def create_app(
     @app.get("/coverage")
     @app.get("/backfill")
     @app.get("/system")
+    @app.get("/settings")
     async def index_views() -> HTMLResponse:
         """Client-side routes for direct URL navigation."""
         return index_html_response()

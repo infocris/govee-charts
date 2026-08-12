@@ -1,4 +1,15 @@
 (() => {
+  const I18n = window.I18n || {
+    t: (k) => k,
+    getLocale: () => "en",
+    setLocale: () => {},
+    localeTag: () => "en-GB",
+    speechLang: () => "en-US",
+    applyDom: () => {},
+    onLocaleChange: () => () => {},
+  };
+  const t = (key, vars) => I18n.t(key, vars);
+
   const deviceList = document.getElementById("device-list");
   const currentEl = document.getElementById("current");
   const statusEl = document.getElementById("status");
@@ -29,6 +40,12 @@
   const viewBackfill = document.getElementById("view-backfill");
   const viewCoverage = document.getElementById("view-coverage");
   const viewSystem = document.getElementById("view-system");
+  const viewSettings = document.getElementById("view-settings");
+  const settingsLocaleEl = document.getElementById("settings-locale");
+  const settingsStationsEl = document.getElementById("settings-stations");
+  const settingsStationsEmptyEl = document.getElementById(
+    "settings-stations-empty"
+  );
   const systemStorageSummaryEl = document.getElementById("system-storage-summary");
   const systemStorageHintEl = document.getElementById("system-storage-hint");
   const systemSourceSummaryEl = document.getElementById("system-source-summary");
@@ -132,6 +149,8 @@
   let mapRoomChartsBusy = false;
   /** @type {any} */
   let networkLastData = null;
+  /** Cached rooms from /api/apartment — used to filter window notifications. */
+  let apartmentLastRooms = null;
   const selectAllBtn = document.getElementById("select-all");
   const selectNoneBtn = document.getElementById("select-none");
   const rangeButtons = [
@@ -301,6 +320,7 @@
   const TTS_KEY = "govee-charts.tts";
   const TTS_VOICE_KEY = "govee-charts.ttsVoice";
   const DOOR_BEEP_KEY = "govee-charts.doorBeep";
+  const VISIBLE_STATIONS_KEY = "govee-charts.visibleStations";
   const FOLD_CURRENT_KEY = "govee-charts.foldCurrent";
   const FOLD_PROJ_KEY = "govee-charts.foldProjections";
   const GEO_KEY = "govee-charts.geo";
@@ -348,6 +368,7 @@
     "coverage",
     "backfill",
     "system",
+    "settings",
   ]);
   const VIEW_PATHS = {
     overview: "/overview",
@@ -357,6 +378,7 @@
     coverage: "/coverage",
     backfill: "/backfill",
     system: "/system",
+    settings: "/settings",
   };
 
   function normalizeView(raw) {
@@ -374,6 +396,7 @@
     if (p === "/coverage") return "coverage";
     if (p === "/backfill") return "backfill";
     if (p === "/system") return "system";
+    if (p === "/settings") return "settings";
     return null;
   }
 
@@ -398,6 +421,10 @@
   let windowNotify = localStorage.getItem(WINDOW_NOTIFY_KEY) === "1";
   let ttsEnabled = localStorage.getItem(TTS_KEY) === "1";
   let ttsVoiceURI = localStorage.getItem(TTS_VOICE_KEY) || "";
+  /** @type {{visible:Set<string>, known:Set<string>}|null} null = show all */
+  let stationVisibilityPref = loadStationVisibilityPref();
+  /** @type {object[]} */
+  let availableStationsCache = [];
   let lastSpokenSystemBannerTitle = null;
   /** @type {{hidden?: boolean, tone?: string, title?: string, detail?: string} | null} */
   let windowBannerModel = null;
@@ -409,6 +436,7 @@
   let tempChart = null;
   let humChart = null;
   let dewChart = null;
+  let spreadChart = null;
   /** @type {import('chart.js').Chart[]} */
   let facadeChartInstances = [];
   let historyLoaded = false;
@@ -437,8 +465,8 @@
   const showHvacEl = document.getElementById("show-hvac");
   const windowNotifyEl = document.getElementById("window-notify-btn");
   const ttsEl = document.getElementById("tts-btn");
-  const ttsVoicePickerEl = document.getElementById("tts-voice-picker");
   const ttsVoiceSelectEl = document.getElementById("tts-voice-select");
+  const ttsVoiceTestBtn = document.getElementById("tts-voice-test-btn");
   const doorBeepEl = document.getElementById("door-beep-btn");
   const windowLegendEl = document.getElementById("window-legend");
   const hvacLegendEl = document.getElementById("hvac-legend");
@@ -783,6 +811,183 @@
     return 24;
   }
 
+  function loadStationVisibilityPref() {
+    try {
+      const raw = localStorage.getItem(VISIBLE_STATIONS_KEY);
+      if (raw == null || raw === "") return null;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const visible = new Set(
+          parsed.map((x) => String(x || "").trim()).filter(Boolean)
+        );
+        return { visible, known: new Set(visible) };
+      }
+      if (parsed && typeof parsed === "object") {
+        const visible = new Set(
+          (Array.isArray(parsed.visible) ? parsed.visible : [])
+            .map((x) => String(x || "").trim())
+            .filter(Boolean)
+        );
+        const known = new Set(
+          (Array.isArray(parsed.known) ? parsed.known : [...visible])
+            .map((x) => String(x || "").trim())
+            .filter(Boolean)
+        );
+        return { visible, known };
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    return null;
+  }
+
+  function saveStationVisibilityPref(visibleIds, knownIds) {
+    const visible = [...new Set(visibleIds.map((x) => String(x).trim()).filter(Boolean))];
+    const known = [...new Set(knownIds.map((x) => String(x).trim()).filter(Boolean))];
+    stationVisibilityPref = {
+      visible: new Set(visible),
+      known: new Set(known),
+    };
+    try {
+      localStorage.setItem(
+        VISIBLE_STATIONS_KEY,
+        JSON.stringify({ visible, known })
+      );
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function isStationVisible(stationId) {
+    const id = String(stationId || "").trim();
+    if (!id) return false;
+    if (!stationVisibilityPref) return true;
+    if (!stationVisibilityPref.known.has(id)) return true;
+    return stationVisibilityPref.visible.has(id);
+  }
+
+  function stationsFromBlock(stationBlock) {
+    const block = stationBlock || {};
+    if (Array.isArray(block.stations) && block.stations.length) {
+      return block.stations.filter((s) => s && s.station_id);
+    }
+    if (block.enabled && block.station_id) return [block];
+    return [];
+  }
+
+  function filterStationList(stations) {
+    return (stations || []).filter((s) => isStationVisible(s.station_id));
+  }
+
+  function rememberAvailableStations(stationBlock) {
+    const list = stationsFromBlock(stationBlock);
+    if (!list.length) return;
+    const byId = new Map(
+      availableStationsCache.map((s) => [String(s.station_id), s])
+    );
+    for (const s of list) {
+      byId.set(String(s.station_id), s);
+    }
+    availableStationsCache = [...byId.values()];
+    renderSettingsStations();
+  }
+
+  function stationCoordsHint(station) {
+    const latest =
+      (station && station.latest) ||
+      ((station && station.points) || []).slice().sort((a, b) => a.ts - b.ts).pop();
+    if (!latest) return "";
+    const lat = latest.lat;
+    const lon = latest.lon;
+    if (lat == null || lon == null) return "";
+    const latN = Number(lat);
+    const lonN = Number(lon);
+    if (!Number.isFinite(latN) || !Number.isFinite(lonN)) return "";
+    return t("settings.stationsCoords", {
+      lat: latN.toFixed(4),
+      lon: lonN.toFixed(4),
+    });
+  }
+
+  function renderSettingsStations() {
+    if (!settingsStationsEl) return;
+    const stations = availableStationsCache.slice().sort((a, b) =>
+      String(a.station_name || a.station_id).localeCompare(
+        String(b.station_name || b.station_id),
+        I18n.getLocale()
+      )
+    );
+    settingsStationsEl.innerHTML = "";
+    if (settingsStationsEmptyEl) {
+      settingsStationsEmptyEl.hidden = stations.length > 0;
+    }
+    for (const station of stations) {
+      const id = String(station.station_id || "").trim();
+      if (!id) continue;
+      const name = station.station_name || id;
+      const label = document.createElement("label");
+      label.className = "settings-station-option";
+      const main = document.createElement("span");
+      main.className = "settings-station-option-main";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = id;
+      input.checked = isStationVisible(id);
+      input.addEventListener("change", onSettingsStationsChange);
+      const text = document.createElement("span");
+      text.textContent = `${name} (${id})`;
+      main.append(input, text);
+      label.appendChild(main);
+      const coords = stationCoordsHint(station);
+      if (coords) {
+        const meta = document.createElement("span");
+        meta.className = "settings-station-meta";
+        meta.textContent = coords;
+        label.appendChild(meta);
+      }
+      settingsStationsEl.appendChild(label);
+    }
+  }
+
+  function onSettingsStationsChange() {
+    if (!settingsStationsEl) return;
+    const inputs = [
+      ...settingsStationsEl.querySelectorAll('input[type="checkbox"]'),
+    ];
+    const known = inputs.map((el) => el.value);
+    const visible = inputs.filter((el) => el.checked).map((el) => el.value);
+    saveStationVisibilityPref(visible, known);
+    if (currentView === "compare" && historyLoaded) {
+      loadHistory().catch((err) => {
+        if (statusEl) {
+          statusEl.textContent = t("compare.error", { error: err.message });
+        }
+      });
+    }
+  }
+
+  async function ensureStationsForSettings() {
+    renderSettingsStations();
+    if (availableStationsCache.length) return;
+    try {
+      const params = new URLSearchParams({
+        hours: "24",
+        future_hours: "24",
+      });
+      if (browserGeo) {
+        params.set("latitude", String(browserGeo.latitude));
+        params.set("longitude", String(browserGeo.longitude));
+      }
+      const res = await fetch(`/api/forecast?${params}`);
+      if (!res.ok) throw new Error(`forecast HTTP ${res.status}`);
+      const data = await res.json();
+      rememberAvailableStations(data.station || {});
+    } catch (err) {
+      console.warn("Could not load stations for settings", err);
+      renderSettingsStations();
+    }
+  }
+
   function syncForecastFutureButtons() {
     const btns = document.querySelectorAll(
       ".forecast-future-ranges > button[data-forecast-future]"
@@ -918,7 +1123,9 @@
     );
     document.documentElement.style.setProperty("--chart-height", `${height}px`);
     if (chartHeightEl) chartHeightEl.value = String(height);
-    if (chartHeightValueEl) chartHeightValueEl.textContent = `${height} px`;
+    if (chartHeightValueEl) {
+      chartHeightValueEl.textContent = t("compare.chartHeightPx", { n: height });
+    }
     if (persist) localStorage.setItem(CHART_HEIGHT_KEY, String(height));
     resizeAllCharts();
     return height;
@@ -1332,7 +1539,7 @@
 
   function fmtTime(ts) {
     if (!ts) return "—";
-    return new Date(ts * 1000).toLocaleString("en-GB", {
+    return new Date(ts * 1000).toLocaleString(I18n.localeTag(), {
       day: "2-digit",
       month: "2-digit",
       hour: "2-digit",
@@ -4121,20 +4328,21 @@
   function sortedDevices(list) {
     const { key, dir } = sortState;
     const factor = dir === "asc" ? 1 : -1;
+    const loc = I18n.getLocale();
     return [...list].sort((a, b) => {
       const va = sortValue(a, key);
       const vb = sortValue(b, key);
       if (va == null && vb == null) {
-        return a.name.localeCompare(b.name, "fr");
+        return a.name.localeCompare(b.name, loc);
       }
       if (va == null) return 1;
       if (vb == null) return -1;
       if (typeof va === "string" && typeof vb === "string") {
-        const cmp = va.localeCompare(vb, "fr");
-        return cmp !== 0 ? cmp * factor : a.name.localeCompare(b.name, "fr");
+        const cmp = va.localeCompare(vb, loc);
+        return cmp !== 0 ? cmp * factor : a.name.localeCompare(b.name, loc);
       }
       if (va !== vb) return (va < vb ? -1 : 1) * factor;
-      return a.name.localeCompare(b.name, "fr");
+      return a.name.localeCompare(b.name, loc);
     });
   }
 
@@ -4158,7 +4366,7 @@
     activeModels = activeModels.filter((m) => models.includes(m));
     if (activeModels.length !== before) persistModelFilter();
     container.innerHTML = "";
-    const options = [{ id: "all", label: "All models" }].concat(
+    const options = [{ id: "all", label: t("overview.allModels") }].concat(
       models.map((m) => ({ id: m, label: m.toUpperCase() }))
     );
     for (const opt of options) {
@@ -4179,7 +4387,7 @@
         updateCurrent();
         if (currentView === "compare") {
           loadHistory().catch((err) => {
-            statusEl.textContent = `Error: ${err.message}`;
+            statusEl.textContent = t("compare.error", { error: err.message });
           });
         }
       });
@@ -4208,13 +4416,17 @@
   function renderCategoryFilterRow(container, kind, options) {
     if (!container) return;
     container.dataset.label =
-      kind === "zone" ? "Zone" : kind === "height" ? "Height" : "Room";
+      kind === "zone"
+        ? t("overview.zone")
+        : kind === "height"
+          ? t("overview.height")
+          : t("overview.room");
     container.innerHTML = "";
     const allowed = new Set((options || []).map((o) => o.id));
     const before = catFilters[kind].length;
     catFilters[kind] = catFilters[kind].filter((id) => allowed.has(id));
     if (catFilters[kind].length !== before) persistCatFilters();
-    const items = [{ id: "all", label: "All" }].concat(options || []);
+    const items = [{ id: "all", label: t("overview.all") }].concat(options || []);
     for (const opt of items) {
       const btn = document.createElement("button");
       btn.type = "button";
@@ -4235,7 +4447,7 @@
         updateCurrent();
         if (currentView === "compare") {
           loadHistory().catch((err) => {
-            statusEl.textContent = `Error: ${err.message}`;
+            statusEl.textContent = t("compare.error", { error: err.message });
           });
         }
       });
@@ -4313,12 +4525,12 @@
     if (!doorsBody) return;
     doorsBody.innerHTML = "";
     if (!doorSensors.length) {
-      doorsBody.innerHTML =
-        '<tr><td colspan="5" class="overview-empty">No door/window contacts yet</td></tr>';
+      doorsBody.innerHTML = `<tr><td colspan="5" class="overview-empty">${escapeHtml(
+        t("overview.noDoorsYet")
+      )}</td></tr>`;
       if (doorsStatus) {
         doorsStatus.hidden = false;
-        doorsStatus.textContent =
-          "Waiting for MQTT contact sensors (enable [doors] in config)…";
+        doorsStatus.textContent = t("overview.waitingDoors");
       }
       if (doorLogEl) doorLogEl.hidden = true;
       return;
@@ -4375,7 +4587,9 @@
     if (doorLogEl) doorLogEl.hidden = true;
     if (doorLogBodyEl) {
       doorLogBodyEl.innerHTML =
-        '<tr><td colspan="3" class="overview-empty">Select a contact…</td></tr>';
+        `<tr><td colspan="3" class="overview-empty">${escapeHtml(
+          t("overview.selectContact")
+        )}</td></tr>`;
     }
     updateDoorsTable();
   }
@@ -4386,13 +4600,20 @@
     updateDoorsTable();
     doorLogEl.hidden = false;
     if (doorLogTitleEl) {
-      doorLogTitleEl.textContent = `${sensor.name || sensor.sensor_id} — open / close log`;
+      doorLogTitleEl.textContent = t("overview.doorLogNamed", {
+        name: sensor.name || sensor.sensor_id,
+      });
     }
     if (doorLogHintEl) {
-      doorLogHintEl.textContent = `Last ${hours >= 24 ? `${hours / 24} days` : `${hours} h`}`;
+      doorLogHintEl.textContent =
+        hours >= 24
+          ? t("overview.doorLogLastDays", { n: hours / 24 })
+          : t("overview.doorLogLastHours", { n: hours });
     }
     doorLogBodyEl.innerHTML =
-      '<tr><td colspan="3" class="overview-empty">Loading…</td></tr>';
+      `<tr><td colspan="3" class="overview-empty">${escapeHtml(
+        t("overview.loading")
+      )}</td></tr>`;
     try {
       const res = await fetch(
         `/api/doors/history?hours=${encodeURIComponent(hours)}` +
@@ -4405,7 +4626,9 @@
       events.reverse();
       if (!events.length) {
         doorLogBodyEl.innerHTML =
-          '<tr><td colspan="3" class="overview-empty">No open/close events in this period</td></tr>';
+          `<tr><td colspan="3" class="overview-empty">${escapeHtml(
+            t("overview.doorLogEmpty")
+          )}</td></tr>`;
         return;
       }
       doorLogBodyEl.innerHTML = events
@@ -4422,8 +4645,8 @@
         .join("");
     } catch (err) {
       doorLogBodyEl.innerHTML =
-        `<tr><td colspan="3" class="overview-empty">Log unavailable: ${escapeHtml(
-          err.message
+        `<tr><td colspan="3" class="overview-empty">${escapeHtml(
+          t("overview.doorLogUnavailable", { error: err.message })
         )}</td></tr>`;
     }
   }
@@ -4438,12 +4661,13 @@
       updateDoorsTable();
     } catch (err) {
       if (doorsBody) {
-        doorsBody.innerHTML =
-          '<tr><td colspan="5" class="overview-empty">Doors unavailable</td></tr>';
+        doorsBody.innerHTML = `<tr><td colspan="5" class="overview-empty">${escapeHtml(
+          t("overview.doorsUnavailable")
+        )}</td></tr>`;
       }
       if (doorsStatus) {
         doorsStatus.hidden = false;
-        doorsStatus.textContent = `Error: ${err.message}`;
+        doorsStatus.textContent = t("common.error", { error: err.message });
       }
     }
   }
@@ -4512,7 +4736,9 @@
       } catch (err) {
         console.error(err);
         select.value = previous;
-        overviewStatus.textContent = `Category update failed: ${err.message}`;
+        overviewStatus.textContent = t("overview.catFailed", {
+          error: err.message,
+        });
       } finally {
         select.disabled = false;
       }
@@ -4582,6 +4808,7 @@
     if (viewCoverage) viewCoverage.hidden = view !== "coverage";
     if (viewBackfill) viewBackfill.hidden = view !== "backfill";
     if (viewSystem) viewSystem.hidden = view !== "system";
+    if (viewSettings) viewSettings.hidden = view !== "settings";
     viewButtons.forEach((btn) => {
       const active = btn.dataset.view === view;
       btn.classList.toggle("active", active);
@@ -4591,7 +4818,7 @@
     syncDataMega(view);
     if (view === "compare" && !historyLoaded) {
       loadHistory().catch((err) => {
-        statusEl.textContent = `Error: ${err.message}`;
+        statusEl.textContent = t("compare.error", { error: err.message });
       });
     } else if (view === "compare" && tempChart && humChart) {
       tempChart.resize();
@@ -4622,6 +4849,8 @@
       loadBackfill().catch((err) => console.warn(err));
     } else if (view === "system") {
       loadSystem().catch((err) => console.warn(err));
+    } else if (view === "settings") {
+      ensureStationsForSettings().catch((err) => console.warn(err));
     }
     syncBackfillPolling();
   }
@@ -4643,6 +4872,7 @@
     const res = await fetch(`/api/apartment?${params}`);
     if (!res.ok) throw new Error(`apartment HTTP ${res.status}`);
     const data = await res.json();
+    if (data.rooms) apartmentLastRooms = data.rooms;
     renderFacades(data);
   }
 
@@ -4660,6 +4890,7 @@
     if (!res.ok) throw new Error(`apartment HTTP ${res.status}`);
     const data = await res.json();
     networkLastData = data;
+    if (data.rooms) apartmentLastRooms = data.rooms;
     renderNetwork(data);
   }
 
@@ -7214,6 +7445,41 @@
     if (!bands || !bands.length) {
       return "No clear open/close windows in this period (±0.5 °C).";
     }
+    const count = { open: 0, close: 0, humid: 0, natural: 0, mechanical: 0 };
+    const hours = { open: 0, close: 0, humid: 0, natural: 0, mechanical: 0 };
+    for (const b of bands) {
+      const durH = Math.max(0, (Number(b.x2) - Number(b.x1)) / 3600000);
+      if (count[b.kind] != null) {
+        count[b.kind] += 1;
+        hours[b.kind] += durH;
+      }
+      if (b.vent && count[b.vent] != null) {
+        count[b.vent] += 1;
+        hours[b.vent] += durH;
+      }
+    }
+    const fmtH = (h) => {
+      if (h < 1) return `${Math.round(h * 60)} min`;
+      return `${h.toFixed(h >= 10 ? 0 : 1)} h`;
+    };
+    const parts = [];
+    if (count.open) parts.push(`Open ×${count.open} (${fmtH(hours.open)})`);
+    if (count.close) parts.push(`Close ×${count.close} (${fmtH(hours.close)})`);
+    if (count.humid) parts.push(`Too humid ×${count.humid} (${fmtH(hours.humid)})`);
+    if (count.natural) {
+      parts.push(`Natural OK ×${count.natural} (${fmtH(hours.natural)})`);
+    }
+    if (count.mechanical) {
+      parts.push(
+        `Mechanical preferred ×${count.mechanical} (${fmtH(hours.mechanical)})`
+      );
+    }
+    return parts.join(" · ") || "No clear open/close windows in this period.";
+  }
+
+  /** Detailed ranges for tooltip (hover), not shown inline. */
+  function formatWindowScheduleDetail(bands) {
+    if (!bands || !bands.length) return "";
     const byKind = { open: [], close: [], humid: [] };
     const byVent = { natural: [], mechanical: [] };
     for (const b of bands) {
@@ -7234,7 +7500,7 @@
     if (byVent.mechanical.length) {
       parts.push(`Mechanical preferred ${byVent.mechanical.join(", ")}`);
     }
-    return parts.join(" · ") || "No clear open/close windows in this period.";
+    return parts.join(" · ");
   }
 
   const ORIENTATION_DEG = {
@@ -7614,9 +7880,11 @@
           }
         );
         scheduleEl.textContent = formatWindowSchedule(bands);
-        if (indoor.room) {
-          scheduleEl.title = `Based on ${indoor.room.label || indoor.room.id} vs outdoor air + wind (past + forecast)`;
-        }
+        const detail = formatWindowScheduleDetail(bands);
+        const basedOn = indoor.room
+          ? `Based on ${indoor.room.label || indoor.room.id} vs outdoor air + wind (past + forecast)`
+          : "";
+        scheduleEl.title = [basedOn, detail].filter(Boolean).join("\n\n");
       } else if (!showWindowBands) {
         scheduleEl.textContent = "";
       } else {
@@ -8012,20 +8280,20 @@
     const dOut = text != null ? text.toFixed(1) : "?";
     if (kind === "open") {
       return {
-        title: `Open windows — ${label}`,
-        body: `Outdoor air is cooler (${dOut} °C vs ${dIn} °C indoors) and dry enough.`,
+        title: t("notify.openTitle", { label }),
+        body: t("notify.openBody", { out: dOut, in: dIn }),
       };
     }
     if (kind === "close") {
       return {
-        title: `Close windows — ${label}`,
-        body: `Outdoor air is warmer (${dOut} °C vs ${dIn} °C indoors).`,
+        title: t("notify.closeTitle", { label }),
+        body: t("notify.closeBody", { out: dOut, in: dIn }),
       };
     }
     if (kind === "humid") {
       return {
-        title: `Keep windows closed — ${label}`,
-        body: `Outdoor is cooler (${dOut} °C) but too humid (high dew point).`,
+        title: t("notify.humidTitle", { label }),
+        body: t("notify.humidBody", { out: dOut }),
       };
     }
     return null;
@@ -8136,57 +8404,73 @@
         hidden: false,
         tone: "idle",
         title: hasContacts
-          ? "No interior rooms with both a sensor and a contact"
-          : "No door/window contacts linked to rooms",
+          ? t("banner.noRoomsContacts")
+          : t("banner.noContacts"),
         detail: hasContacts
-          ? "Assign a room on Overview → Doors & windows to include them here."
-          : "Enable [doors] and map contacts to rooms on Overview.",
+          ? t("banner.assignRooms")
+          : t("banner.enableDoors"),
       };
     }
 
     const outT = Number(outdoorNow.temperature_c).toFixed(1);
-    let climateBit = `Outdoor ${outT} °C`;
+    let climateBit = t("banner.outdoor", { temp: outT });
     if (outdoorNow.humidity != null && outdoorNow.humidity > 0) {
       const dew = dewPoint(outdoorNow.temperature_c, outdoorNow.humidity);
-      climateBit += ` · dew ${dew.toFixed(1)} °C · RH ${Number(outdoorNow.humidity).toFixed(0)} %`;
+      climateBit += t("banner.dewRh", {
+        dew: dew.toFixed(1),
+        rh: Number(outdoorNow.humidity).toFixed(0),
+      });
     }
     const openBit = openContactNames.length
-      ? `Open now: ${openContactNames.join(", ")}`
-      : "All tracked openings closed";
+      ? t("banner.openNow", { names: openContactNames.join(", ") })
+      : t("banner.allClosed");
 
     const join = (arr) => arr.join(", ");
 
     let tone = "idle";
-    let title = "No strong window action";
-    let detail = `${climateBit}. Indoor and outdoor temperatures are close. ${openBit}.`;
+    let title = t("banner.noAction");
+    let detail = t("banner.tempsClose", { climate: climateBit, open: openBit });
 
     if (closeNow.length) {
       tone = humidBias ? "humid" : "close";
-      title = `Close windows — ${join(closeNow)}`;
+      title = t("banner.closeTitle", { rooms: join(closeNow) });
       detail = humidBias
-        ? `${climateBit}. Outdoor is cooler but too humid while openings are still open. ${openBit}.`
-        : `${climateBit}. Outdoor air is warmer than indoors. ${openBit}.`;
+        ? t("banner.closeHumid", { climate: climateBit, open: openBit })
+        : t("banner.closeWarm", { climate: climateBit, open: openBit });
       if (openNow.length) {
-        detail = `${detail} Also open: ${join(openNow)}.`;
+        detail = `${detail}${t("banner.alsoOpen", { rooms: join(openNow) })}`;
       }
     } else if (openNow.length) {
       tone = "open";
-      title = `Open windows — ${join(openNow)}`;
-      detail = `${climateBit}. Outdoor is cooler and dry enough. ${openBit}.`;
+      title = t("banner.openTitle", { rooms: join(openNow) });
+      detail = t("banner.openDetail", { climate: climateBit, open: openBit });
     } else if (okOpen.length) {
       tone = "ok";
-      title = `Windows OK open — ${join(okOpen)}`;
-      detail = `${climateBit}. Cooling with outdoor air. ${openBit}.`;
+      title = t("banner.okOpenTitle", { rooms: join(okOpen) });
+      detail = t("banner.okOpenDetail", { climate: climateBit, open: openBit });
       if (okClosed.length) {
-        detail = `${detail} Closed OK: ${join(okClosed)}.`;
+        detail = `${detail}${t("banner.closedOk", { rooms: join(okClosed) })}`;
       }
     } else if (okClosed.length) {
       tone = "ok";
-      title = `Windows OK closed — ${join(okClosed)}`;
-      detail = `${climateBit}. ${openBit}.`;
+      title = t("banner.okClosedTitle", { rooms: join(okClosed) });
+      detail = t("banner.okClosedDetail", {
+        climate: climateBit,
+        open: openBit,
+      });
     }
 
     return { hidden: false, tone, title, detail };
+  }
+
+  /** @type {string} Last visible alert-bar banner / notification text for TTS test. */
+  let lastDisplayedAlertText = "";
+
+  function rememberDisplayedAlert(title, detail) {
+    const head = String(title || "").trim();
+    const body = String(detail || "").trim();
+    if (!head && !body) return;
+    lastDisplayedAlertText = body ? `${head}. ${body}` : head;
   }
 
   function renderWindowBanner(model) {
@@ -8204,6 +8488,7 @@
     windowBannerModel = model;
     if (windowBannerTitleEl) windowBannerTitleEl.textContent = model.title || "";
     if (windowBannerDetailEl) windowBannerDetailEl.textContent = model.detail || "";
+    rememberDisplayedAlert(model.title, model.detail);
     syncTopBarTones();
     // Banner height changes with content — refresh sticky offset under fixed top-bar.
     requestAnimationFrame(refreshViewsStickyState);
@@ -8224,12 +8509,14 @@
     if (!health.workers_available) {
       const age = health.workers_age_s;
       const ageBit =
-        age == null ? "no heartbeat" : `last seen ${formatDuration(age)} ago`;
+        age == null
+          ? t("banner.noHeartbeat")
+          : t("banner.lastSeen", { age: formatDuration(age) });
       return {
         hidden: false,
         tone: "crit",
-        title: "Workers offline",
-        detail: `BLE collector / workers not responding (${ageBit}). Restart workers if this persists.`,
+        title: t("banner.workersOffline"),
+        detail: t("banner.workersDetail", { age: ageBit }),
       };
     }
     const ble = health.ble || {};
@@ -8241,13 +8528,13 @@
     }
     const ageBit =
       ble.age_s == null
-        ? "no advertisements since start"
-        : `no advertisements for ${formatDuration(ble.age_s)}`;
+        ? t("banner.bleNoAdsStart")
+        : t("banner.bleNoAdsFor", { age: formatDuration(ble.age_s) });
     return {
       hidden: false,
       tone: "warn",
-      title: "BLE scan stalled",
-      detail: `${ageBit}. Check the USB Bluetooth dongle / BlueZ, then restart workers.`,
+      title: t("banner.bleStalled"),
+      detail: t("banner.bleDetail", { age: ageBit }),
     };
   }
 
@@ -8267,6 +8554,7 @@
     systemBannerModel = model;
     if (systemBannerTitleEl) systemBannerTitleEl.textContent = model.title || "";
     if (systemBannerDetailEl) systemBannerDetailEl.textContent = model.detail || "";
+    rememberDisplayedAlert(model.title, model.detail);
     // Speak only on a fresh alert (not on every 30s poll while it stays active).
     if (model.title && model.title !== lastSpokenSystemBannerTitle) {
       speak(model.detail ? `${model.title}. ${model.detail}` : model.title);
@@ -8410,19 +8698,23 @@
     return result;
   }
 
-  function speak(text) {
-    if (!ttsEnabled || !text) return;
+  function speak(text, opts = {}) {
+    const force = !!opts.force;
+    if ((!ttsEnabled && !force) || !text) return;
     if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
       return;
     }
     try {
+      if (force) {
+        window.speechSynthesis.cancel();
+      }
       const utter = new SpeechSynthesisUtterance(text);
       const voice = ttsVoiceURI
         ? window.speechSynthesis
             .getVoices()
             .find((v) => v.voiceURI === ttsVoiceURI)
         : null;
-      utter.lang = voice ? voice.lang : "en-US";
+      utter.lang = voice ? voice.lang : I18n.speechLang();
       if (voice) utter.voice = voice;
       window.speechSynthesis.speak(utter);
     } catch (err) {
@@ -8479,6 +8771,17 @@
 
   let ttsVoicePollAttempts = 0;
 
+  function normalizeVoiceLang(lang) {
+    return String(lang || "")
+      .toLowerCase()
+      .replace(/_/g, "-");
+  }
+
+  function voiceMatchesLocale(voice, locale) {
+    const lang = normalizeVoiceLang(voice.lang);
+    return lang === locale || lang.startsWith(`${locale}-`);
+  }
+
   function populateTtsVoiceOptions() {
     if (!ttsVoiceSelectEl || !("speechSynthesis" in window)) return;
     const voices = window.speechSynthesis.getVoices();
@@ -8492,28 +8795,44 @@
       return;
     }
     ttsVoicePollAttempts = 20;
-    const sorted = [...voices].sort((a, b) =>
-      `${a.lang} ${a.name}`.localeCompare(`${b.lang} ${b.name}`)
-    );
+    const locale = I18n.getLocale();
+    const matching = [...voices]
+      .filter((v) => voiceMatchesLocale(v, locale))
+      .sort((a, b) =>
+        `${a.lang} ${a.name}`.localeCompare(
+          `${b.lang} ${b.name}`,
+          locale
+        )
+      );
+
     const previousValue = ttsVoiceSelectEl.value;
     ttsVoiceSelectEl.innerHTML = "";
     const defaultOpt = document.createElement("option");
     defaultOpt.value = "";
-    defaultOpt.textContent = "Browser default";
+    defaultOpt.textContent = t("tts.voiceDefault");
     ttsVoiceSelectEl.appendChild(defaultOpt);
-    for (const v of sorted) {
+    for (const v of matching) {
       const opt = document.createElement("option");
       opt.value = v.voiceURI;
-      opt.textContent = `${v.name} (${v.lang})`;
+      opt.textContent = `${v.name} (${v.lang || "?"})`;
       ttsVoiceSelectEl.appendChild(opt);
     }
+
     const wanted = previousValue || ttsVoiceURI;
-    ttsVoiceSelectEl.value = sorted.some((v) => v.voiceURI === wanted)
-      ? wanted
-      : "";
+    const stillValid = matching.some((v) => v.voiceURI === wanted);
+    if (wanted && !stillValid) {
+      ttsVoiceURI = "";
+      try {
+        localStorage.setItem(TTS_VOICE_KEY, "");
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    ttsVoiceSelectEl.value = stillValid ? wanted : "";
   }
 
   function sendWindowNotification(title, body, tag) {
+    rememberDisplayedAlert(title, body);
     speak(body ? `${title}. ${body}` : title);
     bumpBadge();
     if (!("Notification" in window) || Notification.permission !== "granted") {
@@ -8538,6 +8857,18 @@
    * Prefer one sensor per interior room (skip exterior / uncategorized).
    */
   function interiorRoomDevices() {
+    // Build set of rooms that have at least one exterior façade orientation.
+    // If apartment config isn't loaded yet, fall back to allowing all rooms
+    // (conservative — avoids silently suppressing all notifications on first load).
+    let windowedRooms = null;
+    if (apartmentLastRooms && apartmentLastRooms.length) {
+      windowedRooms = new Set(
+        apartmentLastRooms
+          .filter((r) => Array.isArray(r.exterior) && r.exterior.length > 0)
+          .map((r) => String(r.id).toLowerCase())
+      );
+    }
+
     const byRoom = new Map();
     for (const d of devices) {
       const zone = (d.zone || "").toLowerCase();
@@ -8545,6 +8876,8 @@
       const room = (d.room || "").toLowerCase();
       if (!room || room === "other") continue;
       if (d.temperature_c == null || d.humidity == null) continue;
+      // Skip rooms that have no exterior windows configured.
+      if (windowedRooms && !windowedRooms.has(room)) continue;
       if (!byRoom.has(room)) byRoom.set(room, d);
     }
     return [...byRoom.entries()];
@@ -8627,8 +8960,11 @@
         sendWindowNotification(msg.title, msg.body, `govee-window-${key}`);
       } else if (prevKind === "open" || prevKind === "close" || prevKind === "humid") {
         sendWindowNotification(
-          `Windows — ${label}`,
-          `Indoor and outdoor temperatures are close (${tin.toFixed(1)} °C / ${text.toFixed(1)} °C).`,
+          t("notify.neutralTitle", { label }),
+          t("notify.neutralBody", {
+            in: tin.toFixed(1),
+            out: text.toFixed(1),
+          }),
           `govee-window-${key}`
         );
       }
@@ -8653,9 +8989,10 @@
       const show = bands && bands.length > 0;
       windowLegendEl.hidden = !show;
       if (show && deviceLabel) {
-        windowLegendEl.title =
-          `Based on ${deviceLabel} vs outdoor (temp ±${WINDOW_DELTA_C} °C, ` +
-          `dew point vs indoor air)`;
+        windowLegendEl.title = t("compare.windowLegendTitle", {
+          label: deviceLabel,
+          delta: WINDOW_DELTA_C,
+        });
       } else {
         windowLegendEl.title = "";
       }
@@ -8827,6 +9164,214 @@
     bindChartLegend(dewChart);
   }
 
+  /**
+   * Build time-bucketed spread (max-min) series per room from loaded results.
+   * @param {Array<{device: object, points: Array}>} results
+   * @param {number} bucketMs  bucket width in milliseconds
+   * @returns {Map<string, Array<{x:number, y:number}>>}  room → sorted points
+   */
+  /** room id → facade orientation key (e.g. "sw", "ne"), or "" if no exterior. */
+  function facadeKeyForRoom(roomId) {
+    const rid = String(roomId || "").toLowerCase();
+    if (!rid || !apartmentLastRooms) return "";
+    const room = apartmentLastRooms.find(
+      (r) => String(r.id || "").toLowerCase() === rid
+    );
+    if (!room) return "";
+    return networkFacadeKey(room);
+  }
+
+  function facadeDisplayLabel(key) {
+    if (!key) return "";
+    return key
+      .split("+")
+      .map((o) => o.toUpperCase())
+      .join("+");
+  }
+
+  async function ensureApartmentRooms() {
+    if (apartmentLastRooms && apartmentLastRooms.length) return;
+    try {
+      const res = await fetch("/api/apartment?hours=1");
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.rooms) apartmentLastRooms = data.rooms;
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  /**
+   * Max−min temperature across all selected sensors that share a façade
+   * (rooms with the same exterior orientation(s)).
+   * Falls back to per-room max−min when apartment façades are unavailable.
+   * Returns [{ key, label, pts }].
+   */
+  function computeFacadeSpread(results, bucketMs) {
+    const avg = (arr) => arr.reduce((s, v) => s + v, 0) / arr.length;
+
+    /** groupKey → bucket_ms → address → [temps] */
+    const groups = new Map();
+    const useFacades =
+      apartmentLastRooms &&
+      apartmentLastRooms.some(
+        (r) => Array.isArray(r.exterior) && r.exterior.length > 0
+      );
+
+    for (const { device, points } of results) {
+      const room = (device.room || "").trim().toLowerCase();
+      if (!room) continue;
+      let key;
+      let label;
+      if (useFacades) {
+        key = facadeKeyForRoom(room);
+        if (!key) continue; // rooms without windows are not façades
+        label = facadeDisplayLabel(key);
+      } else {
+        key = `room:${room}`;
+        label = room.charAt(0).toUpperCase() + room.slice(1);
+      }
+      if (!groups.has(key)) {
+        groups.set(key, { label, buckets: new Map() });
+      }
+      const group = groups.get(key);
+      const addr = device.address;
+      for (const p of points) {
+        if (p.temperature_c == null || !Number.isFinite(Number(p.temperature_c))) {
+          continue;
+        }
+        const bucket = Math.floor((p.ts * 1000) / bucketMs) * bucketMs;
+        if (!group.buckets.has(bucket)) group.buckets.set(bucket, new Map());
+        const byAddr = group.buckets.get(bucket);
+        if (!byAddr.has(addr)) byAddr.set(addr, []);
+        byAddr.get(addr).push(Number(p.temperature_c));
+      }
+    }
+
+    const series = [];
+    for (const [key, group] of groups) {
+      const pts = [];
+      for (const [bucket, byAddr] of group.buckets) {
+        if (byAddr.size < 2) continue;
+        const sensorAvgs = [...byAddr.values()].map(avg);
+        const spread = Math.max(...sensorAvgs) - Math.min(...sensorAvgs);
+        pts.push({
+          x: bucket + bucketMs / 2,
+          y: Math.round(spread * 10) / 10,
+        });
+      }
+      pts.sort((a, b) => a.x - b.x);
+      if (pts.length) {
+        series.push({ key, label: group.label, pts });
+      }
+    }
+    series.sort((a, b) => a.label.localeCompare(b.label));
+    return series;
+  }
+
+  const FACADE_SPREAD_COLORS = {
+    sw: "#61afef",
+    ne: "#98c379",
+    nw: "#e5c07b",
+    se: "#c678dd",
+    n: "#56b6c2",
+    s: "#e06c75",
+    e: "#d19a66",
+    w: "#abb2bf",
+  };
+  const FACADE_FALLBACK_COLORS = ["#e06c75", "#d19a66", "#be5046", "#5c6370"];
+
+  function facadeSeriesColor(key, idx) {
+    const primary = String(key || "").split("+")[0].toLowerCase();
+    return (
+      FACADE_SPREAD_COLORS[primary] ||
+      FACADE_FALLBACK_COLORS[idx % FACADE_FALLBACK_COLORS.length]
+    );
+  }
+
+  function ensureSpreadChart() {
+    if (spreadChart) return;
+    const canvas = document.getElementById("spread-chart");
+    if (!canvas) return;
+    const opts = structuredClone(chartDefaults);
+    opts.scales.y = {
+      ...opts.scales.y,
+      min: 0,
+      title: { display: true, text: "Δ°C", color: "#8a9a88" },
+    };
+    spreadChart = new Chart(canvas, {
+      type: "line",
+      data: { datasets: [] },
+      options: opts,
+    });
+  }
+
+  function renderSpread(results) {
+    const section = document.getElementById("spread-section");
+    if (!section) return;
+
+    // Bucket width: ~120 pts → adapt to window span
+    const span = isCustomRange()
+      ? (customUntil - customSince) * 1000
+      : hours * 3600 * 1000;
+    const bucketMs = Math.max(
+      5 * 60 * 1000,
+      Math.round(span / 120 / (5 * 60 * 1000)) * 5 * 60 * 1000
+    );
+
+    const series = computeFacadeSpread(results, bucketMs);
+
+    if (!series.length) {
+      section.hidden = true;
+      return;
+    }
+
+    ensureSpreadChart();
+    if (!spreadChart) {
+      section.hidden = true;
+      return;
+    }
+
+    const titleEl = section.querySelector(".spread-title");
+    const hintEl = section.querySelector(".spread-hint");
+    const useFacades = series.some((s) => !String(s.key).startsWith("room:"));
+    if (titleEl) {
+      titleEl.setAttribute(
+        "data-i18n",
+        useFacades ? "compare.spread.titleFacade" : "compare.spread.title"
+      );
+      titleEl.textContent = t(
+        useFacades ? "compare.spread.titleFacade" : "compare.spread.title"
+      );
+    }
+    if (hintEl) {
+      hintEl.setAttribute(
+        "data-i18n",
+        useFacades ? "compare.spread.hintFacade" : "compare.spread.hint"
+      );
+      hintEl.textContent = t(
+        useFacades ? "compare.spread.hintFacade" : "compare.spread.hint"
+      );
+    }
+
+    const datasets = series.map((s, idx) =>
+      makeDataset(s.label, facadeSeriesColor(s.key, idx), s.pts, false, {
+        borderWidth: 2.25,
+        pointRadius: 0,
+        spanGaps: true,
+      })
+    );
+
+    spreadChart.data.datasets = datasets;
+    spreadChart.options.plugins.legend.display = datasets.length > 1;
+
+    const { xMin, xMax } = rangeAxisBounds();
+    spreadChart.options.scales.x.min = xMin;
+    spreadChart.options.scales.x.max = xMax;
+    spreadChart.update();
+    section.hidden = false;
+  }
+
   function makeDataset(label, color, data, fill, extra = {}) {
     const colorText = String(color || "");
     const hexBody = colorText.startsWith("#") ? colorText.slice(1) : colorText;
@@ -8856,13 +9401,8 @@
   function renderProjections(forecast) {
     if (!projectionsEl) return;
     const stationBlock = (forecast && forecast.station) || {};
-    const stationList = (
-      Array.isArray(stationBlock.stations) && stationBlock.stations.length
-        ? stationBlock.stations
-        : stationBlock.enabled
-          ? [stationBlock]
-          : []
-    ).filter(
+    rememberAvailableStations(stationBlock);
+    const stationList = filterStationList(stationsFromBlock(stationBlock)).filter(
       (s) => s && s.enabled && (s.latest || (s.points || []).length)
     );
     const hasStation = stationList.length > 0;
@@ -9088,14 +9628,13 @@
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "restart-btn overview-fed-push";
-    btn.textContent = "Push meta";
-    btn.title =
-      "Push name, zone, height, height cm, and room to federation peers";
+    btn.textContent = t("overview.pushMeta");
+    btn.title = t("overview.pushMetaTitle");
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       btn.disabled = true;
       const prev = btn.textContent;
-      btn.textContent = "Pushing…";
+      btn.textContent = t("overview.pushing");
       try {
         const res = await fetch(
           `/api/devices/${encodeURIComponent(device.address)}/push-meta`,
@@ -9117,20 +9656,28 @@
             (p) =>
               `${p.url || "peer"}: ${p.detail || p.status || "failed"}`
           );
-          overviewStatus.textContent =
-            `Meta pushed to ${okN}/${peers.length} peer(s). Failed: ${bits.join("; ")}`;
+          overviewStatus.textContent = t("overview.metaPushedFail", {
+            ok: okN,
+            total: peers.length,
+            fail: bits.join("; "),
+          });
         } else {
-          overviewStatus.textContent =
-            `Meta pushed to ${okN} peer(s) for ${deviceLabel(device)}.`;
+          overviewStatus.textContent = t("overview.metaPushedOk", {
+            ok: okN,
+            name: deviceLabel(device),
+          });
         }
-        btn.textContent = okN === peers.length ? "Pushed" : "Partial";
+        btn.textContent =
+          okN === peers.length ? t("overview.pushed") : t("overview.partial");
         setTimeout(() => {
           btn.textContent = prev;
           btn.disabled = false;
         }, 1500);
       } catch (err) {
         console.error(err);
-        overviewStatus.textContent = `Meta push failed: ${err.message}`;
+        overviewStatus.textContent = t("overview.metaPushFailed", {
+          error: err.message,
+        });
         btn.textContent = prev;
         btn.disabled = false;
       }
@@ -9152,8 +9699,8 @@
     input.type = "text";
     input.className = "device-name-input";
     input.maxLength = 80;
-    input.placeholder = device.ble_name || device.address || "Name";
-    input.title = "Friendly name (saved on this node)";
+    input.placeholder = device.ble_name || device.address || t("overview.namePlaceholder");
+    input.title = t("overview.nameTitle");
     input.value = deviceLabel(device);
     input.dataset.address = device.address;
     input.addEventListener("click", (ev) => ev.stopPropagation());
@@ -9200,7 +9747,9 @@
       } catch (err) {
         console.error(err);
         input.value = deviceLabel(device);
-        overviewStatus.textContent = `Name update failed: ${err.message}`;
+        overviewStatus.textContent = t("overview.nameFailed", {
+          error: err.message,
+        });
       } finally {
         input.disabled = false;
       }
@@ -9212,7 +9761,7 @@
     const wrap = document.createElement("label");
     wrap.className = "overview-cat-field overview-cat-field-cm";
     const caption = document.createElement("span");
-    caption.textContent = "Height cm";
+    caption.textContent = t("overview.heightCm");
     const input = document.createElement("input");
     input.type = "number";
     input.className = "cat-input cat-input-cm";
@@ -9220,7 +9769,7 @@
     input.max = "600";
     input.step = "1";
     input.placeholder = "cm";
-    input.title = "Mounting height above floor (cm)";
+    input.title = t("overview.heightCmTitle");
     input.dataset.address = device.address;
     input.dataset.field = "height_cm";
     if (device.height_cm != null && Number.isFinite(Number(device.height_cm))) {
@@ -9242,7 +9791,7 @@
           : null;
       if (value === previous || (value == null && previous == null)) return;
       if (value != null && (!Number.isFinite(value) || value < 0 || value > 600)) {
-        overviewStatus.textContent = "Height cm must be 0–600";
+        overviewStatus.textContent = t("overview.heightCmInvalid");
         input.value = previous != null ? String(previous) : "";
         return;
       }
@@ -9274,7 +9823,9 @@
           device.height_cm != null && Number.isFinite(Number(device.height_cm))
             ? String(Math.round(Number(device.height_cm)))
             : "";
-        overviewStatus.textContent = `Category update failed: ${err.message}`;
+        overviewStatus.textContent = t("overview.catFailed", {
+          error: err.message,
+        });
       } finally {
         input.disabled = false;
       }
@@ -9288,15 +9839,20 @@
     updateSortButtons();
     const visible = overviewVisibleDevices();
     if (!devices.length) {
-      overviewBody.innerHTML =
-        '<p class="overview-empty">No devices detected</p>';
-      overviewStatus.textContent = "Waiting for BLE devices…";
+      overviewBody.innerHTML = `<p class="overview-empty">${escapeHtml(
+        t("overview.noDevices")
+      )}</p>`;
+      overviewStatus.textContent = t("overview.waitingBle");
       return;
     }
     if (!visible.length) {
-      overviewBody.innerHTML =
-        '<p class="overview-empty">No sensors for these filters</p>';
-      overviewStatus.textContent = `0 / ${devices.length} sensor(s) · filters active`;
+      overviewBody.innerHTML = `<p class="overview-empty">${escapeHtml(
+        t("overview.noSensorsFilter")
+      )}</p>`;
+      overviewStatus.textContent = t("overview.statusFiltered", {
+        shown: 0,
+        total: devices.length,
+      });
       return;
     }
 
@@ -9336,11 +9892,13 @@
       const chartsBtn = document.createElement("button");
       chartsBtn.type = "button";
       chartsBtn.className = "restart-btn overview-charts-btn";
-      chartsBtn.textContent = "Charts";
-      chartsBtn.title = "Open compare charts for this sensor";
+      chartsBtn.textContent = t("overview.charts");
+      chartsBtn.title = t("overview.chartsTitle");
       chartsBtn.setAttribute(
         "aria-label",
-        `Open compare charts for ${device.name || device.address}`
+        t("overview.chartsAria", {
+          name: device.name || device.address,
+        })
       );
       chartsBtn.addEventListener("click", () => {
         selected = new Set([device.address]);
@@ -9349,7 +9907,7 @@
         updateCurrent();
         setView("compare");
         loadHistory().catch((err) => {
-          statusEl.textContent = `Error: ${err.message}`;
+          statusEl.textContent = t("compare.error", { error: err.message });
         });
       });
       readings.appendChild(chartsBtn);
@@ -9359,17 +9917,32 @@
       const place = document.createElement("div");
       place.className = "overview-card-place";
       place.append(
-        labeledCategorySelect(device, "zone", taxonomyData.zones, "Zone"),
-        labeledCategorySelect(device, "height", taxonomyData.heights, "Height"),
+        labeledCategorySelect(
+          device,
+          "zone",
+          taxonomyData.zones,
+          t("overview.zone")
+        ),
+        labeledCategorySelect(
+          device,
+          "height",
+          taxonomyData.heights,
+          t("overview.height")
+        ),
         labeledHeightCmInput(device),
-        labeledCategorySelect(device, "room", taxonomyData.rooms, "Room")
+        labeledCategorySelect(
+          device,
+          "room",
+          taxonomyData.rooms,
+          t("overview.room")
+        )
       );
       const fedPush = makeFedPushMetaBtn(device);
       if (fedPush) {
         const pushWrap = document.createElement("div");
         pushWrap.className = "overview-cat-field overview-cat-field-push";
         const caption = document.createElement("span");
-        caption.textContent = "Federation";
+        caption.textContent = t("overview.federation");
         pushWrap.append(caption, fedPush);
         place.appendChild(pushWrap);
       }
@@ -9379,9 +9952,12 @@
       const footLeft = document.createElement("div");
       footLeft.className = "overview-card-foot-left rssi-cell";
       footLeft.innerHTML =
-        `<span>Battery ${
-          device.battery != null ? `${Number(device.battery)} %` : "—"
-        }</span>` + `<span>${rssiHtml(device.rssi)}</span>`;
+        `<span>${escapeHtml(
+          t("overview.battery", {
+            value:
+              device.battery != null ? `${Number(device.battery)} %` : "—",
+          })
+        )}</span>` + `<span>${rssiHtml(device.rssi)}</span>`;
       const footRight = document.createElement("div");
       footRight.className = "overview-card-foot-right";
       footRight.innerHTML =
@@ -9412,8 +9988,16 @@
       .filter(Boolean)
       .join(" · ");
     overviewStatus.textContent =
-      `${ranked.length}${ranked.length === devices.length ? "" : ` / ${devices.length}`} sensor(s)` +
-      `${filterNote ? ` · ${filterNote}` : ""}${span} · updated ${new Date().toLocaleTimeString("en-GB")}`;
+      (ranked.length === devices.length
+        ? t("overview.statusCountSame", { n: ranked.length })
+        : t("overview.statusCount", {
+            shown: ranked.length,
+            total: devices.length,
+          })) +
+      `${filterNote ? ` · ${filterNote}` : ""}${span}` +
+      t("overview.updatedAt", {
+        time: new Date().toLocaleTimeString(I18n.localeTag()),
+      });
   }
 
   function updateCurrent() {
@@ -9421,15 +10005,19 @@
     const picked = selectedDevices();
     if (foldCurrentMetaEl) {
       foldCurrentMetaEl.textContent = picked.length
-        ? `· ${picked.length} sensor${picked.length === 1 ? "" : "s"}`
-        : "· none selected";
+        ? picked.length === 1
+          ? t("compare.sensorsMeta", { n: picked.length })
+          : t("compare.sensorsMetaPlural", { n: picked.length })
+        : t("compare.noneSelected");
     }
     if (!picked.length) {
       const empty = document.createElement("div");
       empty.className = "metric metric-empty";
       empty.innerHTML =
-        '<span class="metric-label">Selection</span>' +
-        '<span class="metric-value metric-time">No devices</span>';
+        `<span class="metric-label">${escapeHtml(t("compare.selection"))}</span>` +
+        `<span class="metric-value metric-time">${escapeHtml(
+          t("compare.noDevicesMetric")
+        )}</span>`;
       currentEl.appendChild(empty);
       return;
     }
@@ -9442,15 +10030,15 @@
         <h3 class="device-current-name">${escapeHtml(deviceLabel(device))}</h3>
         <div class="device-current-metrics">
           <div class="metric">
-            <span class="metric-label">Temperature</span>
+            <span class="metric-label">${escapeHtml(t("compare.metric.temp"))}</span>
             <span class="metric-value">${fmtNum(device.temperature_c, 1, " °C")}</span>
           </div>
           <div class="metric">
-            <span class="metric-label">Humidity</span>
+            <span class="metric-label">${escapeHtml(t("compare.metric.humidity"))}</span>
             <span class="metric-value">${fmtNum(device.humidity, 1, " %")}</span>
           </div>
           <div class="metric">
-            <span class="metric-label">Dew point</span>
+            <span class="metric-label">${escapeHtml(t("compare.metric.dew"))}</span>
             <span class="metric-value">${
               device.temperature_c != null && device.humidity != null && device.humidity > 0
                 ? fmtNum(dewPoint(device.temperature_c, device.humidity), 1, " °C")
@@ -9458,15 +10046,15 @@
             }</span>
           </div>
           <div class="metric">
-            <span class="metric-label">Battery</span>
+            <span class="metric-label">${escapeHtml(t("compare.metric.battery"))}</span>
             <span class="metric-value">${device.battery != null ? `${device.battery} %` : "—"}</span>
           </div>
           <div class="metric">
-            <span class="metric-label">Signal</span>
+            <span class="metric-label">${escapeHtml(t("compare.metric.signal"))}</span>
             <span class="metric-value metric-rssi">${rssiHtml(device.rssi)}</span>
           </div>
           <div class="metric">
-            <span class="metric-label">Last reading</span>
+            <span class="metric-label">${escapeHtml(t("compare.metric.last"))}</span>
             <span class="metric-value metric-time">${fmtTime(device.last_reading_ts || device.last_seen)}</span>
           </div>
         </div>
@@ -9490,12 +10078,16 @@
     const visible = filteredDevices();
 
     if (!devices.length) {
-      deviceList.innerHTML = '<p class="device-empty">No devices detected</p>';
+      deviceList.innerHTML = `<p class="device-empty">${escapeHtml(
+        t("compare.noDevices")
+      )}</p>`;
       selected = new Set();
       return;
     }
     if (!visible.length) {
-      deviceList.innerHTML = '<p class="device-empty">No sensors for this model</p>';
+      deviceList.innerHTML = `<p class="device-empty">${escapeHtml(
+        t("compare.noSensorsModel")
+      )}</p>`;
       return;
     }
 
@@ -9510,6 +10102,81 @@
     // Keep selection of filtered-out devices; only auto-pick among visible ones.
     if (!selectedVisible.length) {
       selected.add(visible[0].address);
+    }
+
+    // Build façade group buttons: one button per shared exterior orientation.
+    const facadeGroupBtns = document.getElementById("facade-group-btns");
+    if (facadeGroupBtns) {
+      facadeGroupBtns.innerHTML = "";
+      /** facadeKey → Set of addresses */
+      const facadeAddrs = new Map();
+      const useFacades =
+        apartmentLastRooms &&
+        apartmentLastRooms.some(
+          (r) => Array.isArray(r.exterior) && r.exterior.length > 0
+        );
+
+      for (const d of visible) {
+        const room = (d.room || "").toLowerCase();
+        if (!room) continue;
+        let key;
+        let label;
+        if (useFacades) {
+          key = facadeKeyForRoom(room);
+          if (!key) continue;
+          label = facadeDisplayLabel(key);
+        } else {
+          // Fallback: rooms that have both interior and exterior sensors
+          const roomDevices = visible.filter(
+            (x) => (x.room || "").toLowerCase() === room
+          );
+          const hasIn = roomDevices.some(
+            (x) => (x.zone || "").toLowerCase() !== "exterior"
+          );
+          const hasOut = roomDevices.some(
+            (x) => (x.zone || "").toLowerCase() === "exterior"
+          );
+          if (!hasIn || !hasOut) continue;
+          key = `room:${room}`;
+          label = room.charAt(0).toUpperCase() + room.slice(1);
+        }
+        if (!facadeAddrs.has(key)) {
+          facadeAddrs.set(key, { label, addrs: new Set() });
+        }
+        facadeAddrs.get(key).addrs.add(d.address);
+      }
+
+      if (facadeAddrs.size) {
+        const prefix = document.createElement("span");
+        prefix.className = "facade-group-label";
+        prefix.textContent = t("compare.facade.groupLabel");
+        facadeGroupBtns.appendChild(prefix);
+
+        for (const [key, { label, addrs }] of facadeAddrs) {
+          if (addrs.size < 2) continue;
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "facade-group-btn";
+          btn.textContent = label;
+          btn.title = t("compare.facade.groupTitle", { room: label });
+          btn.addEventListener("click", () => {
+            for (const d of visible) {
+              if (addrs.has(d.address)) selected.add(d.address);
+              else selected.delete(d.address);
+            }
+            fillDeviceList();
+            persistSelection();
+            updateCurrent();
+            loadHistory().catch((err) => {
+              statusEl.textContent = `Error: ${err.message}`;
+            });
+          });
+          facadeGroupBtns.appendChild(btn);
+        }
+        facadeGroupBtns.hidden = facadeGroupBtns.querySelectorAll("button").length === 0;
+      } else {
+        facadeGroupBtns.hidden = true;
+      }
     }
 
     for (const d of visible) {
@@ -9558,6 +10225,7 @@
       taxonomyData = await taxRes.json();
     }
     syncModelFilterButtons();
+    await ensureApartmentRooms();
     fillDeviceList();
     populateCoverageDevices();
     updateOverview();
@@ -9595,7 +10263,9 @@
       humChart.update();
       dewChart.update();
       clearProjections();
-      statusEl.textContent = "Select at least one device…";
+      const spreadSec = document.getElementById("spread-section");
+      if (spreadSec) spreadSec.hidden = true;
+      statusEl.textContent = t("compare.selectDevice");
       historyLoaded = true;
       return;
     }
@@ -9717,12 +10387,8 @@
       }
 
       const stationBlock = forecast.station || {};
-      const stationList =
-        Array.isArray(stationBlock.stations) && stationBlock.stations.length
-          ? stationBlock.stations
-          : stationBlock.enabled
-            ? [stationBlock]
-            : [];
+      rememberAvailableStations(stationBlock);
+      const stationList = filterStationList(stationsFromBlock(stationBlock));
       const stationColors = ["#6fbf73", "#e8a838", "#5dade2", "#af7ac5"];
       stationList.forEach((station, idx) => {
         const stationPts = (station && station.points) || [];
@@ -9939,6 +10605,9 @@
       setTempPowerScale(false);
     }
 
+    await ensureApartmentRooms();
+    renderSpread(results);
+
     tempChart.data.datasets = withLegendState("temp", tempDatasets);
     humChart.data.datasets = withLegendState("hum", humDatasets);
     dewChart.data.datasets = withLegendState("dew", dewDatasets);
@@ -10032,17 +10701,34 @@
     const names = results.map((r) => deviceLabel(r.device)).join(", ");
     let extra = "";
     if (forecast && forecast.enabled && forecast.location) {
-      const src = forecast.location.source === "browser" ? "GPS" : "config";
-      const cache = forecast.cache_hit ? (forecast.stale ? ", stale cache" : ", cached") : "";
-      extra = ` · forecast ${forecast.location.name} (${src}${cache})`;
+      const src =
+        forecast.location.source === "browser"
+          ? t("compare.forecastGps")
+          : t("compare.forecastConfig");
+      const cache = forecast.cache_hit
+        ? forecast.stale
+          ? t("compare.forecastStale")
+          : t("compare.forecastCached")
+        : "";
+      extra = t("compare.forecastLoc", {
+        name: forecast.location.name,
+        src,
+        cache,
+      });
     } else if (forecast && forecast.error) {
-      extra = ` · forecast off (${forecast.error})`;
+      extra = t("compare.forecastOffError", { error: forecast.error });
     } else if (showForecast && forecast && !forecast.enabled) {
-      extra = " · forecast off (allow location or set [weather] place)";
+      extra = t("compare.forecastOffHint");
     }
-    statusEl.textContent =
-      `${names} · ${totalPoints} point(s) · ${formatRangeLabel()}${extra}${windowExtra}${hvacExtra} · updated ` +
-      new Date().toLocaleTimeString("en-GB");
+    statusEl.textContent = t("compare.status", {
+      names,
+      points: totalPoints,
+      range: formatRangeLabel(),
+      extra,
+      window: windowExtra,
+      hvac: hvacExtra,
+      time: new Date().toLocaleTimeString(I18n.localeTag()),
+    });
   }
 
   async function refresh() {
@@ -10064,13 +10750,19 @@
       } else {
         const bannerPromise = updateWindowBanner(null);
         if (windowNotify) {
+          if (!apartmentLastRooms) {
+            fetch("/api/apartment?hours=1")
+              .then((r) => r.ok ? r.json() : null)
+              .then((d) => { if (d && d.rooms) apartmentLastRooms = d.rooms; })
+              .catch(() => {});
+          }
           await evaluateWindowNotifications(null);
         }
         await bannerPromise;
       }
     } catch (err) {
       console.error(err);
-      const msg = `Error: ${err.message}`;
+      const msg = t("common.error", { error: err.message });
       overviewStatus.textContent = msg;
       statusEl.textContent = msg;
     }
@@ -10451,31 +11143,32 @@
     if (!windowNotifyEl) return;
     windowNotifyEl.setAttribute("aria-pressed", windowNotify ? "true" : "false");
     windowNotifyEl.title = windowNotify
-      ? "Window alerts on — click to disable"
-      : "Window alerts off — click to enable";
+      ? t("windowNotify.on")
+      : t("windowNotify.off");
     windowNotifyEl.setAttribute(
       "aria-label",
-      windowNotify ? "Disable window alerts" : "Enable window alerts"
+      windowNotify ? t("windowNotify.disable") : t("windowNotify.enable")
     );
   }
 
   function syncTtsBtn() {
     if (!ttsEl) return;
     ttsEl.setAttribute("aria-pressed", ttsEnabled ? "true" : "false");
-    ttsEl.title = ttsEnabled
-      ? "Voice alerts on — click to disable"
-      : "Voice alerts off — click to enable";
+    if (!("speechSynthesis" in window)) {
+      ttsEl.title = t("tts.unsupported");
+      return;
+    }
+    ttsEl.title = ttsEnabled ? t("tts.on") : t("tts.off");
     ttsEl.setAttribute(
       "aria-label",
-      ttsEnabled ? "Disable voice alerts" : "Enable voice alerts"
+      ttsEnabled ? t("tts.disable") : t("tts.enable")
     );
-    if (ttsVoicePickerEl) ttsVoicePickerEl.hidden = !ttsEnabled;
   }
 
   if (ttsEl) {
     if (!("speechSynthesis" in window)) {
       ttsEl.disabled = true;
-      ttsEl.title = "Voice alerts not supported by this browser";
+      ttsEl.title = t("tts.unsupported");
     } else {
       populateTtsVoiceOptions();
       window.speechSynthesis.addEventListener?.(
@@ -10490,7 +11183,7 @@
         // A user gesture sometimes unblocks Safari's voice list.
         ttsVoicePollAttempts = 0;
         populateTtsVoiceOptions();
-        if (ttsEnabled) speak("Voice alerts enabled");
+        if (ttsEnabled) speak(t("tts.enabledSpeak"));
       });
     }
   }
@@ -10499,19 +11192,36 @@
     ttsVoiceSelectEl.addEventListener("change", () => {
       ttsVoiceURI = ttsVoiceSelectEl.value;
       localStorage.setItem(TTS_VOICE_KEY, ttsVoiceURI);
-      speak("Voice alerts enabled");
+      speak(t("tts.enabledSpeak"));
+    });
+  }
+
+  if (ttsVoiceTestBtn) {
+    ttsVoiceTestBtn.addEventListener("click", () => {
+      // Prefer the banner currently on screen; fall back to the last remembered one.
+      let text = "";
+      if (systemBannerModel && !systemBannerModel.hidden) {
+        text = systemBannerModel.detail
+          ? `${systemBannerModel.title}. ${systemBannerModel.detail}`
+          : systemBannerModel.title || "";
+      } else if (windowBannerModel && !windowBannerModel.hidden) {
+        text = windowBannerModel.detail
+          ? `${windowBannerModel.title}. ${windowBannerModel.detail}`
+          : windowBannerModel.title || "";
+      }
+      if (!text) text = lastDisplayedAlertText;
+      if (!text) text = t("settings.voiceTestEmpty");
+      speak(text, { force: true });
     });
   }
 
   function syncDoorBeepBtn() {
     if (!doorBeepEl) return;
     doorBeepEl.setAttribute("aria-pressed", doorBeepEnabled ? "true" : "false");
-    doorBeepEl.title = doorBeepEnabled
-      ? "Door / window beep on — click to disable"
-      : "Door / window beep off — click to enable";
+    doorBeepEl.title = doorBeepEnabled ? t("doorBeep.on") : t("doorBeep.off");
     doorBeepEl.setAttribute(
       "aria-label",
-      doorBeepEnabled ? "Disable door / window beep" : "Enable door / window beep"
+      doorBeepEnabled ? t("doorBeep.disable") : t("doorBeep.enable")
     );
   }
 
@@ -11152,6 +11862,50 @@
   syncRangeControls();
   refreshViewsStickyState();
   window.addEventListener("resize", refreshViewsStickyState);
+
+  if (settingsLocaleEl) {
+    settingsLocaleEl.value = I18n.getLocale();
+    settingsLocaleEl.addEventListener("change", () => {
+      I18n.setLocale(settingsLocaleEl.value);
+    });
+  }
+
+  function refreshLocaleDependentUi() {
+    if (settingsLocaleEl) settingsLocaleEl.value = I18n.getLocale();
+    applyChartHeight(chartHeight, { persist: false });
+    syncTtsBtn();
+    syncWindowNotifyBtn();
+    syncDoorBeepBtn();
+    syncModelFilterButtons();
+    populateTtsVoiceOptions();
+    renderSettingsStations();
+    updateOverview();
+    updateDoorsTable();
+    fillDeviceList();
+    updateCurrent();
+    updateSystemHealth().catch((err) => console.warn(err));
+    updateWindowBanner(null).catch((err) => console.warn(err));
+    if (selectedDoorId) {
+      const sensor = doorSensors.find((s) => s.sensor_id === selectedDoorId);
+      if (sensor) {
+        loadDoorLog(sensor).catch((err) => console.warn(err));
+      }
+    }
+    if (currentView === "compare" && historyLoaded) {
+      loadHistory().catch((err) => {
+        statusEl.textContent = t("compare.error", { error: err.message });
+      });
+    }
+  }
+
+  I18n.applyDom(document);
+  syncTtsBtn();
+  syncWindowNotifyBtn();
+  syncDoorBeepBtn();
+  I18n.onLocaleChange(() => {
+    refreshLocaleDependentUi();
+  });
+
   // Drop one-shot cache-bust query left by hardReload() after UI restart.
   if (new URL(window.location.href).searchParams.has("_cb")) {
     const clean = new URL(window.location.href);
