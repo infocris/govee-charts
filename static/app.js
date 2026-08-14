@@ -10774,6 +10774,16 @@
     q.set("legend", widgetLegendEl && !widgetLegendEl.checked ? "0" : "1");
     const refresh = Number((widgetRefreshEl && widgetRefreshEl.value) || 0);
     if (refresh > 0) q.set("refresh", String(refresh));
+    // Bake GPS into the share URL so embeds / OBS don't need localStorage.
+    if (
+      forecastOn &&
+      browserGeo &&
+      Number.isFinite(browserGeo.latitude) &&
+      Number.isFinite(browserGeo.longitude)
+    ) {
+      q.set("lat", String(browserGeo.latitude));
+      q.set("lon", String(browserGeo.longitude));
+    }
     return `${window.location.origin}/widget?${q.toString()}`;
   }
 

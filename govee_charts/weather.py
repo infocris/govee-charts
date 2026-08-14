@@ -869,6 +869,89 @@ class WeatherService:
         )
         return self._resolved_config
 
+    def _remember_browser_location(self, loc: dict[str, Any]) -> None:
+        """Persist last browser / request coords so widgets can fetch without GPS."""
+        try:
+            lat = float(loc["latitude"])
+            lon = float(loc["longitude"])
+        except (KeyError, TypeError, ValueError):
+            return
+        self._disk["last_location"] = {
+            "name": str(loc.get("name") or "Local"),
+            "latitude": lat,
+            "longitude": lon,
+            "timezone": loc.get("timezone") or self.cfg.timezone or "auto",
+            "source": str(loc.get("source") or "browser"),
+            "saved_at": time.time(),
+        }
+        self._save_disk()
+
+    async def _fallback_location(self) -> dict[str, Any] | None:
+        """Location when the client omitted lat/lon and [weather] has no place.
+
+        Prefer last successful browser coords, then Météo-France station lat/lon.
+        """
+        raw = self._disk.get("last_location")
+        if isinstance(raw, dict):
+            try:
+                lat = float(raw["latitude"])
+                lon = float(raw["longitude"])
+            except (KeyError, TypeError, ValueError):
+                lat = lon = None
+            if lat is not None and lon is not None:
+                return {
+                    "name": str(raw.get("name") or "Local"),
+                    "latitude": lat,
+                    "longitude": lon,
+                    "timezone": raw.get("timezone") or self.cfg.timezone or "auto",
+                    "admin1": "",
+                    "country": "",
+                    "source": "last_location",
+                }
+
+        if not self.cfg.meteofrance.ready:
+            return None
+        try:
+            station = await self._station_payload(2.0)
+        except Exception:
+            return None
+
+        candidates: list[dict[str, Any]] = []
+        for st in station.get("stations") or []:
+            if isinstance(st, dict):
+                candidates.append(st)
+        if isinstance(station, dict):
+            candidates.append(station)
+
+        for st in candidates:
+            points: list[Any] = []
+            latest = st.get("latest")
+            if isinstance(latest, dict):
+                points.append(latest)
+            for p in st.get("points") or []:
+                if isinstance(p, dict):
+                    points.append(p)
+            for p in reversed(points):
+                try:
+                    lat = float(p["lat"])
+                    lon = float(p["lon"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                name = (
+                    str(st.get("station_name") or st.get("name") or "").strip()
+                    or "Station"
+                )
+                return {
+                    "name": name,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "timezone": self.cfg.timezone or "auto",
+                    "admin1": "",
+                    "country": "",
+                    "source": "meteofrance",
+                }
+        return None
+
     async def _location_for_request(
         self,
         client: httpx.AsyncClient,
@@ -886,7 +969,14 @@ class WeatherService:
                 "country": "",
                 "source": "browser",
             }
-        return await self._resolve_config_location(client)
+        if self.has_config_location:
+            return await self._resolve_config_location(client)
+        fb = await self._fallback_location()
+        if fb is not None:
+            return fb
+        raise RuntimeError(
+            "No location — allow browser geolocation or set [weather] place"
+        )
 
     def _make_cache_key(self, lat: float, lon: float, horizon_hours: int) -> str:
         return _cache_key(
@@ -916,13 +1006,22 @@ class WeatherService:
         if (latitude is None) ^ (longitude is None):
             raise RuntimeError("latitude and longitude must be provided together")
 
+        # Resolve missing coords via config place, last browser location, or
+        # Météo-France station (so /widget works without GPS query params).
+        fallback_loc: dict[str, Any] | None = None
         if latitude is None and longitude is None and not self.has_config_location:
-            return {
-                "enabled": False,
-                "error": "No location — allow browser geolocation or set [weather] place",
-                "outdoor": [],
-                "location": None,
-            }
+            fallback_loc = await self._fallback_location()
+            if fallback_loc is None:
+                return {
+                    "enabled": False,
+                    "error": (
+                        "No location — allow browser geolocation or set [weather] place"
+                    ),
+                    "outdoor": [],
+                    "location": None,
+                }
+            latitude = float(fallback_loc["latitude"])
+            longitude = float(fallback_loc["longitude"])
 
         need_h = self._horizon_hours(horizon_hours)
 
@@ -958,9 +1057,14 @@ class WeatherService:
 
             try:
                 async with httpx.AsyncClient() as client:
-                    loc = await self._location_for_request(
-                        client, latitude=latitude, longitude=longitude
-                    )
+                    if fallback_loc is not None:
+                        loc = dict(fallback_loc)
+                    else:
+                        loc = await self._location_for_request(
+                            client, latitude=latitude, longitude=longitude
+                        )
+                    if loc.get("source") == "browser":
+                        self._remember_browser_location(loc)
                     key = self._make_cache_key(
                         float(loc["latitude"]),
                         float(loc["longitude"]),

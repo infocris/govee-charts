@@ -7,6 +7,7 @@
  *   past=24                      past hours (default: 24, max 26280)
  *   future=24                    forecast future hours (0 = off, max 384)
  *   forecast=0|1                 include outdoor forecast curve (default: 1 if future>0)
+ *   lat=48.87&lon=2.23           optional GPS (else localStorage / server fallback)
  *   transparent=0|1              transparent page background (default: 0)
  *   legend=0|1                   show legend (default: 1)
  *   refresh=0                    auto-reload seconds (0 = off, max 3600)
@@ -40,6 +41,10 @@
   const transparent = params.get("transparent") === "1";
   const showLegend = params.get("legend") !== "0";
   const refreshSec = clamp(Number(params.get("refresh") || 0), 0, 3600);
+  const GEO_KEY = "govee-charts.geo";
+
+  /** @type {{latitude:number, longitude:number}|null} */
+  let geoCoords = readGeoFromParams() || readStoredGeo();
 
   const metaEl = document.getElementById("meta");
   const canvas = document.getElementById("chart");
@@ -52,6 +57,35 @@
   function clamp(n, lo, hi) {
     if (!Number.isFinite(n)) return lo;
     return Math.min(hi, Math.max(lo, n));
+  }
+
+  function readGeoFromParams() {
+    const lat = Number(params.get("lat") || params.get("latitude"));
+    const lon = Number(params.get("lon") || params.get("longitude"));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+    return { latitude: lat, longitude: lon };
+  }
+
+  function readStoredGeo() {
+    try {
+      const raw = localStorage.getItem(GEO_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (
+        !parsed ||
+        typeof parsed.latitude !== "number" ||
+        typeof parsed.longitude !== "number"
+      ) {
+        return null;
+      }
+      return {
+        latitude: parsed.latitude,
+        longitude: parsed.longitude,
+      };
+    } catch (_) {
+      return null;
+    }
   }
 
   function dewPoint(tempC, rh) {
@@ -194,6 +228,10 @@
       future_hours: String(futureH),
     });
     for (const a of addrs) q.append("address", a);
+    if (geoCoords) {
+      q.set("latitude", String(geoCoords.latitude));
+      q.set("longitude", String(geoCoords.longitude));
+    }
     const res = await fetch(`/api/forecast?${q}`);
     if (!res.ok) throw new Error(`forecast HTTP ${res.status}`);
     return res.json();
@@ -270,7 +308,9 @@
       // Optional per-sensor projections (temperature only for clarity).
       if (metric === "temp" && forecast.projections) {
         addresses.forEach((addr, idx) => {
-          const proj = forecast.projections[addr];
+          const proj =
+            forecast.projections[addr] ||
+            forecast.projections[String(addr).toUpperCase()];
           const pts = (proj && proj.points) || [];
           if (!pts.length) return;
           const device = byAddr.get(addr);
@@ -280,7 +320,13 @@
             makeDataset(
               label,
               colorFor(idx),
-              pts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+              pts
+                .map((p) =>
+                  p.temperature_c == null
+                    ? null
+                    : { x: p.ts * 1000, y: Number(p.temperature_c) }
+                )
+                .filter(Boolean),
               { borderDash: [2, 4], borderWidth: 1.5 }
             )
           );
@@ -306,8 +352,27 @@
       showForecast && futureH > 0
         ? ` · +${futureH >= 24 && futureH % 24 === 0 ? `${futureH / 24} d` : `${futureH} h`}`
         : "";
+    let forecastNote = "";
+    if (showForecast && futureH > 0) {
+      if (forecast && forecast.enabled) {
+        const nOut = (forecast.outdoor || []).length;
+        const nProj = forecast.projections
+          ? addresses.filter(
+              (a) =>
+                ((forecast.projections[a] ||
+                  forecast.projections[String(a).toUpperCase()] ||
+                  {}).points || []).length
+            ).length
+          : 0;
+        forecastNote = ` · forecast ${nOut} pts · proj ${nProj}/${addresses.length}`;
+      } else if (forecast && forecast.error) {
+        forecastNote = ` · forecast off (${forecast.error})`;
+      } else {
+        forecastNote = " · forecast off";
+      }
+    }
     if (metaEl) {
-      metaEl.textContent = `${metricLabel()} · −${pastLabel}${futureBits} · ${addresses.length} sensor${
+      metaEl.textContent = `${metricLabel()} · −${pastLabel}${futureBits}${forecastNote} · ${addresses.length} sensor${
         addresses.length === 1 ? "" : "s"
       } · ${new Date().toLocaleTimeString("en-GB", {
         hour: "2-digit",
