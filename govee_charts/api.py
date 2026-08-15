@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -14,7 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.types import Scope
@@ -34,6 +35,15 @@ from govee_charts.apartment import (
 from govee_charts.backfill import BackfillService
 from govee_charts.categories import normalize_door_patch, normalize_patch, taxonomy
 from govee_charts.csv_import import MAX_UPLOAD_BYTES, parse_upload, summarize_samples
+from govee_charts.cursor_chat import (
+    build_prompt,
+    compact_apartment_snapshot,
+    normalize_cursor_chat_config,
+    probe_agent_status,
+    resolve_agent_bin,
+    resolve_workspace,
+    stream_agent_chat,
+)
 from govee_charts.db import Database, coverage_from_minute_set, is_db_locked
 from govee_charts.decode import Reading
 from govee_charts.federation import csv_source
@@ -321,6 +331,13 @@ class TtsBody(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class MapChatBody(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
+    session_id: str | None = Field(default=None, max_length=128)
+
+    model_config = {"extra": "forbid"}
+
+
 class FacadePatch(BaseModel):
     exterior: list[str] = Field(default_factory=list)
 
@@ -507,6 +524,7 @@ def create_app(
     scanner_enabled: bool = True,
     ble_alert_stale_after: float = 300.0,
     tts: dict[str, Any] | None = None,
+    cursor_chat: dict[str, Any] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Govee Charts", docs_url=None, redoc_url=None)
     app.state.db = db
@@ -522,27 +540,23 @@ def create_app(
     app.state.restart_ui_scheduled = False
     app.state.git_pull_lock = asyncio.Lock()
     app.state.mail_fetch_lock = asyncio.Lock()
+    app.state.map_chat_lock = asyncio.Lock()
     app.state.ssl_port = int(ssl_port) if ssl_port else None
     app.state.hvac = hvac or HvacConfig()
     app.state.scanner_enabled = bool(scanner_enabled)
     app.state.ble_alert_stale_after = max(0.0, float(ble_alert_stale_after))
     tts_cfg = dict(tts or {})
     home_url = str(tts_cfg.get("home_url") or "").strip().rstrip("/")
-    play_raw = str(tts_cfg.get("play") or "local").strip().lower() or "local"
-    if play_raw not in ("local", "server", "here", "none", "client"):
-        play_raw = "local"
-    # "client" = browser only (no ffplay on the Home TTS host).
-    play_mode = "none" if play_raw == "client" else play_raw
     return_audio = tts_cfg.get("return_audio")
     if return_audio is None:
-        return_audio = True
+        return_audio = False
     app.state.tts = {
         "home_url": home_url,
         "app": str(tts_cfg.get("app") or "govee-charts").strip() or "govee-charts",
         "channel": str(tts_cfg.get("channel") or "alerts").strip() or "alerts",
-        "play": play_mode,
         "return_audio": bool(return_audio),
     }
+    app.state.cursor_chat = normalize_cursor_chat_config(cursor_chat)
 
     @app.get("/")
     async def index() -> HTMLResponse:
@@ -661,8 +675,7 @@ def create_app(
                     lang=lang,
                     app=str(tts_cfg.get("app") or "govee-charts"),
                     channel=str(tts_cfg.get("channel") or "alerts"),
-                    play=str(tts_cfg.get("play") or "local"),
-                    return_audio=bool(tts_cfg.get("return_audio", True)),
+                    return_audio=bool(tts_cfg.get("return_audio", False)),
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -684,6 +697,104 @@ def create_app(
             raise HTTPException(
                 status_code=502, detail=f"tts failed: {exc}"
             ) from exc
+
+    @app.get("/api/map-chat/status")
+    async def api_map_chat_status() -> dict[str, Any]:
+        """Whether Map Cursor chat can run (config + local agent CLI)."""
+        cfg: dict[str, Any] = app.state.cursor_chat or {}
+        enabled = bool(cfg.get("enabled"))
+        agent_bin = resolve_agent_bin(str(cfg.get("agent_bin") or ""))
+        workspace = resolve_workspace(str(cfg.get("workspace") or ""))
+        out: dict[str, Any] = {
+            "enabled": enabled,
+            "mode": cfg.get("mode") or "ask",
+            "model": cfg.get("model") or "auto",
+            "workspace": workspace,
+            "agent_bin": agent_bin,
+            "agent_found": bool(agent_bin),
+            "logged_in": False,
+            "ready": False,
+            "detail": None,
+        }
+        if not enabled:
+            out["detail"] = "cursor_chat.enabled is false"
+            return out
+        if not agent_bin:
+            out["detail"] = (
+                "Cursor agent CLI not found "
+                "(set cursor_chat.agent_bin or install agent on PATH)"
+            )
+            return out
+        status = await probe_agent_status(agent_bin)
+        out["logged_in"] = bool(status.get("logged_in"))
+        out["detail"] = status.get("detail")
+        out["ready"] = bool(status.get("logged_in"))
+        return out
+
+    @app.post("/api/map-chat")
+    async def api_map_chat(body: MapChatBody) -> StreamingResponse:
+        """Ask the local Cursor agent about the live apartment map (SSE)."""
+        cfg: dict[str, Any] = app.state.cursor_chat or {}
+        if not cfg.get("enabled"):
+            raise HTTPException(status_code=503, detail="Map chat is disabled")
+        agent_bin = resolve_agent_bin(str(cfg.get("agent_bin") or ""))
+        if not agent_bin:
+            raise HTTPException(
+                status_code=503,
+                detail="Cursor agent CLI not found (set cursor_chat.agent_bin)",
+            )
+        lock: asyncio.Lock = app.state.map_chat_lock
+        if lock.locked():
+            raise HTTPException(
+                status_code=503, detail="Map chat is busy; try again shortly"
+            )
+
+        message = (body.message or "").strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="empty message")
+
+        # Fresh apartment snapshot (same builder as GET /api/apartment).
+        try:
+            apartment = await api_apartment(
+                hours=24.0,
+                future_hours=None,
+                latitude=None,
+                longitude=None,
+            )
+        except Exception as exc:
+            logger.exception("map-chat apartment snapshot failed")
+            raise HTTPException(
+                status_code=502, detail=f"apartment snapshot failed: {exc}"
+            ) from exc
+        snapshot = compact_apartment_snapshot(apartment)
+        prompt = build_prompt(message, snapshot)
+        workspace = resolve_workspace(str(cfg.get("workspace") or ""))
+        model = str(cfg.get("model") or "auto")
+        mode = str(cfg.get("mode") or "ask")
+        timeout_s = float(cfg.get("timeout_s") or 180.0)
+        session_id = (body.session_id or "").strip() or None
+
+        async def event_gen():
+            async with lock:
+                async for ev in stream_agent_chat(
+                    agent_bin=agent_bin,
+                    prompt=prompt,
+                    workspace=workspace,
+                    model=model,
+                    mode=mode,
+                    session_id=session_id,
+                    timeout_s=timeout_s,
+                ):
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/api/system")
     async def api_system() -> dict[str, Any]:
@@ -1632,10 +1743,21 @@ def create_app(
         by_room: dict[str, list[dict[str, Any]]] = {
             r["id"]: [] for r in payload["rooms"]
         }
+        # Live map / cross-section: ignore readings older than this (seconds).
+        sensor_stale_after_s = 900.0
+        now_ts = time.time()
         for d in devices:
             room = (d.get("room") or "").strip().lower()
             if room not in by_room:
                 continue
+            last_ts = d.get("last_reading_ts")
+            if last_ts is None:
+                last_ts = d.get("last_seen")
+            try:
+                last_f = float(last_ts) if last_ts is not None else None
+            except (TypeError, ValueError):
+                last_f = None
+            stale = last_f is None or (now_ts - last_f) > sensor_stale_after_s
             by_room[room].append(
                 {
                     "address": d.get("address"),
@@ -1645,19 +1767,28 @@ def create_app(
                     "height_cm": d.get("height_cm"),
                     "temperature_c": d.get("temperature_c"),
                     "humidity": d.get("humidity"),
+                    "last_reading_ts": last_f,
+                    "stale": stale,
+                    "stale_after_s": sensor_stale_after_s,
                 }
             )
         for room in payload["rooms"]:
             room["sensors"] = by_room.get(room["id"], [])
+        payload["sensor_stale_after_s"] = sensor_stale_after_s
 
         def _exterior_comparative(
             sensors: list[dict[str, Any]],
         ) -> list[dict[str, Any]]:
-            """Exterior sensors for façade comparison — prefer height=high."""
+            """Exterior sensors for façade comparison — prefer height=high.
+
+            Stale sensors are ignored so a fresh low sensor can replace a
+            dead high one on the plan temperature bands.
+            """
             exterior = [
                 s
                 for s in sensors
                 if str(s.get("zone") or "").lower() == "exterior"
+                and not s.get("stale")
             ]
             high = [
                 s
@@ -1997,6 +2128,8 @@ def create_app(
             exterior = _exterior_comparative(sensors)
             live_temps: list[float] = []
             for s in interior:
+                if s.get("stale"):
+                    continue
                 try:
                     if s.get("temperature_c") is not None:
                         live_temps.append(float(s["temperature_c"]))
@@ -2012,6 +2145,8 @@ def create_app(
                 room["temp_c"] = None
             facade_temps: list[float] = []
             for s in exterior:
+                if s.get("stale"):
+                    continue
                 try:
                     if s.get("temperature_c") is not None:
                         facade_temps.append(float(s["temperature_c"]))
@@ -2026,7 +2161,7 @@ def create_app(
                 room["facade_sensor_names"] = [
                     str(s.get("name") or s.get("address") or "")
                     for s in exterior
-                    if s.get("temperature_c") is not None
+                    if not s.get("stale") and s.get("temperature_c") is not None
                 ]
             else:
                 room["facade_sensor_names"] = []
@@ -2046,6 +2181,8 @@ def create_app(
                     room["facade_temp_c"] = None
             hums: list[float] = []
             for s in interior:
+                if s.get("stale"):
+                    continue
                 try:
                     if s.get("humidity") is not None:
                         hums.append(float(s["humidity"]))

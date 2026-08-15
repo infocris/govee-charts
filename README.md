@@ -166,6 +166,7 @@ See `config.example.toml`:
 - `federation.peers` — URLs of other instances
 - `federation.token` — shared secret for `POST /api/ingest`
 - `[weather]` — Open-Meteo hourly forecast + sensor projections (`place` or lat/lon)
+- `[cursor_chat]` — Map-view chat via local Cursor Agent CLI (`agent login`, ask mode)
 - `[labels]` — friendly names keyed by BLE MAC
 
 ## Sensor categories
@@ -234,6 +235,12 @@ The **Map** view shows an **open-room cross-section** (kitchen → corridor →
 bedroom) colored by live temperatures at each sensor `height_cm`, plus a
 topology graph of rooms as vertical bands with walls/doors as edges and
 cooling-draft suggestions.
+
+Optional **Ask Cursor** (fold above Temperature / Humidity / Both) chats with the
+local Cursor Agent CLI in **ask** mode (read-only Q&A about the live apartment
+snapshot). Requires `[cursor_chat] enabled = true`, the `agent` binary on PATH
+(or `cursor_chat.agent_bin` absolute path for systemd), and `agent login` as the
+same user that runs the UI service. Restart the UI after changing this config.
 
 On the Compare **Temperature** chart, optional **Window open / close** bands
 compare the first selected interior sensor to outdoor air (±0.5 °C): green =
@@ -325,7 +332,9 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
 - `POST /api/restart?target=ui|workers` — restart UI or workers (when available)
 - `GET /widget?metric=temp&addr=…&past=24&future=24&transparent=0|1` — standalone embeddable chart (iframe / share link)
-- `GET /api/tts/voices?lang=fr` / `POST /api/tts` — edge-tts voices + MP3 synthesis for alert speech; voice `home-tts` plays on the configured Home TTS edge server (`[tts].home_url`)
+- `GET /api/tts/voices?lang=fr` / `POST /api/tts` — edge-tts voices + MP3 for in-tab voices; voice `home-tts` **emits** to Home TTS edge (`[tts].home_url`) — sinks are Bridge UI Outputs (no browser play)
+- `GET /api/map-chat/status` — Cursor Agent CLI readiness for Map chat
+- `POST /api/map-chat` — SSE ask-mode chat (`{message, session_id?}`) with live apartment snapshot
 - `POST /api/git/pull` — `git pull --ff-only` from the UI (does not restart services)
 - `GET /api/mail/inbox` / `POST /api/mail/inbox` / `DELETE /api/mail/inbox` — disposable inbox for Govee CSV email export (myagentinbox, 24h)
 - `POST /api/mail/fetch` — poll inbox and return CSV/ZIP attachments (base64) for Coverage import

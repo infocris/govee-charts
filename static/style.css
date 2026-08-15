@@ -2970,6 +2970,80 @@ main {
   margin: 0 0 0.65rem;
 }
 
+.map-chat-fold {
+  margin-top: 0.35rem;
+  margin-bottom: 0.75rem;
+}
+
+.map-chat-status {
+  margin: 0 0 0.55rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.map-chat-status.is-error {
+  color: #e8a0a0;
+}
+
+.map-chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  max-height: 14rem;
+  overflow-y: auto;
+  margin: 0 0 0.65rem;
+  padding: 0.15rem 0;
+}
+
+.map-chat-msg {
+  margin: 0;
+  padding: 0.45rem 0.65rem;
+  border-left: 2px solid var(--line);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.95rem;
+}
+
+.map-chat-msg.user {
+  border-left-color: var(--accent);
+  color: var(--ink);
+}
+
+.map-chat-msg.assistant {
+  border-left-color: var(--hum);
+}
+
+.map-chat-msg.pending {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.map-chat-form textarea {
+  display: block;
+  width: 100%;
+  resize: vertical;
+  min-height: 2.75rem;
+  max-height: 8rem;
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-elev);
+  color: var(--ink);
+  font: inherit;
+}
+
+.map-chat-form textarea:disabled {
+  opacity: 0.55;
+}
+
+.map-chat-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem 1rem;
+}
+
 .network-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -3272,6 +3346,17 @@ main {
   stroke-width: calc(3px * var(--map-font-scale, 1));
   stroke-linejoin: round;
   pointer-events: none;
+}
+
+.section-sensor-stale-mark {
+  fill: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  pointer-events: none;
+}
+
+.section-sensor-stale-label {
+  fill: #c4782a;
 }
 
 .section-facade-label {

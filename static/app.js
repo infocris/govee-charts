@@ -113,6 +113,18 @@
   const networkMetricButtons = [
     ...document.querySelectorAll(".network-metric-ranges > button[data-map-metric]"),
   ];
+  const foldMapChatEl = document.getElementById("fold-map-chat");
+  const mapChatMetaEl = document.getElementById("map-chat-meta");
+  const mapChatStatusEl = document.getElementById("map-chat-status");
+  const mapChatLogEl = document.getElementById("map-chat-log");
+  const mapChatFormEl = document.getElementById("map-chat-form");
+  const mapChatInputEl = document.getElementById("map-chat-input");
+  const mapChatSendBtn = document.getElementById("map-chat-send");
+  const mapChatClearBtn = document.getElementById("map-chat-clear");
+  let mapChatReady = false;
+  let mapChatBusy = false;
+  let mapChatStatusLoaded = false;
+  let mapChatModel = "auto";
   const sectionShowSmallEl = document.getElementById("section-show-small");
   const sectionPathClearBtn = document.getElementById("section-path-clear");
   const NETWORK_VB_W = 920;
@@ -347,6 +359,8 @@
   const VISIBLE_STATIONS_KEY = "govee-charts.visibleStations";
   const FOLD_CURRENT_KEY = "govee-charts.foldCurrent";
   const FOLD_PROJ_KEY = "govee-charts.foldProjections";
+  const FOLD_MAP_CHAT_KEY = "govee-charts.foldMapChat";
+  const MAP_CHAT_SESSION_KEY = "govee-charts.mapChatSession";
   const GEO_KEY = "govee-charts.geo";
   const CAT_FILTER_KEY = "govee-charts.catFilters";
   const CHART_HEIGHT_KEY = "govee-charts.chartHeight";
@@ -4863,6 +4877,7 @@
           networkStatusEl.textContent = `Error: ${err.message}`;
         }
       });
+      ensureMapChatStatus().catch((err) => console.warn(err));
     } else if (view === "coverage") {
       loadCoverage()
         .then(() => {
@@ -4923,11 +4938,37 @@
     return networkMapMetric === "humidity" ? "humidity" : "temperature_c";
   }
 
+  /** Seconds after last reading before a sensor is ignored on the plan / section. */
+  const NETWORK_SENSOR_STALE_AFTER_S = 900;
+
+  function networkSensorIsStale(sensor) {
+    if (!sensor) return true;
+    if (sensor.stale === true) return true;
+    if (sensor.stale === false) return false;
+    const ts = Number(sensor.last_reading_ts || sensor.last_seen);
+    if (!Number.isFinite(ts)) return false;
+    const limit = Number(sensor.stale_after_s);
+    const after =
+      Number.isFinite(limit) && limit > 0 ? limit : NETWORK_SENSOR_STALE_AFTER_S;
+    return Date.now() / 1000 - ts > after;
+  }
+
+  function networkSensorAgeLabel(sensor) {
+    const ts = Number(sensor && (sensor.last_reading_ts || sensor.last_seen));
+    if (!Number.isFinite(ts)) return "no update time";
+    const age = Math.max(0, Date.now() / 1000 - ts);
+    if (age < 90) return `${Math.round(age)}s ago`;
+    if (age < 3600) return `${Math.round(age / 60)} min ago`;
+    if (age < 86400) return `${(age / 3600).toFixed(1)} h ago`;
+    return `${(age / 86400).toFixed(1)} d ago`;
+  }
+
   function networkShowsBothMetrics() {
     return networkMapMetric === "both";
   }
 
   function networkSensorFieldValue(sensor, field) {
+    if (networkSensorIsStale(sensor)) return NaN;
     const v = Number(sensor && sensor[field]);
     return Number.isFinite(v) ? v : NaN;
   }
@@ -5189,6 +5230,9 @@
   }
 
   function formatNetworkSensorReading(sensor) {
+    if (networkSensorIsStale(sensor)) {
+      return `stale (${networkSensorAgeLabel(sensor)})`;
+    }
     const t = networkSensorFieldValue(sensor, "temperature_c");
     const h = networkSensorFieldValue(sensor, "humidity");
     if (networkShowsBothMetrics()) {
@@ -5201,6 +5245,49 @@
       return Number.isFinite(h) ? `${h.toFixed(1)}%` : "—";
     }
     return Number.isFinite(t) ? `${t.toFixed(1)}°C` : "—";
+  }
+
+  /** Warning triangle for stale sensors on the open-room cross-section. */
+  function appendSectionStaleSensorIcon(parent, NS, cx, cy, sensor) {
+    const g = document.createElementNS(NS, "g");
+    g.setAttribute("class", "section-sensor-stale");
+    g.setAttribute("pointer-events", "none");
+    const tri = document.createElementNS(NS, "path");
+    tri.setAttribute(
+      "d",
+      `M ${cx} ${cy - 8} L ${cx + 8} ${cy + 7} L ${cx - 8} ${cy + 7} Z`
+    );
+    tri.setAttribute("fill", "#c4782a");
+    tri.setAttribute("stroke", "#fff");
+    tri.setAttribute("stroke-width", "1.25");
+    tri.setAttribute("stroke-linejoin", "round");
+    g.appendChild(tri);
+    const bang = document.createElementNS(NS, "text");
+    bang.setAttribute("x", String(cx));
+    bang.setAttribute("y", String(cy + 5));
+    bang.setAttribute("text-anchor", "middle");
+    bang.setAttribute("class", "section-sensor-stale-mark");
+    bang.textContent = "!";
+    g.appendChild(bang);
+    const tip = document.createElementNS(NS, "title");
+    const cm =
+      sensor &&
+      sensor.height_cm != null &&
+      Number.isFinite(Number(sensor.height_cm))
+        ? ` @ ${Math.round(Number(sensor.height_cm))} cm`
+        : "";
+    tip.textContent = `${(sensor && sensor.name) || "Sensor"}${cm}: ${formatNetworkSensorReading(
+      sensor
+    )}`;
+    g.appendChild(tip);
+    parent.appendChild(g);
+
+    const lab = document.createElementNS(NS, "text");
+    lab.setAttribute("x", String(cx + 10));
+    lab.setAttribute("y", String(cy + 4));
+    lab.setAttribute("class", "section-sensor-label section-sensor-stale-label");
+    lab.textContent = "stale";
+    parent.appendChild(lab);
   }
 
   /** Split sensors by height for a given metric field. */
@@ -6460,10 +6547,15 @@
       if (!isMapSelected) {
         for (const s of col.sensors || []) {
           const cm = sensorHeightCm(s, ceilingCm);
-          const t = networkSensorMetric(s);
-          if (cm == null || !Number.isFinite(t)) continue;
+          if (cm == null) continue;
           const y = padT + ((ceilingCm - cm) / ceilingCm) * plotH;
           const cx = x + w * 0.5;
+          if (networkSensorIsStale(s)) {
+            appendSectionStaleSensorIcon(roomGroup, NS, cx, y, s);
+            continue;
+          }
+          const t = networkSensorMetric(s);
+          if (!Number.isFinite(t)) continue;
           const dot = document.createElementNS(NS, "circle");
           dot.setAttribute("cx", String(cx));
           dot.setAttribute("cy", String(y));
@@ -8923,32 +9015,20 @@
       voice: data.voice,
       played: data.played,
       channel: data.channel,
+      destinations: data.destinations,
       hasAudio: !!data.audio_base64,
     });
-    // Play in this browser (same as Home TTS admin UI). Host may also
-    // play=local for speakers attached to the Home TTS machine.
-    if (data.audio_base64) {
-      stopTtsAudio();
-      const blob = b64ToBlob(data.audio_base64, data.mime || "audio/mpeg");
-      ttsObjectUrl = URL.createObjectURL(blob);
-      if (!ttsAudioEl) ttsAudioEl = new Audio();
-      ttsAudioEl.src = ttsObjectUrl;
-      ttsAudioEl.volume = 1;
-      try {
-        await ttsAudioEl.play();
-      } catch (err) {
-        if (err && err.name === "NotAllowedError") {
-          ttsLog("audio blocked — need a user gesture");
-          return {
-            spoken: !!data.played,
-            reason: "NotAllowedError",
-          };
-        }
-        throw err;
-      }
-      return { spoken: true, reason: "" };
-    }
-    return { spoken: !!data.played, reason: data.played ? "" : "no audio" };
+    // Emit-only: Bridge Outputs play the sound. Ignore debug audio_base64
+    // so this tab never doubles Precision/Chrome listeners.
+    return {
+      spoken: true,
+      reason: data.destinations
+        ? "broadcast:" +
+          (data.destinations || []).map((d) => d.id || d.label).join("+")
+        : data.played
+          ? ""
+          : "emitted",
+    };
   }
 
   async function speakEdge(text, voiceId, gen) {
@@ -11457,6 +11537,205 @@
       setNetworkMapMetric(btn.dataset.mapMetric);
     });
   });
+
+  function setMapChatControlsEnabled(on) {
+    if (mapChatInputEl) mapChatInputEl.disabled = !on || mapChatBusy;
+    if (mapChatSendBtn) mapChatSendBtn.disabled = !on || mapChatBusy;
+    if (mapChatClearBtn) {
+      const hasSession = Boolean(sessionStorage.getItem(MAP_CHAT_SESSION_KEY));
+      const hasLog = Boolean(mapChatLogEl && mapChatLogEl.children.length);
+      mapChatClearBtn.disabled = mapChatBusy || (!hasSession && !hasLog);
+    }
+  }
+
+  function appendMapChatMessage(role, text, { pending = false } = {}) {
+    if (!mapChatLogEl) return null;
+    const p = document.createElement("p");
+    p.className = `map-chat-msg ${role}${pending ? " pending" : ""}`;
+    p.textContent = text || "";
+    mapChatLogEl.appendChild(p);
+    mapChatLogEl.scrollTop = mapChatLogEl.scrollHeight;
+    return p;
+  }
+
+  function setMapChatStatus(text, { error = false } = {}) {
+    if (!mapChatStatusEl) return;
+    mapChatStatusEl.textContent = text || "";
+    mapChatStatusEl.classList.toggle("is-error", Boolean(error));
+  }
+
+  async function ensureMapChatStatus() {
+    if (!foldMapChatEl || mapChatStatusLoaded) return;
+    setMapChatStatus(t("map.chat.checking"));
+    try {
+      const res = await fetch("/api/map-chat/status");
+      const data = await res.json();
+      mapChatStatusLoaded = true;
+      if (!data.enabled) {
+        mapChatReady = false;
+        setMapChatStatus(t("map.chat.disabled"), { error: true });
+        setMapChatControlsEnabled(false);
+        return;
+      }
+      if (!data.agent_found) {
+        mapChatReady = false;
+        setMapChatStatus(t("map.chat.missingAgent"), { error: true });
+        setMapChatControlsEnabled(false);
+        return;
+      }
+      if (!data.ready) {
+        mapChatReady = false;
+        setMapChatStatus(t("map.chat.notLoggedIn"), { error: true });
+        setMapChatControlsEnabled(false);
+        return;
+      }
+      mapChatReady = true;
+      mapChatModel = data.model || "auto";
+      setMapChatStatus(t("map.chat.ready", { model: mapChatModel }));
+      if (mapChatMetaEl) {
+        mapChatMetaEl.textContent = mapChatModel;
+      }
+      setMapChatControlsEnabled(true);
+    } catch (err) {
+      mapChatReady = false;
+      setMapChatStatus(t("map.chat.error", { error: err.message || String(err) }), {
+        error: true,
+      });
+      setMapChatControlsEnabled(false);
+    }
+  }
+
+  async function sendMapChatMessage(raw) {
+    const message = String(raw || "").trim();
+    if (!message || !mapChatReady || mapChatBusy) return;
+    mapChatBusy = true;
+    setMapChatControlsEnabled(true);
+    appendMapChatMessage("user", message);
+    if (mapChatInputEl) mapChatInputEl.value = "";
+    const assistantEl = appendMapChatMessage("assistant", t("map.chat.busy"), {
+      pending: true,
+    });
+    setMapChatStatus(t("map.chat.busy"));
+    const sessionId = sessionStorage.getItem(MAP_CHAT_SESSION_KEY) || "";
+    let gotText = false;
+    try {
+      const res = await fetch("/api/map-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          session_id: sessionId || null,
+        }),
+      });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try {
+          const errBody = await res.json();
+          detail = errBody.detail || detail;
+        } catch (_) {
+          /* ignore */
+        }
+        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buffer.indexOf("\n\n")) >= 0) {
+          const chunk = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const dataLine = chunk
+            .split("\n")
+            .map((l) => l.trim())
+            .find((l) => l.startsWith("data:"));
+          if (!dataLine) continue;
+          let ev;
+          try {
+            ev = JSON.parse(dataLine.slice(5).trim());
+          } catch (_) {
+            continue;
+          }
+          if (ev.session_id) {
+            sessionStorage.setItem(MAP_CHAT_SESSION_KEY, ev.session_id);
+          }
+          if (ev.type === "delta" && ev.text) {
+            if (assistantEl.classList.contains("pending")) {
+              assistantEl.classList.remove("pending");
+              assistantEl.textContent = "";
+            }
+            assistantEl.textContent += ev.text;
+            gotText = true;
+            if (mapChatLogEl) mapChatLogEl.scrollTop = mapChatLogEl.scrollHeight;
+          } else if (ev.type === "done") {
+            if (ev.session_id) {
+              sessionStorage.setItem(MAP_CHAT_SESSION_KEY, ev.session_id);
+            }
+            if (!gotText && ev.text) {
+              assistantEl.classList.remove("pending");
+              assistantEl.textContent = ev.text;
+              gotText = true;
+            }
+          } else if (ev.type === "error") {
+            throw new Error(ev.message || "map chat failed");
+          }
+        }
+      }
+      if (!gotText) {
+        assistantEl.classList.remove("pending");
+        assistantEl.textContent = "…";
+      }
+      setMapChatStatus(t("map.chat.ready", { model: mapChatModel }));
+    } catch (err) {
+      if (assistantEl) {
+        assistantEl.classList.remove("pending");
+        assistantEl.textContent = t("map.chat.error", {
+          error: err.message || String(err),
+        });
+      }
+      setMapChatStatus(
+        t("map.chat.error", { error: err.message || String(err) }),
+        { error: true }
+      );
+    } finally {
+      mapChatBusy = false;
+      setMapChatControlsEnabled(mapChatReady);
+    }
+  }
+
+  if (mapChatFormEl) {
+    mapChatFormEl.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      sendMapChatMessage(mapChatInputEl ? mapChatInputEl.value : "");
+    });
+  }
+  if (mapChatInputEl) {
+    mapChatInputEl.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        sendMapChatMessage(mapChatInputEl.value);
+      }
+    });
+  }
+  if (mapChatClearBtn) {
+    mapChatClearBtn.addEventListener("click", () => {
+      sessionStorage.removeItem(MAP_CHAT_SESSION_KEY);
+      if (mapChatLogEl) mapChatLogEl.innerHTML = "";
+      setMapChatControlsEnabled(mapChatReady);
+    });
+  }
+  if (foldMapChatEl) {
+    foldMapChatEl.addEventListener("toggle", () => {
+      localStorage.setItem(FOLD_MAP_CHAT_KEY, foldMapChatEl.open ? "1" : "0");
+      if (foldMapChatEl.open) {
+        ensureMapChatStatus().catch((err) => console.warn(err));
+      }
+    });
+  }
+
   if (sectionShowSmallEl) {
     sectionShowSmallEl.addEventListener("change", () => {
       setSectionShowSmall(sectionShowSmallEl.checked);
@@ -12837,6 +13116,9 @@
     foldProjectionsEl.addEventListener("toggle", () => {
       localStorage.setItem(FOLD_PROJ_KEY, foldProjectionsEl.open ? "1" : "0");
     });
+  }
+  if (foldMapChatEl) {
+    foldMapChatEl.open = localStorage.getItem(FOLD_MAP_CHAT_KEY) === "1";
   }
 
   function bindWidgetExportControls() {

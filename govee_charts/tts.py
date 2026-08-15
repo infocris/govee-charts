@@ -43,14 +43,12 @@ async def speak_via_home(
     lang: str = "fr",
     app: str = "govee-charts",
     channel: str = "alerts",
-    play: str = "local",
-    return_audio: bool = True,
+    return_audio: bool = False,
 ) -> dict[str, Any]:
-    """POST to Home TTS edge `/speak` (channel voice + optional server play).
+    """POST to Home TTS edge `/speak` (broadcast sinks).
 
-    Returns audio_base64 when return_audio is true so the browser can play
-    (needed when the listener is remote, e.g. Mac over Tailscale). play=local
-    still drives speakers attached to the Home TTS host.
+    Home TTS is a sound output — callers do not play MP3. Sinks are selected
+    in the Bridge UI Outputs. return_audio is debug-only.
     """
     cleaned = _clean_text(text)
     root = (base_url or "").strip().rstrip("/")
@@ -58,13 +56,11 @@ async def speak_via_home(
         raise RuntimeError("home-tts URL is not configured")
 
     lang_key = (lang or "fr").strip().lower().split("-")[0] or "fr"
-    play_mode = (play or "none").strip().lower() or "none"
     payload = {
         "text": cleaned,
         "lang": lang_key,
         "app": (app or "govee-charts").strip() or "govee-charts",
         "channel": (channel or "alerts").strip() or "alerts",
-        "play": play_mode,
         "return_audio": bool(return_audio),
     }
     url = f"{root}/speak"
@@ -98,6 +94,8 @@ async def speak_via_home(
         "play_error": data.get("play_error"),
         "app": data.get("app"),
         "channel": data.get("channel"),
+        "speak_id": data.get("speak_id"),
+        "destinations": data.get("destinations") or [],
     }
     if data.get("audio_base64"):
         out["mime"] = data.get("mime") or "audio/mpeg"

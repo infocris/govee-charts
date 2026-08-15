@@ -595,6 +595,31 @@
           </li>
         </ul>
       </div>
+      <details class="compare-fold map-chat-fold" id="fold-map-chat">
+        <summary class="compare-fold-summary">
+          <span data-i18n="map.chat.title">Ask Cursor</span>
+          <span class="compare-fold-meta" id="map-chat-meta" data-i18n="map.chat.metaHint">Apartment climate Q&amp;A</span>
+        </summary>
+        <div class="map-chat" id="map-chat">
+          <p class="map-chat-status" id="map-chat-status" aria-live="polite"></p>
+          <div class="map-chat-log" id="map-chat-log" role="log" aria-relevant="additions"></div>
+          <form class="map-chat-form" id="map-chat-form">
+            <label class="visually-hidden" for="map-chat-input" data-i18n="map.chat.inputLabel">Message</label>
+            <textarea
+              id="map-chat-input"
+              rows="2"
+              maxlength="4000"
+              data-i18n-placeholder="map.chat.placeholder"
+              placeholder="Ask about rooms, doors, outdoor air…"
+              disabled
+            ></textarea>
+            <div class="map-chat-actions">
+              <button type="submit" id="map-chat-send" class="backfill-btn" disabled data-i18n="map.chat.send">Send</button>
+              <button type="button" id="map-chat-clear" class="linkish" disabled data-i18n="map.chat.clear">New chat</button>
+            </div>
+          </form>
+        </div>
+      </details>
       <div class="network-metric-bar">
         <div class="ranges network-metric-ranges" role="group" aria-label="Map metric">
           <button type="button" data-map-metric="temp" class="active">Temperature</button>
