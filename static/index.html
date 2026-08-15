@@ -275,11 +275,13 @@
         </label>
         <div class="ranges forecast-future-ranges" role="group" data-i18n-aria-label="compare.forecastHorizon" aria-label="Forecast horizon">
           <span class="forecast-future-label" data-i18n="compare.future">Future</span>
+          <button type="button" data-forecast-future="1">+1 h</button>
+          <button type="button" data-forecast-future="6">+6 h</button>
           <button type="button" data-forecast-future="12">+12 h</button>
-          <button type="button" data-forecast-future="24" class="active">+1 d</button>
+          <button type="button" data-forecast-future="24" class="active">+24 h</button>
           <button type="button" data-forecast-future="72">+3 d</button>
           <button type="button" data-forecast-future="168">+7 d</button>
-          <button type="button" data-forecast-future="384">+16 d</button>
+          <button type="button" data-forecast-future="336">+14 d</button>
         </div>
         <label class="forecast-toggle projection-scenario-toggle" for="projection-scenario">
           <span data-i18n="compare.scenario">Scenario</span>
@@ -394,11 +396,13 @@
               <span data-i18n="compare.widget.future">Future</span>
               <select id="widget-future">
                 <option value="0" data-i18n="compare.widget.futureOff">Off</option>
+                <option value="1">+1 h</option>
+                <option value="6">+6 h</option>
                 <option value="12">+12 h</option>
-                <option value="24" selected>+1 d</option>
+                <option value="24" selected>+24 h</option>
                 <option value="72">+3 d</option>
                 <option value="168">+7 d</option>
-                <option value="384">+16 d</option>
+                <option value="336">+14 d</option>
               </select>
             </label>
             <label class="widget-export-check">
@@ -506,11 +510,13 @@
         </label>
         <div class="ranges forecast-future-ranges" role="group" aria-label="Forecast horizon">
           <span class="forecast-future-label">Future</span>
+          <button type="button" data-forecast-future="1">+1 h</button>
+          <button type="button" data-forecast-future="6">+6 h</button>
           <button type="button" data-forecast-future="12">+12 h</button>
-          <button type="button" data-forecast-future="24" class="active">+1 d</button>
+          <button type="button" data-forecast-future="24" class="active">+24 h</button>
           <button type="button" data-forecast-future="72">+3 d</button>
           <button type="button" data-forecast-future="168">+7 d</button>
-          <button type="button" data-forecast-future="384">+16 d</button>
+          <button type="button" data-forecast-future="336">+14 d</button>
         </div>
         <label class="forecast-toggle projection-scenario-toggle" for="facade-projection-scenario">
           <span>Scenario</span>
@@ -602,6 +608,14 @@
         </summary>
         <div class="map-chat" id="map-chat">
           <p class="map-chat-status" id="map-chat-status" aria-live="polite"></p>
+          <div class="map-chat-session-row">
+            <label class="map-chat-session-label" for="map-chat-session">
+              <span data-i18n="map.chat.session">Session</span>
+            </label>
+            <select id="map-chat-session" disabled>
+              <option value="" data-i18n="map.chat.sessionNew">New chat…</option>
+            </select>
+          </div>
           <div class="map-chat-log" id="map-chat-log" role="log" aria-relevant="additions"></div>
           <form class="map-chat-form" id="map-chat-form">
             <label class="visually-hidden" for="map-chat-input" data-i18n="map.chat.inputLabel">Message</label>

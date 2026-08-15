@@ -38,6 +38,8 @@ def normalize_cursor_chat_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         "model": str(cfg.get("model") or "auto").strip() or "auto",
         "workspace": str(cfg.get("workspace") or "").strip(),
         "timeout_s": max(30.0, min(timeout, 600.0)),
+        "db_path": str(cfg.get("db_path") or "data/map_chat.db").strip()
+        or "data/map_chat.db",
     }
 
 
@@ -80,8 +82,8 @@ def _round_num(value: Any, digits: int = 1) -> Any:
         return None
 
 
-def compact_apartment_snapshot(payload: dict[str, Any]) -> str:
-    """Shrink /api/apartment payload for the agent prompt."""
+def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
+    """Compact /api/apartment payload for prompts and chat history."""
     rooms_out: list[dict[str, Any]] = []
     for room in payload.get("rooms") or []:
         sensors = []
@@ -127,7 +129,7 @@ def compact_apartment_snapshot(payload: dict[str, Any]) -> str:
     airflow = payload.get("airflow") or {}
     couple = payload.get("temp_couple") or {}
 
-    snap: dict[str, Any] = {
+    return {
         "rooms": rooms_out,
         "edges": edges_out,
         "outdoor_temp_c": _round_num(
@@ -147,23 +149,69 @@ def compact_apartment_snapshot(payload: dict[str, Any]) -> str:
             "setpoint_c": _round_num(hvac.get("temperature") or hvac.get("setpoint")),
         },
         "airflow": {
-            "suggestions": airflow.get("suggestions") or airflow.get("actions") or [],
+            "mode": airflow.get("mode"),
+            "inlet": airflow.get("inlet"),
+            "outlet": airflow.get("outlet"),
+            "path": airflow.get("path") or [],
+            "delta_c": _round_num(airflow.get("delta_c")),
+            "actions": airflow.get("actions") or airflow.get("suggestions") or [],
             "summary": airflow.get("summary") or airflow.get("hint"),
         },
     }
+
+
+def compact_apartment_snapshot(payload: dict[str, Any]) -> str:
+    """Shrink /api/apartment payload for the agent prompt (JSON string)."""
+    snap = apartment_snapshot_dict(payload)
     text = json.dumps(snap, ensure_ascii=False, separators=(",", ":"))
     if len(text) > SNAPSHOT_MAX_CHARS:
         text = text[: SNAPSHOT_MAX_CHARS - 1] + "…"
     return text
 
 
-def build_prompt(user_message: str, snapshot: str) -> str:
+def normalize_banner(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    title = str(raw.get("title") or "").strip()
+    detail = str(raw.get("detail") or "").strip()
+    tone = str(raw.get("tone") or "idle").strip() or "idle"
+    hidden = bool(raw.get("hidden"))
+    if hidden and not title and not detail:
+        return {"hidden": True, "tone": tone, "title": "", "detail": ""}
+    return {
+        "hidden": hidden,
+        "tone": tone[:32],
+        "title": title[:500],
+        "detail": detail[:2000],
+    }
+
+
+def build_prompt(
+    user_message: str,
+    snapshot: str,
+    *,
+    banner: dict[str, Any] | None = None,
+) -> str:
     msg = (user_message or "").strip()
     if len(msg) > USER_MESSAGE_MAX:
         msg = msg[: USER_MESSAGE_MAX - 1] + "…"
+    banner_block = ""
+    if banner and not banner.get("hidden"):
+        title = str(banner.get("title") or "").strip()
+        detail = str(banner.get("detail") or "").strip()
+        tone = str(banner.get("tone") or "").strip()
+        if title or detail:
+            banner_block = (
+                "\n\nWindow advice banner shown to the user at request time"
+                + (f" (tone={tone})" if tone else "")
+                + ":\n"
+                + (f"Title: {title}\n" if title else "")
+                + (f"Detail: {detail}\n" if detail else "")
+            )
     prompt = (
         f"{SYSTEM_PREAMBLE}\n\n"
-        f"Live apartment snapshot (JSON):\n{snapshot}\n\n"
+        f"Live apartment snapshot (JSON):\n{snapshot}"
+        f"{banner_block}\n"
         f"User question:\n{msg}"
     )
     if len(prompt) > PROMPT_MAX_CHARS:

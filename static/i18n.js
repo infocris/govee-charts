@@ -381,6 +381,11 @@
       "map.chat.notLoggedIn": "Cursor agent not logged in (run agent login)",
       "map.chat.busy": "Thinking…",
       "map.chat.error": "Error: {error}",
+      "map.chat.context": "Sensors & advice at request",
+      "map.chat.bannerHidden": "No window advice banner",
+      "map.chat.session": "Session",
+      "map.chat.sessionNew": "New chat…",
+      "map.chat.sessionLabel": "{when} · {n} turns · {preview}",
       "common.error": "Error: {error}",
     },
     fr: {
@@ -762,6 +767,11 @@
       "map.chat.notLoggedIn": "Agent Cursor non connecté (agent login)",
       "map.chat.busy": "Réflexion…",
       "map.chat.error": "Erreur : {error}",
+      "map.chat.context": "Capteurs et conseil à la requête",
+      "map.chat.bannerHidden": "Pas de bannière de conseil",
+      "map.chat.session": "Session",
+      "map.chat.sessionNew": "Nouveau chat…",
+      "map.chat.sessionLabel": "{when} · {n} tours · {preview}",
       "common.error": "Erreur : {error}",
     },
   };

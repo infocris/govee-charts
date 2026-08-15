@@ -24,10 +24,12 @@ from govee_charts.address import build_suffix_map
 from govee_charts.api import create_app
 from govee_charts.backfill import BackfillConfig, BackfillService
 from govee_charts.compaction import CompactionConfig, CompactionService
+from govee_charts.cursor_chat import normalize_cursor_chat_config
 from govee_charts.db import Database, is_db_locked
 from govee_charts.doors import DoorHaPoller, DoorMqttListener, DoorsConfig, import_ha_door_history
 from govee_charts.federation import PeerPublisher
 from govee_charts.ha_th import HaThConfig, HaThPoller
+from govee_charts.map_chat_store import MapChatStore
 from govee_charts.hvac import HvacConfig, HvacHaPoller, import_ha_hvac_history
 from govee_charts.scanner import GoveeScanner, discover_once
 from govee_charts.apartment import (
@@ -181,6 +183,7 @@ DEFAULTS: dict[str, Any] = {
         "model": "auto",
         "workspace": "",
         "timeout_s": 180.0,
+        "db_path": "data/map_chat.db",
     },
     "labels": {},
 }
@@ -244,6 +247,14 @@ def setup_logging(log_file: str) -> None:
 
 def resolve_db_path(cfg: dict[str, Any]) -> Path:
     path = Path(cfg["database"]["path"])
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+def resolve_map_chat_db_path(cfg: dict[str, Any]) -> Path:
+    chat_cfg = normalize_cursor_chat_config(cfg.get("cursor_chat") or {})
+    path = Path(str(chat_cfg.get("db_path") or "data/map_chat.db"))
     if not path.is_absolute():
         path = ROOT / path
     return path
@@ -750,6 +761,9 @@ async def run_ui_server(
     certfile, keyfile = resolve_ssl_files(cfg["server"])
     display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
 
+    map_chat_store = MapChatStore(resolve_map_chat_db_path(cfg))
+    await map_chat_store.connect()
+
     app = create_app(
         db,
         labels=cfg["labels"],
@@ -769,6 +783,7 @@ async def run_ui_server(
         ble_alert_stale_after=float(cfg["scanner"].get("alert_stale_after", 300.0)),
         tts=cfg.get("tts") or {},
         cursor_chat=cfg.get("cursor_chat") or {},
+        map_chat_store=map_chat_store,
     )
 
     http_config = uvicorn.Config(
@@ -819,6 +834,7 @@ async def run_ui_server(
     finally:
         if workers_runtime is not None:
             await _stop_workers(workers_runtime)
+        await map_chat_store.close()
         await db.close()
 
 

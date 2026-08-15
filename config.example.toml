@@ -283,6 +283,8 @@ mode = "ask"
 model = "auto"
 workspace = ""
 timeout_s = 180
+# Separate SQLite file (not readings.db) for chat turns + sensor/banner snapshots
+db_path = "data/map_chat.db"
 
 # Optional friendly labels keyed by BLE MAC (uppercase).
 # Also used to map macOS UUID addresses to real MACs via the Govee name suffix

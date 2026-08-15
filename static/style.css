@@ -2985,6 +2985,35 @@ main {
   color: #e8a0a0;
 }
 
+.map-chat-session-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.75rem;
+  margin: 0 0 0.55rem;
+}
+
+.map-chat-session-label {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.map-chat-session-row select {
+  flex: 1 1 14rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-elev);
+  color: var(--ink);
+  font: inherit;
+}
+
+.map-chat-session-row select:disabled {
+  opacity: 0.55;
+}
+
 .map-chat-log {
   display: flex;
   flex-direction: column;
@@ -3016,6 +3045,49 @@ main {
 .map-chat-msg.pending {
   color: var(--muted);
   font-style: italic;
+}
+
+.map-chat-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.map-chat-context {
+  margin: 0;
+  padding: 0.25rem 0.55rem 0.45rem;
+  border-left: 2px solid var(--line);
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.map-chat-context summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--muted);
+}
+
+.map-chat-context-banner {
+  margin: 0.35rem 0 0;
+  white-space: pre-wrap;
+}
+
+.map-chat-context-banner strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.map-chat-context pre {
+  margin: 0.35rem 0 0;
+  max-height: 8rem;
+  overflow: auto;
+  padding: 0.35rem 0.45rem;
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .map-chat-form textarea {

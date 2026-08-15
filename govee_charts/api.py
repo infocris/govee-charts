@@ -36,8 +36,10 @@ from govee_charts.backfill import BackfillService
 from govee_charts.categories import normalize_door_patch, normalize_patch, taxonomy
 from govee_charts.csv_import import MAX_UPLOAD_BYTES, parse_upload, summarize_samples
 from govee_charts.cursor_chat import (
+    apartment_snapshot_dict,
     build_prompt,
     compact_apartment_snapshot,
+    normalize_banner,
     normalize_cursor_chat_config,
     probe_agent_status,
     resolve_agent_bin,
@@ -48,6 +50,7 @@ from govee_charts.db import Database, coverage_from_minute_set, is_db_locked
 from govee_charts.decode import Reading
 from govee_charts.federation import csv_source
 from govee_charts.energy import build_energy_summary, estimate_live_ac_watts
+from govee_charts.map_chat_store import MapChatStore
 from govee_charts.tts import (
     HOME_TTS_VOICE_ID,
     default_voice_for_lang,
@@ -334,6 +337,7 @@ class TtsBody(BaseModel):
 class MapChatBody(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     session_id: str | None = Field(default=None, max_length=128)
+    banner: dict[str, Any] | None = None
 
     model_config = {"extra": "forbid"}
 
@@ -525,6 +529,7 @@ def create_app(
     ble_alert_stale_after: float = 300.0,
     tts: dict[str, Any] | None = None,
     cursor_chat: dict[str, Any] | None = None,
+    map_chat_store: MapChatStore | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Govee Charts", docs_url=None, redoc_url=None)
     app.state.db = db
@@ -557,6 +562,7 @@ def create_app(
         "return_audio": bool(return_audio),
     }
     app.state.cursor_chat = normalize_cursor_chat_config(cursor_chat)
+    app.state.map_chat_store = map_chat_store
 
     @app.get("/")
     async def index() -> HTMLResponse:
@@ -705,6 +711,7 @@ def create_app(
         enabled = bool(cfg.get("enabled"))
         agent_bin = resolve_agent_bin(str(cfg.get("agent_bin") or ""))
         workspace = resolve_workspace(str(cfg.get("workspace") or ""))
+        store: MapChatStore | None = app.state.map_chat_store
         out: dict[str, Any] = {
             "enabled": enabled,
             "mode": cfg.get("mode") or "ask",
@@ -712,6 +719,7 @@ def create_app(
             "workspace": workspace,
             "agent_bin": agent_bin,
             "agent_found": bool(agent_bin),
+            "history_enabled": store is not None,
             "logged_in": False,
             "ready": False,
             "detail": None,
@@ -730,6 +738,48 @@ def create_app(
         out["detail"] = status.get("detail")
         out["ready"] = bool(status.get("logged_in"))
         return out
+
+    @app.get("/api/map-chat/sessions")
+    async def api_map_chat_sessions(
+        limit: int = Query(40, ge=1, le=100),
+    ) -> dict[str, Any]:
+        """List recent Map chat sessions for the session picker."""
+        store: MapChatStore | None = app.state.map_chat_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="Map chat history unavailable")
+        sessions = await store.list_sessions(limit=limit)
+        return {"ok": True, "sessions": sessions}
+
+    @app.get("/api/map-chat/history")
+    async def api_map_chat_history(
+        session_id: str | None = Query(default=None, max_length=128),
+        limit: int = Query(50, ge=1, le=200),
+        include_snapshot: bool = Query(False),
+    ) -> dict[str, Any]:
+        """List persisted Map chat exchanges (separate map_chat.db)."""
+        store: MapChatStore | None = app.state.map_chat_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="Map chat history unavailable")
+        exchanges = await store.list_exchanges(
+            session_id=session_id,
+            limit=limit,
+            include_snapshot=include_snapshot,
+        )
+        return {
+            "ok": True,
+            "session_id": (session_id or "").strip() or None,
+            "exchanges": exchanges,
+        }
+
+    @app.get("/api/map-chat/history/{exchange_id}")
+    async def api_map_chat_history_one(exchange_id: int) -> dict[str, Any]:
+        store: MapChatStore | None = app.state.map_chat_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="Map chat history unavailable")
+        item = await store.get_exchange(exchange_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="exchange not found")
+        return {"ok": True, "exchange": item}
 
     @app.post("/api/map-chat")
     async def api_map_chat(body: MapChatBody) -> StreamingResponse:
@@ -753,6 +803,8 @@ def create_app(
         if not message:
             raise HTTPException(status_code=400, detail="empty message")
 
+        banner = normalize_banner(body.banner)
+
         # Fresh apartment snapshot (same builder as GET /api/apartment).
         try:
             apartment = await api_apartment(
@@ -766,15 +818,20 @@ def create_app(
             raise HTTPException(
                 status_code=502, detail=f"apartment snapshot failed: {exc}"
             ) from exc
+        snapshot_obj = apartment_snapshot_dict(apartment)
         snapshot = compact_apartment_snapshot(apartment)
-        prompt = build_prompt(message, snapshot)
+        prompt = build_prompt(message, snapshot, banner=banner)
         workspace = resolve_workspace(str(cfg.get("workspace") or ""))
         model = str(cfg.get("model") or "auto")
         mode = str(cfg.get("mode") or "ask")
         timeout_s = float(cfg.get("timeout_s") or 180.0)
         session_id = (body.session_id or "").strip() or None
+        store: MapChatStore | None = app.state.map_chat_store
 
         async def event_gen():
+            assistant_text = ""
+            out_session = session_id
+            err_msg: str | None = None
             async with lock:
                 async for ev in stream_agent_chat(
                     agent_bin=agent_bin,
@@ -785,7 +842,29 @@ def create_app(
                     session_id=session_id,
                     timeout_s=timeout_s,
                 ):
+                    if ev.get("session_id"):
+                        out_session = str(ev["session_id"])
+                    if ev.get("type") == "delta" and ev.get("text"):
+                        assistant_text += str(ev["text"])
+                    elif ev.get("type") == "done" and ev.get("text"):
+                        assistant_text = str(ev["text"]) or assistant_text
+                    elif ev.get("type") == "error":
+                        err_msg = str(ev.get("message") or "agent error")
                     yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+            if store is not None:
+                try:
+                    await store.add_exchange(
+                        session_id=str(out_session or "unknown"),
+                        user_message=message,
+                        assistant_message=assistant_text or None,
+                        error=err_msg,
+                        model=model,
+                        snapshot=snapshot_obj,
+                        banner=banner,
+                    )
+                except Exception:
+                    logger.exception("map-chat history persist failed")
 
         return StreamingResponse(
             event_gen(),

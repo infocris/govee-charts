@@ -240,7 +240,10 @@ Optional **Ask Cursor** (fold above Temperature / Humidity / Both) chats with th
 local Cursor Agent CLI in **ask** mode (read-only Q&A about the live apartment
 snapshot). Requires `[cursor_chat] enabled = true`, the `agent` binary on PATH
 (or `cursor_chat.agent_bin` absolute path for systemd), and `agent login` as the
-same user that runs the UI service. Restart the UI after changing this config.
+same user that runs the UI service. Each turn is stored in a separate SQLite DB
+(`cursor_chat.db_path`, default `data/map_chat.db`) with the sensor snapshot and
+the window-advice banner text at request time. Restart the UI after changing
+this config.
 
 On the Compare **Temperature** chart, optional **Window open / close** bands
 compare the first selected interior sensor to outdoor air (±0.5 °C): green =
@@ -334,7 +337,9 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `GET /widget?metric=temp&addr=…&past=24&future=24&transparent=0|1` — standalone embeddable chart (iframe / share link)
 - `GET /api/tts/voices?lang=fr` / `POST /api/tts` — edge-tts voices + MP3 for in-tab voices; voice `home-tts` **emits** to Home TTS edge (`[tts].home_url`) — sinks are Bridge UI Outputs (no browser play)
 - `GET /api/map-chat/status` — Cursor Agent CLI readiness for Map chat
-- `POST /api/map-chat` — SSE ask-mode chat (`{message, session_id?}`) with live apartment snapshot
+- `GET /api/map-chat/sessions` — recent chat sessions (picker)
+- `GET /api/map-chat/history` — persisted turns (`session_id`, `include_snapshot`) from `data/map_chat.db`
+- `POST /api/map-chat` — SSE ask-mode chat (`{message, session_id?, banner?}`) with live apartment snapshot
 - `POST /api/git/pull` — `git pull --ff-only` from the UI (does not restart services)
 - `GET /api/mail/inbox` / `POST /api/mail/inbox` / `DELETE /api/mail/inbox` — disposable inbox for Govee CSV email export (myagentinbox, 24h)
 - `POST /api/mail/fetch` — poll inbox and return CSV/ZIP attachments (base64) for Coverage import

@@ -121,10 +121,12 @@
   const mapChatInputEl = document.getElementById("map-chat-input");
   const mapChatSendBtn = document.getElementById("map-chat-send");
   const mapChatClearBtn = document.getElementById("map-chat-clear");
+  const mapChatSessionEl = document.getElementById("map-chat-session");
   let mapChatReady = false;
   let mapChatBusy = false;
   let mapChatStatusLoaded = false;
   let mapChatModel = "auto";
+  let mapChatSessionsLoaded = false;
   const sectionShowSmallEl = document.getElementById("section-show-small");
   const sectionPathClearBtn = document.getElementById("section-path-clear");
   const NETWORK_VB_W = 920;
@@ -371,6 +373,8 @@
   const RANGE_MAX_HOURS = 26280;
   const QUICK_RANGE_HOURS = new Set([1, 6, 12, 24, 72, 168, 336]);
   const SELECT_RANGE_HOURS = new Set([720, 2160, 4320, 8760, 17520, 26280]);
+  /** Same presets as past quick ranges (API future_hours max 384). */
+  const FORECAST_FUTURE_HOURS = new Set([1, 6, 12, 24, 72, 168, 336]);
   const COVERAGE_RANGE_HOURS = new Set([
     "1", "6", "12", "24", "72", "168", "336", "720", "2160", "8760", "all",
   ]);
@@ -845,7 +849,9 @@
 
   function loadForecastFutureHours() {
     const n = Number(localStorage.getItem(FORECAST_FUTURE_KEY));
-    if (n === 12 || n === 24 || n === 72 || n === 168 || n === 384) return n;
+    if (FORECAST_FUTURE_HOURS.has(n)) return n;
+    // Migrate former +16 d (384 h) preset to +14 d.
+    if (n === 384) return 336;
     return 24;
   }
 
@@ -1038,7 +1044,7 @@
 
   function setForecastFutureHours(h) {
     const next = Number(h);
-    if (![12, 24, 72, 168, 384].includes(next)) return;
+    if (!FORECAST_FUTURE_HOURS.has(next)) return;
     if (next === forecastFutureHours) return;
     forecastFutureHours = next;
     try {
@@ -1402,6 +1408,48 @@
     syncRangeControls();
     persistRange();
     return true;
+  }
+
+  const CUSTOM_RANGE_MIN_SPAN_SEC = 60;
+
+  /**
+   * Keep From ≤ To by moving the bound that was not edited.
+   * @param {"since"|"until"} edited
+   * @returns {{ since: number, until: number } | null}
+   */
+  function coerceCustomBoundInputs(sinceEl, untilEl, edited) {
+    if (!sinceEl || !untilEl) return null;
+    let since = fromDatetimeLocalValue(sinceEl.value);
+    let until = fromDatetimeLocalValue(untilEl.value);
+    if (since == null || until == null) return null;
+    if (since > until) {
+      if (edited === "since") {
+        until = since + CUSTOM_RANGE_MIN_SPAN_SEC;
+        untilEl.value = toDatetimeLocalValue(until);
+      } else {
+        since = until - CUSTOM_RANGE_MIN_SPAN_SEC;
+        sinceEl.value = toDatetimeLocalValue(since);
+      }
+    } else if (until - since < CUSTOM_RANGE_MIN_SPAN_SEC) {
+      if (edited === "since") {
+        until = since + CUSTOM_RANGE_MIN_SPAN_SEC;
+        untilEl.value = toDatetimeLocalValue(until);
+      } else {
+        since = until - CUSTOM_RANGE_MIN_SPAN_SEC;
+        sinceEl.value = toDatetimeLocalValue(since);
+      }
+    }
+    // Mirror the other view's custom inputs so Compare / Facades stay aligned.
+    const pairs = [
+      [rangeSinceEl, rangeUntilEl],
+      [facadeRangeSinceEl, facadeRangeUntilEl],
+    ];
+    for (const [sEl, uEl] of pairs) {
+      if (!sEl || !uEl || (sEl === sinceEl && uEl === untilEl)) continue;
+      sEl.value = toDatetimeLocalValue(since);
+      uEl.value = toDatetimeLocalValue(until);
+    }
+    return { since, until };
   }
 
   function peerHostLabel(url) {
@@ -11538,14 +11586,68 @@
     });
   });
 
+  function getMapChatSessionId() {
+    try {
+      // Prefer persistent localStorage; migrate leftover sessionStorage once.
+      const fromLocal = localStorage.getItem(MAP_CHAT_SESSION_KEY);
+      if (fromLocal) return fromLocal;
+      const fromSession = sessionStorage.getItem(MAP_CHAT_SESSION_KEY);
+      if (fromSession) {
+        localStorage.setItem(MAP_CHAT_SESSION_KEY, fromSession);
+        sessionStorage.removeItem(MAP_CHAT_SESSION_KEY);
+        return fromSession;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    return "";
+  }
+
+  function setMapChatSessionId(id) {
+    const sid = String(id || "").trim();
+    try {
+      if (sid) localStorage.setItem(MAP_CHAT_SESSION_KEY, sid);
+      else localStorage.removeItem(MAP_CHAT_SESSION_KEY);
+      sessionStorage.removeItem(MAP_CHAT_SESSION_KEY);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function formatMapChatSessionWhen(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "—";
+    try {
+      return new Date(n * 1000).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch (_) {
+      return "—";
+    }
+  }
+
   function setMapChatControlsEnabled(on) {
     if (mapChatInputEl) mapChatInputEl.disabled = !on || mapChatBusy;
     if (mapChatSendBtn) mapChatSendBtn.disabled = !on || mapChatBusy;
+    if (mapChatSessionEl) mapChatSessionEl.disabled = !on || mapChatBusy;
     if (mapChatClearBtn) {
-      const hasSession = Boolean(sessionStorage.getItem(MAP_CHAT_SESSION_KEY));
+      const hasSession = Boolean(getMapChatSessionId());
       const hasLog = Boolean(mapChatLogEl && mapChatLogEl.children.length);
       mapChatClearBtn.disabled = mapChatBusy || (!hasSession && !hasLog);
     }
+  }
+
+  function currentWindowBannerPayload() {
+    if (!windowBannerModel) return { hidden: true, tone: "idle", title: "", detail: "" };
+    return {
+      hidden: Boolean(windowBannerModel.hidden),
+      tone: windowBannerModel.tone || "idle",
+      title: windowBannerModel.title || "",
+      detail: windowBannerModel.detail || "",
+    };
   }
 
   function appendMapChatMessage(role, text, { pending = false } = {}) {
@@ -11558,6 +11660,125 @@
     return p;
   }
 
+  function appendMapChatContext({ banner, snapshot } = {}) {
+    if (!mapChatLogEl) return;
+    const details = document.createElement("details");
+    details.className = "map-chat-context";
+    const summary = document.createElement("summary");
+    summary.textContent = t("map.chat.context");
+    details.appendChild(summary);
+    const bannerBox = document.createElement("p");
+    bannerBox.className = "map-chat-context-banner";
+    if (banner && !banner.hidden && (banner.title || banner.detail)) {
+      const title = document.createElement("strong");
+      title.textContent = banner.title || "";
+      bannerBox.appendChild(title);
+      if (banner.detail) {
+        bannerBox.appendChild(document.createTextNode(` — ${banner.detail}`));
+      }
+    } else {
+      bannerBox.textContent = t("map.chat.bannerHidden");
+    }
+    details.appendChild(bannerBox);
+    if (snapshot) {
+      const pre = document.createElement("pre");
+      pre.textContent =
+        typeof snapshot === "string"
+          ? snapshot
+          : JSON.stringify(snapshot, null, 2);
+      details.appendChild(pre);
+    }
+    mapChatLogEl.appendChild(details);
+    mapChatLogEl.scrollTop = mapChatLogEl.scrollHeight;
+  }
+
+  function renderMapChatExchange(ex) {
+    appendMapChatMessage("user", ex.user_message || "");
+    appendMapChatContext({ banner: ex.banner, snapshot: ex.snapshot });
+    if (ex.error) {
+      appendMapChatMessage(
+        "assistant",
+        t("map.chat.error", { error: ex.error })
+      );
+    } else if (ex.assistant_message) {
+      appendMapChatMessage("assistant", ex.assistant_message);
+    }
+  }
+
+  async function refreshMapChatSessions({ selectId } = {}) {
+    if (!mapChatSessionEl) return;
+    const current = selectId != null ? String(selectId) : getMapChatSessionId();
+    try {
+      const res = await fetch("/api/map-chat/sessions?limit=40");
+      if (!res.ok) return;
+      const data = await res.json();
+      const sessions = data.sessions || [];
+      mapChatSessionEl.innerHTML = "";
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = t("map.chat.sessionNew");
+      mapChatSessionEl.appendChild(blank);
+      for (const s of sessions) {
+        const opt = document.createElement("option");
+        opt.value = s.session_id;
+        opt.textContent = t("map.chat.sessionLabel", {
+          when: formatMapChatSessionWhen(s.updated_at),
+          n: String(s.turn_count || 0),
+          preview: s.preview || s.session_id.slice(0, 8),
+        });
+        mapChatSessionEl.appendChild(opt);
+      }
+      if (current && [...mapChatSessionEl.options].some((o) => o.value === current)) {
+        mapChatSessionEl.value = current;
+      } else {
+        mapChatSessionEl.value = "";
+      }
+      mapChatSessionsLoaded = true;
+    } catch (err) {
+      console.warn("map chat sessions load failed", err);
+    }
+  }
+
+  async function loadMapChatHistory(sessionId) {
+    if (!mapChatLogEl) return;
+    const sid = String(sessionId || getMapChatSessionId() || "").trim();
+    if (!sid) {
+      mapChatLogEl.innerHTML = "";
+      return;
+    }
+    try {
+      const params = new URLSearchParams({
+        session_id: sid,
+        limit: "100",
+        include_snapshot: "1",
+      });
+      const res = await fetch(`/api/map-chat/history?${params}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const exchanges = data.exchanges || [];
+      mapChatLogEl.innerHTML = "";
+      for (const ex of exchanges) {
+        renderMapChatExchange(ex);
+      }
+      setMapChatControlsEnabled(mapChatReady);
+    } catch (err) {
+      console.warn("map chat history load failed", err);
+    }
+  }
+
+  async function selectMapChatSession(sessionId) {
+    const sid = String(sessionId || "").trim();
+    setMapChatSessionId(sid);
+    if (mapChatSessionEl) mapChatSessionEl.value = sid;
+    if (!sid) {
+      if (mapChatLogEl) mapChatLogEl.innerHTML = "";
+      setMapChatControlsEnabled(mapChatReady);
+      return;
+    }
+    await loadMapChatHistory(sid);
+    setMapChatControlsEnabled(mapChatReady);
+  }
+
   function setMapChatStatus(text, { error = false } = {}) {
     if (!mapChatStatusEl) return;
     mapChatStatusEl.textContent = text || "";
@@ -11565,43 +11786,52 @@
   }
 
   async function ensureMapChatStatus() {
-    if (!foldMapChatEl || mapChatStatusLoaded) return;
-    setMapChatStatus(t("map.chat.checking"));
-    try {
-      const res = await fetch("/api/map-chat/status");
-      const data = await res.json();
-      mapChatStatusLoaded = true;
-      if (!data.enabled) {
+    if (!foldMapChatEl) return;
+    if (!mapChatStatusLoaded) {
+      setMapChatStatus(t("map.chat.checking"));
+      try {
+        const res = await fetch("/api/map-chat/status");
+        const data = await res.json();
+        mapChatStatusLoaded = true;
+        if (!data.enabled) {
+          mapChatReady = false;
+          setMapChatStatus(t("map.chat.disabled"), { error: true });
+          setMapChatControlsEnabled(false);
+          return;
+        }
+        if (!data.agent_found) {
+          mapChatReady = false;
+          setMapChatStatus(t("map.chat.missingAgent"), { error: true });
+          setMapChatControlsEnabled(false);
+          return;
+        }
+        if (!data.ready) {
+          mapChatReady = false;
+          setMapChatStatus(t("map.chat.notLoggedIn"), { error: true });
+          setMapChatControlsEnabled(false);
+          return;
+        }
+        mapChatReady = true;
+        mapChatModel = data.model || "auto";
+        setMapChatStatus(t("map.chat.ready", { model: mapChatModel }));
+        if (mapChatMetaEl) {
+          mapChatMetaEl.textContent = mapChatModel;
+        }
+        setMapChatControlsEnabled(true);
+      } catch (err) {
         mapChatReady = false;
-        setMapChatStatus(t("map.chat.disabled"), { error: true });
+        setMapChatStatus(t("map.chat.error", { error: err.message || String(err) }), {
+          error: true,
+        });
         setMapChatControlsEnabled(false);
         return;
       }
-      if (!data.agent_found) {
-        mapChatReady = false;
-        setMapChatStatus(t("map.chat.missingAgent"), { error: true });
-        setMapChatControlsEnabled(false);
-        return;
-      }
-      if (!data.ready) {
-        mapChatReady = false;
-        setMapChatStatus(t("map.chat.notLoggedIn"), { error: true });
-        setMapChatControlsEnabled(false);
-        return;
-      }
-      mapChatReady = true;
-      mapChatModel = data.model || "auto";
-      setMapChatStatus(t("map.chat.ready", { model: mapChatModel }));
-      if (mapChatMetaEl) {
-        mapChatMetaEl.textContent = mapChatModel;
-      }
-      setMapChatControlsEnabled(true);
-    } catch (err) {
-      mapChatReady = false;
-      setMapChatStatus(t("map.chat.error", { error: err.message || String(err) }), {
-        error: true,
-      });
-      setMapChatControlsEnabled(false);
+    }
+    if (!mapChatReady) return;
+    await refreshMapChatSessions();
+    const sid = getMapChatSessionId();
+    if (sid && mapChatLogEl && !mapChatLogEl.children.length) {
+      await loadMapChatHistory(sid);
     }
   }
 
@@ -11610,13 +11840,15 @@
     if (!message || !mapChatReady || mapChatBusy) return;
     mapChatBusy = true;
     setMapChatControlsEnabled(true);
+    const banner = currentWindowBannerPayload();
     appendMapChatMessage("user", message);
+    appendMapChatContext({ banner });
     if (mapChatInputEl) mapChatInputEl.value = "";
     const assistantEl = appendMapChatMessage("assistant", t("map.chat.busy"), {
       pending: true,
     });
     setMapChatStatus(t("map.chat.busy"));
-    const sessionId = sessionStorage.getItem(MAP_CHAT_SESSION_KEY) || "";
+    const sessionId = getMapChatSessionId();
     let gotText = false;
     try {
       const res = await fetch("/api/map-chat", {
@@ -11625,6 +11857,7 @@
         body: JSON.stringify({
           message,
           session_id: sessionId || null,
+          banner,
         }),
       });
       if (!res.ok) {
@@ -11640,6 +11873,7 @@
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let outSession = sessionId;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -11660,7 +11894,8 @@
             continue;
           }
           if (ev.session_id) {
-            sessionStorage.setItem(MAP_CHAT_SESSION_KEY, ev.session_id);
+            outSession = ev.session_id;
+            setMapChatSessionId(ev.session_id);
           }
           if (ev.type === "delta" && ev.text) {
             if (assistantEl.classList.contains("pending")) {
@@ -11672,7 +11907,8 @@
             if (mapChatLogEl) mapChatLogEl.scrollTop = mapChatLogEl.scrollHeight;
           } else if (ev.type === "done") {
             if (ev.session_id) {
-              sessionStorage.setItem(MAP_CHAT_SESSION_KEY, ev.session_id);
+              outSession = ev.session_id;
+              setMapChatSessionId(ev.session_id);
             }
             if (!gotText && ev.text) {
               assistantEl.classList.remove("pending");
@@ -11689,6 +11925,7 @@
         assistantEl.textContent = "…";
       }
       setMapChatStatus(t("map.chat.ready", { model: mapChatModel }));
+      await refreshMapChatSessions({ selectId: outSession });
     } catch (err) {
       if (assistantEl) {
         assistantEl.classList.remove("pending");
@@ -11720,11 +11957,17 @@
       }
     });
   }
+  if (mapChatSessionEl) {
+    mapChatSessionEl.addEventListener("change", () => {
+      selectMapChatSession(mapChatSessionEl.value).catch((err) =>
+        console.warn(err)
+      );
+    });
+  }
   if (mapChatClearBtn) {
     mapChatClearBtn.addEventListener("click", () => {
-      sessionStorage.removeItem(MAP_CHAT_SESSION_KEY);
-      if (mapChatLogEl) mapChatLogEl.innerHTML = "";
-      setMapChatControlsEnabled(mapChatReady);
+      selectMapChatSession("").catch((err) => console.warn(err));
+      refreshMapChatSessions({ selectId: "" }).catch((err) => console.warn(err));
     });
   }
   if (foldMapChatEl) {
@@ -11874,9 +12117,25 @@
 
   function bindRangeApply(btn, sinceEl, untilEl, statusTarget) {
     if (!btn) return;
+    let lastEdited = "until";
+    if (sinceEl) {
+      sinceEl.addEventListener("change", () => {
+        lastEdited = "since";
+        coerceCustomBoundInputs(sinceEl, untilEl, "since");
+      });
+    }
+    if (untilEl) {
+      untilEl.addEventListener("change", () => {
+        lastEdited = "until";
+        coerceCustomBoundInputs(sinceEl, untilEl, "until");
+      });
+    }
     btn.addEventListener("click", () => {
-      const since = fromDatetimeLocalValue(sinceEl && sinceEl.value);
-      const until = fromDatetimeLocalValue(untilEl && untilEl.value);
+      const coerced = coerceCustomBoundInputs(sinceEl, untilEl, lastEdited);
+      const since =
+        coerced?.since ?? fromDatetimeLocalValue(sinceEl && sinceEl.value);
+      const until =
+        coerced?.until ?? fromDatetimeLocalValue(untilEl && untilEl.value);
       if (since == null || until == null) {
         if (statusTarget) {
           statusTarget.textContent = "Choose valid From / To dates";
