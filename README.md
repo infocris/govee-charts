@@ -6,6 +6,57 @@ history in SQLite, and show charts in a local HTML dashboard.
 Multiple instances can federate on the LAN: each node scans near itself and
 pushes its readings to the others.
 
+## Screenshots
+
+Live captures from a real apartment install (UI in English; device labels may
+use any language). Refresh with
+`venv/bin/python scripts/capture_readme_screenshots.py` while the UI is running
+on `http://127.0.0.1:8080` (needs `websocket-client` in the venv).
+
+### Overview
+
+Sensor list with inline zone / height / room editing, filters, and federation
+**Push meta**. The top bar shows window advice from outdoor weather vs indoor
+temps.
+
+![Overview — all sensors and window advice](docs/screenshots/overview.png)
+
+### Compare
+
+Multi-sensor temperature, humidity, and dew-point charts with forecast
+projections, window open/close bands, and optional AC / power overlays.
+
+![Compare — charts with forecast and AC](docs/screenshots/compare.png)
+
+### Facades
+
+Per-room exterior orientations and façade temperature spread charts driven by
+solar / outdoor context.
+
+![Facades — orientations and spread charts](docs/screenshots/facades.png)
+
+### Map
+
+Apartment topology and open-room cross-section colored by live temperature (or
+humidity) at each sensor height, plus cooling-draft / hold-heat suggestions and
+optional **Ask Cursor** Q&A.
+
+![Map — cross-section and room topology](docs/screenshots/map.png)
+
+### Coverage
+
+History completeness timeline and per-sensor charts; drop Govee CSV/ZIP exports
+to fill gaps.
+
+![Coverage — history completeness](docs/screenshots/coverage.png)
+
+### System
+
+Storage inventory, DB size history, and readings provenance across federation
+sources.
+
+![System — storage and provenance](docs/screenshots/system.png)
+
 ## Supported sensors
 
 - **H5075** / H5072 (manufacturer ID `0xEC88`)
