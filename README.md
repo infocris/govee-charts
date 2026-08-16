@@ -57,6 +57,14 @@ sources.
 
 ![System — storage and provenance](docs/screenshots/system.png)
 
+## Development chat history
+
+Cursor agent transcripts that shaped this project are exported under
+[`docs/chat-history/`](docs/chat-history/README.md) (Markdown index + one file
+per conversation). Re-run
+`venv/bin/python scripts/export_agent_chat_history.py` to refresh from local
+Cursor data. Map **Ask Cursor** threads are separate (`data/map_chat.db`).
+
 ## Supported sensors
 
 - **H5075** / H5072 (manufacturer ID `0xEC88`)

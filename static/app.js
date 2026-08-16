@@ -4607,6 +4607,89 @@
     return select;
   }
 
+  async function forceDoorState(sensor, state) {
+    if (doorsStatus) {
+      doorsStatus.hidden = true;
+      doorsStatus.textContent = "";
+    }
+    try {
+      const res = await fetch(
+        `/api/doors/${encodeURIComponent(sensor.sensor_id)}/force`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ state }),
+        }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const updated = await res.json();
+      const idx = doorSensors.findIndex(
+        (d) => d.sensor_id === sensor.sensor_id
+      );
+      if (idx >= 0) {
+        doorSensors[idx] = { ...doorSensors[idx], ...updated };
+      }
+      evaluateDoorBeeps(doorSensors);
+      updateDoorsTable();
+      if (selectedDoorId === sensor.sensor_id) {
+        loadDoorLog(doorSensors[idx] || sensor).catch((err) =>
+          console.warn(err)
+        );
+      }
+      updateWindowBanner(null).catch((err) => console.warn(err));
+    } catch (err) {
+      if (doorsStatus) {
+        doorsStatus.hidden = false;
+        doorsStatus.textContent = t("overview.doorForceFailed", {
+          error: err.message,
+        });
+      }
+    }
+  }
+
+  function makeDoorStateCell(sensor) {
+    const wrap = document.createElement("div");
+    wrap.className = "door-state-cell";
+    const st = sensor.state || "—";
+    const label = document.createElement("span");
+    label.className = `door-state door-state-${st}`;
+    label.textContent = st;
+    if (sensor.forced) {
+      const badge = document.createElement("span");
+      badge.className = "door-forced-badge";
+      badge.textContent = t("overview.doorForced");
+      label.appendChild(document.createTextNode(" "));
+      label.appendChild(badge);
+    }
+    wrap.appendChild(label);
+
+    const actions = document.createElement("div");
+    actions.className = "door-force-actions";
+    actions.title = t("overview.doorForceTitle");
+    for (const [value, key] of [
+      ["open", "overview.doorForceOpen"],
+      ["closed", "overview.doorForceClosed"],
+    ]) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "door-force-btn";
+      if (sensor.forced && sensor.state === value) {
+        btn.classList.add("is-active");
+      }
+      btn.textContent = t(key);
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        forceDoorState(sensor, value).catch((err) => console.warn(err));
+      });
+      actions.appendChild(btn);
+    }
+    wrap.appendChild(actions);
+    return wrap;
+  }
+
   function updateDoorsTable() {
     if (!doorsBody) return;
     doorsBody.innerHTML = "";
@@ -4649,8 +4732,7 @@
       nameTd.appendChild(nameBtn);
 
       const stateTd = document.createElement("td");
-      const st = sensor.state || "—";
-      stateTd.innerHTML = `<span class="door-state door-state-${escapeHtml(st)}">${escapeHtml(st)}</span>`;
+      stateTd.appendChild(makeDoorStateCell(sensor));
 
       const kindTd = document.createElement("td");
       kindTd.className = "cat-cell";
@@ -11650,14 +11732,57 @@
     };
   }
 
+  function sanitizeMapChatHtml(html) {
+    const tmp = document.createElement("div");
+    tmp.innerHTML = String(html || "");
+    tmp.querySelectorAll("script,style,iframe,object,embed,link,meta").forEach((n) => n.remove());
+    tmp.querySelectorAll("*").forEach((n) => {
+      [...n.attributes].forEach((attr) => {
+        const name = attr.name || "";
+        const value = attr.value || "";
+        if (/^on/i.test(name) || (name === "href" && /^\s*javascript:/i.test(value))) {
+          n.removeAttribute(name);
+        }
+      });
+    });
+    return tmp.innerHTML;
+  }
+
+  function renderMapChatMarkdown(src) {
+    const text = String(src || "");
+    if (!text) return "";
+    if (typeof marked === "undefined" || typeof marked.parse !== "function") {
+      return escapeHtml(text).replaceAll("\n", "<br>");
+    }
+    try {
+      const html = marked.parse(text, { breaks: true, gfm: true, async: false });
+      return sanitizeMapChatHtml(html);
+    } catch (_) {
+      return escapeHtml(text).replaceAll("\n", "<br>");
+    }
+  }
+
+  function setMapChatMessageBody(el, role, text, { pending = false } = {}) {
+    if (!el) return;
+    const body = text || "";
+    if (pending || role !== "assistant") {
+      el.classList.remove("map-chat-md");
+      el.textContent = body;
+      return;
+    }
+    el.classList.add("map-chat-md");
+    el.innerHTML = renderMapChatMarkdown(body);
+  }
+
   function appendMapChatMessage(role, text, { pending = false } = {}) {
     if (!mapChatLogEl) return null;
-    const p = document.createElement("p");
-    p.className = `map-chat-msg ${role}${pending ? " pending" : ""}`;
-    p.textContent = text || "";
-    mapChatLogEl.appendChild(p);
+    // Assistant replies may contain block markdown (lists/tables); use a div.
+    const el = document.createElement(role === "assistant" ? "div" : "p");
+    el.className = `map-chat-msg ${role}${pending ? " pending" : ""}`;
+    setMapChatMessageBody(el, role, text, { pending });
+    mapChatLogEl.appendChild(el);
     mapChatLogEl.scrollTop = mapChatLogEl.scrollHeight;
-    return p;
+    return el;
   }
 
   function appendMapChatContext({ banner, snapshot } = {}) {
@@ -11900,9 +12025,10 @@
           if (ev.type === "delta" && ev.text) {
             if (assistantEl.classList.contains("pending")) {
               assistantEl.classList.remove("pending");
-              assistantEl.textContent = "";
+              assistantEl.dataset.raw = "";
             }
-            assistantEl.textContent += ev.text;
+            assistantEl.dataset.raw = (assistantEl.dataset.raw || "") + ev.text;
+            setMapChatMessageBody(assistantEl, "assistant", assistantEl.dataset.raw);
             gotText = true;
             if (mapChatLogEl) mapChatLogEl.scrollTop = mapChatLogEl.scrollHeight;
           } else if (ev.type === "done") {
@@ -11912,8 +12038,11 @@
             }
             if (!gotText && ev.text) {
               assistantEl.classList.remove("pending");
-              assistantEl.textContent = ev.text;
+              assistantEl.dataset.raw = ev.text;
+              setMapChatMessageBody(assistantEl, "assistant", ev.text);
               gotText = true;
+            } else if (gotText && assistantEl.dataset.raw) {
+              setMapChatMessageBody(assistantEl, "assistant", assistantEl.dataset.raw);
             }
           } else if (ev.type === "error") {
             throw new Error(ev.message || "map chat failed");
@@ -11922,6 +12051,7 @@
       }
       if (!gotText) {
         assistantEl.classList.remove("pending");
+        assistantEl.classList.remove("map-chat-md");
         assistantEl.textContent = "…";
       }
       setMapChatStatus(t("map.chat.ready", { model: mapChatModel }));
@@ -11929,6 +12059,7 @@
     } catch (err) {
       if (assistantEl) {
         assistantEl.classList.remove("pending");
+        assistantEl.classList.remove("map-chat-md");
         assistantEl.textContent = t("map.chat.error", {
           error: err.message || String(err),
         });

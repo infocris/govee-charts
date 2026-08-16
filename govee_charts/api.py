@@ -326,6 +326,14 @@ class DoorPatch(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class DoorForceBody(BaseModel):
+    """Manual open/closed until the next live MQTT/HA transition."""
+
+    state: str = Field(..., min_length=1)
+
+    model_config = {"extra": "forbid"}
+
+
 class TtsBody(BaseModel):
     text: str = Field(..., min_length=1)
     voice: str | None = None
@@ -2695,6 +2703,22 @@ def create_app(
             kwargs["name"] = patch["name"]
 
         updated = await db.update_door_sensor(sensor_id, **kwargs)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Unknown door sensor")
+        return updated
+
+    @app.post("/api/doors/{sensor_id:path}/force")
+    async def api_force_door(
+        sensor_id: str,
+        payload: DoorForceBody,
+    ) -> dict[str, Any]:
+        """Force open/closed until the next live MQTT/HA state change."""
+        state = str(payload.state or "").strip().lower()
+        if state not in ("open", "closed"):
+            raise HTTPException(
+                status_code=400, detail="state must be 'open' or 'closed'"
+            )
+        updated = await db.force_door_state(sensor_id, state)
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown door sensor")
         return updated

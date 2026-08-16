@@ -280,6 +280,21 @@ class Database:
                 "INTEGER NOT NULL DEFAULT 1"
             )
 
+        door_sensor_cols = {
+            row[1]
+            for row in await (
+                await self.db.execute("PRAGMA table_info(door_sensors)")
+            ).fetchall()
+        }
+        if door_sensor_cols and "forced_state" not in door_sensor_cols:
+            await self.db.execute(
+                "ALTER TABLE door_sensors ADD COLUMN forced_state TEXT"
+            )
+        if door_sensor_cols and "forced_at" not in door_sensor_cols:
+            await self.db.execute(
+                "ALTER TABLE door_sensors ADD COLUMN forced_at REAL"
+            )
+
     async def _merge_alias_devices(self) -> None:
         """Merge UUID / alias device rows onto canonical BLE MAC addresses."""
         cursor = await self.db.execute("SELECT address, name FROM devices")
@@ -2206,6 +2221,16 @@ class Database:
             (sensor_id, name, state, when, source),
         )
         await self.ensure_door_sensor(sensor_id=sensor_id, name=name)
+        # Live reports end a manual force (even if state is unchanged / INSERT ignored).
+        if source != "manual":
+            await self.db.execute(
+                """
+                UPDATE door_sensors
+                SET forced_state = NULL, forced_at = NULL, updated_at = ?
+                WHERE sensor_id = ? AND forced_state IS NOT NULL
+                """,
+                (when, sensor_id),
+            )
         await self.db.commit()
         return cursor.rowcount > 0
 
@@ -2335,6 +2360,58 @@ class Database:
         await self.db.commit()
         return await self.get_door_sensor(sensor_id)
 
+    async def force_door_state(
+        self,
+        sensor_id: str,
+        state: str,
+    ) -> dict[str, Any] | None:
+        """
+        Manually set open/closed until the next live MQTT/HA report.
+
+        Inserts a ``manual`` event for the log and sets ``forced_state`` so the
+        effective state wins over a stale last event until cleared.
+        """
+        state = state.lower().strip()
+        if state not in ("open", "closed"):
+            raise ValueError("door state must be open or closed")
+        sensor_id = str(sensor_id).strip()
+        existing = await self.get_door_sensor(sensor_id)
+        if existing is None:
+            return None
+        name = str(existing.get("name") or sensor_id)
+        now = time.time()
+        await self.ensure_door_sensor(sensor_id=sensor_id, name=name)
+        await self.db.execute(
+            """
+            UPDATE door_sensors
+            SET forced_state = ?, forced_at = ?, updated_at = ?
+            WHERE sensor_id = ?
+            """,
+            (state, now, now, sensor_id),
+        )
+        await self.insert_door_event(
+            sensor_id=sensor_id,
+            name=name,
+            state=state,
+            ts=now,
+            source="manual",
+        )
+        return await self.get_door_sensor(sensor_id)
+
+    async def clear_door_force(self, sensor_id: str) -> bool:
+        """Drop a manual force when live MQTT/HA data arrives. Returns True if cleared."""
+        sensor_id = str(sensor_id).strip()
+        cursor = await self.db.execute(
+            """
+            UPDATE door_sensors
+            SET forced_state = NULL, forced_at = NULL, updated_at = ?
+            WHERE sensor_id = ? AND forced_state IS NOT NULL
+            """,
+            (time.time(), sensor_id),
+        )
+        await self.db.commit()
+        return cursor.rowcount > 0
+
     async def get_door_sensor(self, sensor_id: str) -> dict[str, Any] | None:
         sensors = await self.list_door_sensors()
         for s in sensors:
@@ -2349,22 +2426,56 @@ class Database:
             SELECT
                 e.sensor_id,
                 COALESCE(m.name, e.name) AS name,
-                e.state,
-                e.ts,
-                e.source,
+                e.state AS reported_state,
+                e.ts AS reported_ts,
+                e.source AS reported_source,
                 m.room,
-                m.kind
+                m.kind,
+                m.forced_state,
+                m.forced_at
             FROM door_events e
             INNER JOIN (
                 SELECT sensor_id, MAX(ts) AS max_ts
                 FROM door_events
+                WHERE COALESCE(source, '') != 'manual'
                 GROUP BY sensor_id
-            ) latest ON e.sensor_id = latest.sensor_id AND e.ts = latest.max_ts
+            ) latest
+                ON e.sensor_id = latest.sensor_id AND e.ts = latest.max_ts
             LEFT JOIN door_sensors m ON m.sensor_id = e.sensor_id
             ORDER BY e.ts DESC
             """
         )
         rows = [dict(row) for row in await cursor.fetchall()]
+
+        # Sensors that only have a manual event yet (no live report).
+        forced_only = await self.db.execute(
+            """
+            SELECT
+                m.sensor_id,
+                m.name,
+                NULL AS reported_state,
+                NULL AS reported_ts,
+                NULL AS reported_source,
+                m.room,
+                m.kind,
+                m.forced_state,
+                m.forced_at
+            FROM door_sensors m
+            WHERE m.forced_state IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM door_events e
+                WHERE e.sensor_id = m.sensor_id
+                  AND COALESCE(e.source, '') != 'manual'
+              )
+            """
+        )
+        seen_ids = {str(r.get("sensor_id") or "") for r in rows}
+        for row in await forced_only.fetchall():
+            sid = str(row["sensor_id"] or "")
+            if sid and sid not in seen_ids:
+                rows.append(dict(row))
+                seen_ids.add(sid)
+
         # Prefer Ring MQTT UUID rows over HA recorder mirrors of the same Ring
         # contact (binary_sensor.porte_cuisine, …). Keep distinct HA devices
         # such as Tuya door_sensor_* even when the display name matches.
@@ -2399,8 +2510,29 @@ class Database:
                 return f"id:{sid}"
             return f"name:{name_key}"
 
+        def _enrich(row: dict[str, Any]) -> dict[str, Any]:
+            forced = str(row.get("forced_state") or "").strip().lower()
+            if forced not in ("open", "closed"):
+                forced = ""
+            reported = str(row.get("reported_state") or "").strip().lower()
+            if reported not in ("open", "closed"):
+                reported = ""
+            if forced:
+                row["state"] = forced
+                row["ts"] = row.get("forced_at") or row.get("reported_ts")
+                row["source"] = "manual"
+                row["forced"] = True
+            else:
+                row["state"] = reported or None
+                row["ts"] = row.get("reported_ts")
+                row["source"] = row.get("reported_source")
+                row["forced"] = False
+            row["reported_state"] = reported or None
+            return row
+
         by_key: dict[str, dict[str, Any]] = {}
         for row in rows:
+            row = _enrich(row)
             key = _dedupe_key(row)
             prev = by_key.get(key)
             if prev is None:
@@ -2414,7 +2546,9 @@ class Database:
                     continue
                 if cur_is_mirror and not prev_is_mirror:
                     continue
-            if float(row.get("ts") or 0) > float(prev.get("ts") or 0):
+            prev_ts = float(prev.get("reported_ts") or prev.get("ts") or 0)
+            cur_ts = float(row.get("reported_ts") or row.get("ts") or 0)
+            if cur_ts > prev_ts:
                 by_key[key] = row
         return sorted(
             by_key.values(),

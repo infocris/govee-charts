@@ -297,6 +297,14 @@ class DoorMqttListener:
         prev = self._last_state.get(sensor_id)
         if prev == state:
             return
+        if prev is None:
+            # Avoid a restart heartbeat clearing a manual force when the
+            # broker replay / retained payload matches the last live report.
+            latest = await self.db.get_door_sensor(sensor_id)
+            reported = str((latest or {}).get("reported_state") or "").lower()
+            self._last_state[sensor_id] = state
+            if reported == state:
+                return
         self._last_state[sensor_id] = state
         inserted = await self.db.insert_door_event(
             sensor_id=sensor_id,
@@ -465,8 +473,22 @@ class DoorHaPoller:
             )
             prev = self._last_state.get(entity_id)
             if prev == state:
-                # Still refresh metadata / ensure row exists on first poll.
-                if prev is not None:
+                continue
+            if prev is None:
+                # Process restart: seed memory from HA without a heartbeat
+                # event that would clear an intentional manual force.
+                latest = await self.db.get_door_sensor(entity_id)
+                reported = str(
+                    (latest or {}).get("reported_state") or ""
+                ).lower()
+                self._last_state[entity_id] = state
+                if reported == state:
+                    await self.db.ensure_door_sensor(
+                        sensor_id=entity_id, name=name
+                    )
+                    logger.info(
+                        "Door %s initial %s (%s)", name, state, entity_id
+                    )
                     continue
             inserted = await self.db.insert_door_event(
                 sensor_id=entity_id,
