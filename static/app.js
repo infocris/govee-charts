@@ -4607,6 +4607,20 @@
     return select;
   }
 
+  async function applyDoorSensorUpdate(sensor, updated) {
+    const idx = doorSensors.findIndex((d) => d.sensor_id === sensor.sensor_id);
+    if (idx >= 0) {
+      doorSensors[idx] = { ...doorSensors[idx], ...updated };
+    }
+    evaluateDoorBeeps(doorSensors);
+    updateDoorsTable();
+    if (selectedDoorId === sensor.sensor_id) {
+      const next = idx >= 0 ? doorSensors[idx] : { ...sensor, ...updated };
+      loadDoorLog(next).catch((err) => console.warn(err));
+    }
+    updateWindowBanner(null).catch((err) => console.warn(err));
+  }
+
   async function forceDoorState(sensor, state) {
     if (doorsStatus) {
       doorsStatus.hidden = true;
@@ -4625,25 +4639,36 @@
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
       }
-      const updated = await res.json();
-      const idx = doorSensors.findIndex(
-        (d) => d.sensor_id === sensor.sensor_id
-      );
-      if (idx >= 0) {
-        doorSensors[idx] = { ...doorSensors[idx], ...updated };
-      }
-      evaluateDoorBeeps(doorSensors);
-      updateDoorsTable();
-      if (selectedDoorId === sensor.sensor_id) {
-        loadDoorLog(doorSensors[idx] || sensor).catch((err) =>
-          console.warn(err)
-        );
-      }
-      updateWindowBanner(null).catch((err) => console.warn(err));
+      await applyDoorSensorUpdate(sensor, await res.json());
     } catch (err) {
       if (doorsStatus) {
         doorsStatus.hidden = false;
-        doorsStatus.textContent = t("overview.doorForceFailed", {
+        doorsStatus.textContent = t("overview.doorLockFailed", {
+          error: err.message,
+        });
+      }
+    }
+  }
+
+  async function unlockDoorState(sensor) {
+    if (doorsStatus) {
+      doorsStatus.hidden = true;
+      doorsStatus.textContent = "";
+    }
+    try {
+      const res = await fetch(
+        `/api/doors/${encodeURIComponent(sensor.sensor_id)}/unlock`,
+        { method: "POST" }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      await applyDoorSensorUpdate(sensor, await res.json());
+    } catch (err) {
+      if (doorsStatus) {
+        doorsStatus.hidden = false;
+        doorsStatus.textContent = t("overview.doorLockFailed", {
           error: err.message,
         });
       }
@@ -4657,18 +4682,56 @@
     const label = document.createElement("span");
     label.className = `door-state door-state-${st}`;
     label.textContent = st;
+    wrap.appendChild(label);
+
     if (sensor.forced) {
       const badge = document.createElement("span");
       badge.className = "door-forced-badge";
-      badge.textContent = t("overview.doorForced");
+      badge.textContent = t("overview.doorLocked");
       label.appendChild(document.createTextNode(" "));
       label.appendChild(badge);
+
+      const live = String(sensor.reported_state || "").toLowerCase();
+      if (live === "open" || live === "closed") {
+        const liveEl = document.createElement("span");
+        if (live !== st) {
+          liveEl.className = "door-mqtt-mismatch";
+          liveEl.textContent = t("overview.doorMqttMismatch", { state: live });
+          liveEl.title = t("overview.doorMqttMismatchTitle");
+          wrap.classList.add("has-mqtt-mismatch");
+        } else {
+          liveEl.className = "door-live-hint";
+          liveEl.textContent = t("overview.doorLiveState", { state: live });
+        }
+        wrap.appendChild(liveEl);
+      }
     }
-    wrap.appendChild(label);
 
     const actions = document.createElement("div");
     actions.className = "door-force-actions";
-    actions.title = t("overview.doorForceTitle");
+    actions.title = t("overview.doorLockTitle");
+
+    const lockBtn = document.createElement("button");
+    lockBtn.type = "button";
+    lockBtn.className = "door-force-btn door-lock-btn";
+    if (sensor.forced) {
+      lockBtn.classList.add("is-active");
+      lockBtn.textContent = t("overview.doorUnlock");
+      lockBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        unlockDoorState(sensor).catch((err) => console.warn(err));
+      });
+    } else {
+      lockBtn.textContent = t("overview.doorLock");
+      lockBtn.disabled = st !== "open" && st !== "closed";
+      lockBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        if (st !== "open" && st !== "closed") return;
+        forceDoorState(sensor, st).catch((err) => console.warn(err));
+      });
+    }
+    actions.appendChild(lockBtn);
+
     for (const [value, key] of [
       ["open", "overview.doorForceOpen"],
       ["closed", "overview.doorForceClosed"],
@@ -4680,6 +4743,7 @@
         btn.classList.add("is-active");
       }
       btn.textContent = t(key);
+      btn.title = t("overview.doorForceSetTitle");
       btn.addEventListener("click", (ev) => {
         ev.stopPropagation();
         forceDoorState(sensor, value).catch((err) => console.warn(err));
@@ -11711,6 +11775,55 @@
     }
   }
 
+  function formatMapChatMessageWhen(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "";
+    try {
+      const d = new Date(n * 1000);
+      const now = new Date();
+      const sameDay = d.toDateString() === now.toDateString();
+      return d.toLocaleString(undefined, sameDay
+        ? { hour: "2-digit", minute: "2-digit" }
+        : {
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function mapChatMessageBodyEl(el) {
+    if (!el) return null;
+    return el.querySelector(":scope > .map-chat-msg-body") || el;
+  }
+
+  function setMapChatMessageTime(el, createdAt) {
+    if (!el) return;
+    let timeEl = el.querySelector(":scope > .map-chat-msg-time");
+    const n = Number(createdAt);
+    if (!Number.isFinite(n) || n <= 0) {
+      if (timeEl) {
+        timeEl.hidden = true;
+        timeEl.textContent = "";
+        timeEl.removeAttribute("datetime");
+      }
+      delete el.dataset.createdAt;
+      return;
+    }
+    if (!timeEl) {
+      timeEl = document.createElement("time");
+      timeEl.className = "map-chat-msg-time";
+      el.insertBefore(timeEl, el.firstChild);
+    }
+    timeEl.hidden = false;
+    timeEl.dateTime = new Date(n * 1000).toISOString();
+    timeEl.textContent = formatMapChatMessageWhen(n);
+    el.dataset.createdAt = String(n);
+  }
+
   function setMapChatControlsEnabled(on) {
     if (mapChatInputEl) mapChatInputEl.disabled = !on || mapChatBusy;
     if (mapChatSendBtn) mapChatSendBtn.disabled = !on || mapChatBusy;
@@ -11764,21 +11877,30 @@
 
   function setMapChatMessageBody(el, role, text, { pending = false } = {}) {
     if (!el) return;
+    const bodyEl = mapChatMessageBodyEl(el);
+    if (!bodyEl) return;
     const body = text || "";
     if (pending || role !== "assistant") {
-      el.classList.remove("map-chat-md");
-      el.textContent = body;
+      bodyEl.classList.remove("map-chat-md");
+      bodyEl.textContent = body;
       return;
     }
-    el.classList.add("map-chat-md");
-    el.innerHTML = renderMapChatMarkdown(body);
+    bodyEl.classList.add("map-chat-md");
+    bodyEl.innerHTML = renderMapChatMarkdown(body);
   }
 
-  function appendMapChatMessage(role, text, { pending = false } = {}) {
+  function appendMapChatMessage(role, text, { pending = false, createdAt = null } = {}) {
     if (!mapChatLogEl) return null;
     // Assistant replies may contain block markdown (lists/tables); use a div.
-    const el = document.createElement(role === "assistant" ? "div" : "p");
+    const el = document.createElement("div");
     el.className = `map-chat-msg ${role}${pending ? " pending" : ""}`;
+    const timeEl = document.createElement("time");
+    timeEl.className = "map-chat-msg-time";
+    el.appendChild(timeEl);
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "map-chat-msg-body";
+    el.appendChild(bodyEl);
+    setMapChatMessageTime(el, createdAt);
     setMapChatMessageBody(el, role, text, { pending });
     mapChatLogEl.appendChild(el);
     mapChatLogEl.scrollTop = mapChatLogEl.scrollHeight;
@@ -11818,15 +11940,17 @@
   }
 
   function renderMapChatExchange(ex) {
-    appendMapChatMessage("user", ex.user_message || "");
+    const createdAt = ex.created_at;
+    appendMapChatMessage("user", ex.user_message || "", { createdAt });
     appendMapChatContext({ banner: ex.banner, snapshot: ex.snapshot });
     if (ex.error) {
       appendMapChatMessage(
         "assistant",
-        t("map.chat.error", { error: ex.error })
+        t("map.chat.error", { error: ex.error }),
+        { createdAt }
       );
     } else if (ex.assistant_message) {
-      appendMapChatMessage("assistant", ex.assistant_message);
+      appendMapChatMessage("assistant", ex.assistant_message, { createdAt });
     }
   }
 
@@ -11966,11 +12090,15 @@
     mapChatBusy = true;
     setMapChatControlsEnabled(true);
     const banner = currentWindowBannerPayload();
-    appendMapChatMessage("user", message);
+    const provisionalAt = Date.now() / 1000;
+    const userEl = appendMapChatMessage("user", message, {
+      createdAt: provisionalAt,
+    });
     appendMapChatContext({ banner });
     if (mapChatInputEl) mapChatInputEl.value = "";
     const assistantEl = appendMapChatMessage("assistant", t("map.chat.busy"), {
       pending: true,
+      createdAt: provisionalAt,
     });
     setMapChatStatus(t("map.chat.busy"));
     const sessionId = getMapChatSessionId();
@@ -12044,6 +12172,15 @@
             } else if (gotText && assistantEl.dataset.raw) {
               setMapChatMessageBody(assistantEl, "assistant", assistantEl.dataset.raw);
             }
+          } else if (ev.type === "saved") {
+            if (ev.session_id) {
+              outSession = ev.session_id;
+              setMapChatSessionId(ev.session_id);
+            }
+            if (ev.created_at != null) {
+              setMapChatMessageTime(userEl, ev.created_at);
+              setMapChatMessageTime(assistantEl, ev.created_at);
+            }
           } else if (ev.type === "error") {
             throw new Error(ev.message || "map chat failed");
           }
@@ -12051,18 +12188,24 @@
       }
       if (!gotText) {
         assistantEl.classList.remove("pending");
-        assistantEl.classList.remove("map-chat-md");
-        assistantEl.textContent = "…";
+        const bodyEl = mapChatMessageBodyEl(assistantEl);
+        if (bodyEl) {
+          bodyEl.classList.remove("map-chat-md");
+          bodyEl.textContent = "…";
+        }
       }
       setMapChatStatus(t("map.chat.ready", { model: mapChatModel }));
       await refreshMapChatSessions({ selectId: outSession });
     } catch (err) {
       if (assistantEl) {
         assistantEl.classList.remove("pending");
-        assistantEl.classList.remove("map-chat-md");
-        assistantEl.textContent = t("map.chat.error", {
-          error: err.message || String(err),
-        });
+        const bodyEl = mapChatMessageBodyEl(assistantEl);
+        if (bodyEl) {
+          bodyEl.classList.remove("map-chat-md");
+          bodyEl.textContent = t("map.chat.error", {
+            error: err.message || String(err),
+          });
+        }
       }
       setMapChatStatus(
         t("map.chat.error", { error: err.message || String(err) }),

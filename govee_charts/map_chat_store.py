@@ -65,7 +65,7 @@ class MapChatStore:
         model: str | None,
         snapshot: dict[str, Any] | str,
         banner: dict[str, Any] | None,
-    ) -> int:
+    ) -> dict[str, Any]:
         sid = (session_id or "").strip() or "unknown"
         if isinstance(snapshot, str):
             snap_text = snapshot
@@ -74,6 +74,7 @@ class MapChatStore:
         banner_text = None
         if banner is not None:
             banner_text = json.dumps(banner, ensure_ascii=False, separators=(",", ":"))
+        created_at = time.time()
         cur = await self.db.execute(
             """
             INSERT INTO map_chat_exchanges (
@@ -83,7 +84,7 @@ class MapChatStore:
             """,
             (
                 sid,
-                time.time(),
+                created_at,
                 (user_message or "").strip(),
                 (assistant_message or "").strip() or None,
                 (error or "").strip() or None,
@@ -92,7 +93,11 @@ class MapChatStore:
                 banner_text,
             ),
         )
-        return int(cur.lastrowid or 0)
+        return {
+            "id": int(cur.lastrowid or 0),
+            "session_id": sid,
+            "created_at": created_at,
+        }
 
     async def list_exchanges(
         self,

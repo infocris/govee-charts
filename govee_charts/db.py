@@ -2221,16 +2221,8 @@ class Database:
             (sensor_id, name, state, when, source),
         )
         await self.ensure_door_sensor(sensor_id=sensor_id, name=name)
-        # Live reports end a manual force (even if state is unchanged / INSERT ignored).
-        if source != "manual":
-            await self.db.execute(
-                """
-                UPDATE door_sensors
-                SET forced_state = NULL, forced_at = NULL, updated_at = ?
-                WHERE sensor_id = ? AND forced_state IS NOT NULL
-                """,
-                (when, sensor_id),
-            )
+        # Live reports keep flowing into door_events; a locked override stays
+        # until the user unlocks (do not clear forced_state here).
         await self.db.commit()
         return cursor.rowcount > 0
 
@@ -2366,10 +2358,10 @@ class Database:
         state: str,
     ) -> dict[str, Any] | None:
         """
-        Manually set open/closed until the next live MQTT/HA report.
+        Lock effective open/closed until the user unlocks.
 
-        Inserts a ``manual`` event for the log and sets ``forced_state`` so the
-        effective state wins over a stale last event until cleared.
+        Live MQTT/HA events keep being logged, but the override wins for the
+        overview, map, and airflow until ``clear_door_force``.
         """
         state = state.lower().strip()
         if state not in ("open", "closed"):
@@ -2398,19 +2390,22 @@ class Database:
         )
         return await self.get_door_sensor(sensor_id)
 
-    async def clear_door_force(self, sensor_id: str) -> bool:
-        """Drop a manual force when live MQTT/HA data arrives. Returns True if cleared."""
+    async def clear_door_force(self, sensor_id: str) -> dict[str, Any] | None:
+        """Clear a locked override; effective state returns to last live report."""
         sensor_id = str(sensor_id).strip()
-        cursor = await self.db.execute(
+        existing = await self.get_door_sensor(sensor_id)
+        if existing is None:
+            return None
+        await self.db.execute(
             """
             UPDATE door_sensors
             SET forced_state = NULL, forced_at = NULL, updated_at = ?
-            WHERE sensor_id = ? AND forced_state IS NOT NULL
+            WHERE sensor_id = ?
             """,
             (time.time(), sensor_id),
         )
         await self.db.commit()
-        return cursor.rowcount > 0
+        return await self.get_door_sensor(sensor_id)
 
     async def get_door_sensor(self, sensor_id: str) -> dict[str, Any] | None:
         sensors = await self.list_door_sensors()

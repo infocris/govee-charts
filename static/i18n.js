@@ -154,7 +154,7 @@
       "overview.loading": "Loading…",
       "overview.doorsTitle": "Doors & windows",
       "overview.doorsHint":
-        "Contact sensors — set kind/room; click a name for open/close log. Force open/closed until the next MQTT/HA update.",
+        "Contact sensors — set kind/room; click a name for open/close log. Lock overrides the effective state until you unlock (live MQTT/HA still logs).",
       "overview.col.sensor": "Sensor",
       "overview.col.state": "State",
       "overview.col.kind": "Kind",
@@ -162,10 +162,18 @@
       "overview.col.updated": "Updated",
       "overview.doorForceOpen": "Open",
       "overview.doorForceClosed": "Closed",
-      "overview.doorForced": "forced",
-      "overview.doorForceTitle":
-        "Set state manually until the next live MQTT/HA change",
-      "overview.doorForceFailed": "Force failed: {error}",
+      "overview.doorLock": "Lock",
+      "overview.doorUnlock": "Unlock",
+      "overview.doorLocked": "locked",
+      "overview.doorLiveState": "MQTT: {state}",
+      "overview.doorMqttMismatch": "MQTT reports {state}",
+      "overview.doorMqttMismatchTitle":
+        "Locked effective state differs from the latest live MQTT/HA report",
+      "overview.doorLockTitle":
+        "Lock freezes the effective open/closed state for the map and overview",
+      "overview.doorForceSetTitle":
+        "Set and lock this state (live sensor events still log in history)",
+      "overview.doorLockFailed": "Lock failed: {error}",
       "overview.doorLogTitle": "Open / close log",
       "overview.doorLogClose": "Close",
       "overview.doorLogCloseTitle": "Close log",
@@ -543,7 +551,7 @@
       "overview.loading": "Chargement…",
       "overview.doorsTitle": "Portes et fenêtres",
       "overview.doorsHint":
-        "Capteurs de contact — type/pièce ; cliquer un nom pour le journal. Forcer ouvert/fermé jusqu’au prochain événement MQTT/HA.",
+        "Capteurs de contact — type/pièce ; cliquer un nom pour le journal. Verrouiller fige l’état effectif jusqu’au déverrouillage (MQTT/HA continue d’écrire l’historique).",
       "overview.col.sensor": "Capteur",
       "overview.col.state": "État",
       "overview.col.kind": "Type",
@@ -551,10 +559,18 @@
       "overview.col.updated": "Maj",
       "overview.doorForceOpen": "Ouverte",
       "overview.doorForceClosed": "Fermée",
-      "overview.doorForced": "forcé",
-      "overview.doorForceTitle":
-        "Fixer l’état manuellement jusqu’au prochain changement MQTT/HA",
-      "overview.doorForceFailed": "Échec du forçage : {error}",
+      "overview.doorLock": "Verrouiller",
+      "overview.doorUnlock": "Déverrouiller",
+      "overview.doorLocked": "verrouillé",
+      "overview.doorLiveState": "MQTT : {state}",
+      "overview.doorMqttMismatch": "MQTT indique {state}",
+      "overview.doorMqttMismatchTitle":
+        "L’état effectif verrouillé diffère du dernier rapport MQTT/HA",
+      "overview.doorLockTitle":
+        "Le verrou fige l’état ouvert/fermé pour le plan et la vue d’ensemble",
+      "overview.doorForceSetTitle":
+        "Fixer et verrouiller cet état (les événements live restent dans le journal)",
+      "overview.doorLockFailed": "Échec du verrouillage : {error}",
       "overview.doorLogTitle": "Journal ouverture / fermeture",
       "overview.doorLogClose": "Fermer",
       "overview.doorLogCloseTitle": "Fermer le journal",

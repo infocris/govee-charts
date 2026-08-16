@@ -1581,6 +1581,16 @@ main {
   color: inherit;
 }
 
+.door-force-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.door-lock-btn.is-active {
+  border-color: var(--accent, #7cb8e8);
+  font-weight: 600;
+}
+
 .door-forced-badge {
   font-variant: normal;
   text-transform: none;
@@ -1588,6 +1598,27 @@ main {
   font-size: 0.7rem;
   color: var(--accent, #7cb8e8);
   font-weight: 600;
+}
+
+.door-live-hint {
+  font-size: 0.72rem;
+  color: var(--muted, #667);
+}
+
+.door-mqtt-mismatch {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 650;
+  line-height: 1.25;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  color: #f0c674;
+  background: color-mix(in srgb, #e6a23c 18%, transparent);
+  border: 1px solid color-mix(in srgb, #e6a23c 45%, transparent);
+}
+
+.door-state-cell.has-mqtt-mismatch {
+  gap: 0.4rem;
 }
 
 .door-state-open {
@@ -3072,9 +3103,26 @@ main {
   margin: 0;
   padding: 0.45rem 0.65rem;
   border-left: 2px solid var(--line);
-  white-space: pre-wrap;
   word-break: break-word;
   font-size: 0.95rem;
+}
+
+.map-chat-msg-time {
+  display: block;
+  margin: 0 0 0.2rem;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.map-chat-msg-time[hidden] {
+  display: none;
+}
+
+.map-chat-msg-body {
+  margin: 0;
+  white-space: pre-wrap;
 }
 
 .map-chat-msg.user {
@@ -3086,52 +3134,52 @@ main {
   border-left-color: var(--hum);
 }
 
-.map-chat-msg.assistant.map-chat-md {
+.map-chat-msg-body.map-chat-md {
   white-space: normal;
   line-height: 1.45;
 }
 
-.map-chat-msg.assistant.map-chat-md > :first-child {
+.map-chat-msg-body.map-chat-md > :first-child {
   margin-top: 0;
 }
 
-.map-chat-msg.assistant.map-chat-md > :last-child {
+.map-chat-msg-body.map-chat-md > :last-child {
   margin-bottom: 0;
 }
 
-.map-chat-msg.assistant.map-chat-md p {
+.map-chat-msg-body.map-chat-md p {
   margin: 0.4em 0;
 }
 
-.map-chat-msg.assistant.map-chat-md h1,
-.map-chat-msg.assistant.map-chat-md h2,
-.map-chat-msg.assistant.map-chat-md h3,
-.map-chat-msg.assistant.map-chat-md h4 {
+.map-chat-msg-body.map-chat-md h1,
+.map-chat-msg-body.map-chat-md h2,
+.map-chat-msg-body.map-chat-md h3,
+.map-chat-msg-body.map-chat-md h4 {
   margin: 0.55em 0 0.3em;
   font-size: 1em;
   font-weight: 650;
   line-height: 1.3;
 }
 
-.map-chat-msg.assistant.map-chat-md ul,
-.map-chat-msg.assistant.map-chat-md ol {
+.map-chat-msg-body.map-chat-md ul,
+.map-chat-msg-body.map-chat-md ol {
   margin: 0.35em 0;
   padding-left: 1.25rem;
 }
 
-.map-chat-msg.assistant.map-chat-md li {
+.map-chat-msg-body.map-chat-md li {
   margin: 0.15em 0;
 }
 
-.map-chat-msg.assistant.map-chat-md li > p {
+.map-chat-msg-body.map-chat-md li > p {
   margin: 0.15em 0;
 }
 
-.map-chat-msg.assistant.map-chat-md strong {
+.map-chat-msg-body.map-chat-md strong {
   font-weight: 650;
 }
 
-.map-chat-msg.assistant.map-chat-md code {
+.map-chat-msg-body.map-chat-md code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.88em;
   padding: 0.05em 0.3em;
@@ -3139,7 +3187,7 @@ main {
   background: var(--bg);
 }
 
-.map-chat-msg.assistant.map-chat-md pre {
+.map-chat-msg-body.map-chat-md pre {
   margin: 0.45em 0;
   padding: 0.45rem 0.55rem;
   overflow: auto;
@@ -3148,42 +3196,42 @@ main {
   font-size: 0.82rem;
 }
 
-.map-chat-msg.assistant.map-chat-md pre code {
+.map-chat-msg-body.map-chat-md pre code {
   padding: 0;
   background: transparent;
 }
 
-.map-chat-msg.assistant.map-chat-md table {
+.map-chat-msg-body.map-chat-md table {
   width: 100%;
   margin: 0.45em 0;
   border-collapse: collapse;
   font-size: 0.88em;
 }
 
-.map-chat-msg.assistant.map-chat-md th,
-.map-chat-msg.assistant.map-chat-md td {
+.map-chat-msg-body.map-chat-md th,
+.map-chat-msg-body.map-chat-md td {
   padding: 0.2rem 0.4rem;
   border: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
 }
 
-.map-chat-msg.assistant.map-chat-md th {
+.map-chat-msg-body.map-chat-md th {
   font-weight: 650;
   background: var(--bg);
 }
 
-.map-chat-msg.assistant.map-chat-md a {
+.map-chat-msg-body.map-chat-md a {
   color: var(--accent);
 }
 
-.map-chat-msg.assistant.map-chat-md hr {
+.map-chat-msg-body.map-chat-md hr {
   margin: 0.55em 0;
   border: 0;
   border-top: 1px solid var(--line);
 }
 
-.map-chat-msg.pending {
+.map-chat-msg.pending .map-chat-msg-body {
   color: var(--muted);
   font-style: italic;
 }

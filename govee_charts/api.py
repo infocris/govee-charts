@@ -862,7 +862,7 @@ def create_app(
 
             if store is not None:
                 try:
-                    await store.add_exchange(
+                    saved = await store.add_exchange(
                         session_id=str(out_session or "unknown"),
                         user_message=message,
                         assistant_message=assistant_text or None,
@@ -870,6 +870,19 @@ def create_app(
                         model=model,
                         snapshot=snapshot_obj,
                         banner=banner,
+                    )
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "saved",
+                                "id": saved.get("id"),
+                                "session_id": saved.get("session_id"),
+                                "created_at": saved.get("created_at"),
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
                     )
                 except Exception:
                     logger.exception("map-chat history persist failed")
@@ -2712,13 +2725,21 @@ def create_app(
         sensor_id: str,
         payload: DoorForceBody,
     ) -> dict[str, Any]:
-        """Force open/closed until the next live MQTT/HA state change."""
+        """Lock effective open/closed until the user unlocks (MQTT still logs)."""
         state = str(payload.state or "").strip().lower()
         if state not in ("open", "closed"):
             raise HTTPException(
                 status_code=400, detail="state must be 'open' or 'closed'"
             )
         updated = await db.force_door_state(sensor_id, state)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Unknown door sensor")
+        return updated
+
+    @app.post("/api/doors/{sensor_id:path}/unlock")
+    async def api_unlock_door(sensor_id: str) -> dict[str, Any]:
+        """Clear a locked override; effective state follows live MQTT/HA again."""
+        updated = await db.clear_door_force(sensor_id)
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown door sensor")
         return updated
