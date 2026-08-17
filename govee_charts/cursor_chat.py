@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -19,10 +20,13 @@ USER_MESSAGE_MAX = 4_000
 
 SYSTEM_PREAMBLE = (
     "You are advising on apartment climate for the Govee Charts Map view. "
-    "Use the live snapshot below (rooms, sensors, doors/windows, outdoor, HVAC, "
-    "thermal coupling). Answer clearly in the user's language. "
-    "Ask mode is read-only: do not edit files or run mutating commands."
+    "Use the live snapshot below (rooms, sensors, doors/windows, outdoor now, "
+    "next-12h outdoor forecast, HVAC, thermal coupling). Answer clearly in the "
+    "user's language. Ask mode is read-only: do not edit files or run mutating "
+    "commands."
 )
+
+FORECAST_CHAT_HOURS = 12.0
 
 
 def normalize_cursor_chat_config(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -82,6 +86,44 @@ def _round_num(value: Any, digits: int = 1) -> Any:
         return None
 
 
+def _outdoor_forecast_next_hours(
+    payload: dict[str, Any],
+    *,
+    hours: float = FORECAST_CHAT_HOURS,
+    now: float | None = None,
+) -> list[dict[str, Any]]:
+    """Compact hourly outdoor points from now through the next ``hours``."""
+    outdoor = payload.get("outdoor") or {}
+    points = outdoor.get("points") or []
+    if not points:
+        return []
+    t0 = float(now if now is not None else time.time())
+    t1 = t0 + float(hours) * 3600.0
+    out: list[dict[str, Any]] = []
+    for p in points:
+        try:
+            ts = float(p.get("ts"))
+        except (TypeError, ValueError):
+            continue
+        # Keep the current hour (±30 min) through the horizon.
+        if ts < t0 - 1800.0 or ts > t1 + 60.0:
+            continue
+        item: dict[str, Any] = {
+            "ts": int(ts),
+            "temp_c": _round_num(p.get("temperature_c")),
+            "humidity": _round_num(p.get("humidity"), 0),
+        }
+        wind = _round_num(p.get("wind_speed_ms"))
+        if wind is not None:
+            item["wind_ms"] = wind
+        cloud = _round_num(p.get("cloud_cover"), 0)
+        if cloud is not None:
+            item["cloud_pct"] = cloud
+        out.append(item)
+    out.sort(key=lambda row: int(row.get("ts") or 0))
+    return out
+
+
 def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
     """Compact /api/apartment payload for prompts and chat history."""
     rooms_out: list[dict[str, Any]] = []
@@ -103,7 +145,7 @@ def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
             {
                 "id": room.get("id"),
                 "label": room.get("label"),
-                "temp_c": _round_num(room.get("temp_avg") or room.get("temp_now")),
+                "temp_c": _round_num(room.get("temp_avg") or room.get("temp_now") or room.get("temp_c")),
                 "humidity": _round_num(room.get("humidity"), 0),
                 "window": room.get("window_state"),
                 "sensors": sensors,
@@ -128,6 +170,8 @@ def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
     hvac = payload.get("hvac") or {}
     airflow = payload.get("airflow") or {}
     couple = payload.get("temp_couple") or {}
+    forecast_12h = _outdoor_forecast_next_hours(payload, hours=FORECAST_CHAT_HOURS)
+    loc = outdoor.get("location") or {}
 
     return {
         "rooms": rooms_out,
@@ -137,6 +181,19 @@ def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
             if outdoor.get("temp_now") is not None
             else solar.get("temperature_c")
         ),
+        "outdoor": {
+            "available": bool(outdoor.get("available")),
+            "temp_c": _round_num(
+                outdoor.get("temp_now")
+                if outdoor.get("temp_now") is not None
+                else solar.get("temperature_c")
+            ),
+            "humidity": _round_num(outdoor.get("humidity_now"), 0),
+            "wind_ms": _round_num(outdoor.get("wind_speed_ms")),
+            "wind_compass": outdoor.get("wind_compass"),
+            "location": loc.get("name") if isinstance(loc, dict) else None,
+        },
+        "forecast_next_12h": forecast_12h,
         "temp_couple": {
             "open_if_delta_le_c": couple.get("open_threshold_c"),
             "isolated_if_delta_ge_c": couple.get("closed_threshold_c"),

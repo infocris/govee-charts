@@ -200,6 +200,21 @@ retention_days = 365
 # "binary_sensor.door_sensor_porte" = "Porte cuisine"
 # "binary_sensor.door_sensor_2_porte" = "Porte chambre"
 
+# Person room presence on the Map (HA person tracker / room sensor).
+# [presence]
+# enabled = true
+# ha_url = "http://127.0.0.1:8123"
+# ha_token_file = "/path/to/.ha_token"
+# poll_seconds = 10
+# entity = "sensor.christophe_room"
+# label = "Christophe"
+# Optional when the HA state is home/not_home and the room is an attribute:
+# attribute = "room"
+# Optional explicit label → apartment room id (aliases like Chambre→bedroom
+# are built-in; override here if needed):
+# [presence.rooms]
+# "Bureau" = "living"
+
 # HVAC / power historization via Home Assistant REST (Tuya climate + Ecojoko, …).
 # Create a long-lived access token in HA: Profile → Security → Long-lived access tokens.
 [hvac]

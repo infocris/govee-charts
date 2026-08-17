@@ -121,6 +121,27 @@ class Database:
                 updated_at REAL
             );
 
+            CREATE TABLE IF NOT EXISTS connections (
+                connection_id TEXT PRIMARY KEY,
+                room_a TEXT NOT NULL,
+                room_b TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                forced_state TEXT,
+                forced_at REAL,
+                updated_at REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS connection_sensors (
+                connection_id TEXT NOT NULL,
+                sensor_id TEXT NOT NULL,
+                PRIMARY KEY (connection_id, sensor_id),
+                FOREIGN KEY (connection_id) REFERENCES connections(connection_id)
+                    ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_connection_sensors_sensor
+                ON connection_sensors(sensor_id);
+
             CREATE TABLE IF NOT EXISTS hvac_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 entity_id TEXT NOT NULL,
@@ -538,6 +559,8 @@ class Database:
         "readings": "Temperature / humidity samples",
         "door_events": "Contact open/close events",
         "door_sensors": "Door sensor metadata",
+        "connections": "Room / outdoor opening definitions",
+        "connection_sensors": "Contact sensors linked to openings",
         "hvac_events": "Climate state history",
         "power_samples": "AC power (W) samples",
         "energy_samples": "Energy (kWh) samples",
@@ -2778,6 +2801,273 @@ class Database:
                 created += 1
         await self.db.commit()
         return created
+
+    async def sync_connections_from_layout(
+        self,
+        specs: list[dict[str, str]],
+    ) -> int:
+        """Upsert connection rows from layout specs. Returns rows touched."""
+        now = time.time()
+        touched = 0
+        expected: set[str] = set()
+        for spec in specs:
+            cid = str(spec.get("connection_id") or "").strip().lower()
+            if not cid:
+                continue
+            expected.add(cid)
+            room_a = str(spec.get("room_a") or "").strip().lower()
+            room_b = str(spec.get("room_b") or "").strip().lower()
+            kind = str(spec.get("kind") or "door").strip().lower() or "door"
+            cursor = await self.db.execute(
+                """
+                INSERT INTO connections (
+                    connection_id, room_a, room_b, kind, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(connection_id) DO UPDATE SET
+                    room_a = excluded.room_a,
+                    room_b = excluded.room_b,
+                    kind = excluded.kind,
+                    updated_at = excluded.updated_at
+                """,
+                (cid, room_a, room_b, kind, now),
+            )
+            touched += cursor.rowcount
+        # Drop obsolete layout rows that have no sensors (keep forced orphans
+        # until unlocked so a temporary layout edit does not lose state).
+        existing = await self.list_connection_rows()
+        link_map = await self.list_connection_sensor_map()
+        for row in existing:
+            cid = str(row.get("connection_id") or "")
+            if not cid or cid in expected:
+                continue
+            if link_map.get(cid):
+                continue
+            if row.get("forced_state"):
+                continue
+            await self.db.execute(
+                "DELETE FROM connections WHERE connection_id = ?",
+                (cid,),
+            )
+            touched += 1
+        await self.db.commit()
+        return touched
+
+    async def list_connection_sensor_map(self) -> dict[str, list[str]]:
+        """Map connection_id → ordered sensor_ids."""
+        cursor = await self.db.execute(
+            """
+            SELECT connection_id, sensor_id
+            FROM connection_sensors
+            ORDER BY connection_id, sensor_id
+            """
+        )
+        out: dict[str, list[str]] = {}
+        for row in await cursor.fetchall():
+            cid = str(row["connection_id"] or "")
+            sid = str(row["sensor_id"] or "")
+            if not cid or not sid:
+                continue
+            out.setdefault(cid, []).append(sid)
+        return out
+
+    async def get_connection(self, connection_id: str) -> dict[str, Any] | None:
+        cid = str(connection_id or "").strip().lower()
+        if not cid:
+            return None
+        cursor = await self.db.execute(
+            """
+            SELECT connection_id, room_a, room_b, kind,
+                   forced_state, forced_at, updated_at
+            FROM connections
+            WHERE connection_id = ?
+            """,
+            (cid,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def list_connection_rows(self) -> list[dict[str, Any]]:
+        cursor = await self.db.execute(
+            """
+            SELECT connection_id, room_a, room_b, kind,
+                   forced_state, forced_at, updated_at
+            FROM connections
+            ORDER BY room_a, room_b
+            """
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def set_connection_sensors(
+        self,
+        connection_id: str,
+        sensor_ids: list[str],
+        *,
+        hub_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Replace sensors linked to a connection.
+
+        A sensor may belong to at most one connection. Also mirrors room/kind
+        onto door_sensors for legacy consumers (timelines, banners).
+        """
+        from govee_charts.connections import (
+            indoor_room_of_outdoor,
+            is_outdoor_connection,
+            parse_connection_id,
+        )
+
+        cid = str(connection_id or "").strip().lower()
+        row = await self.get_connection(cid)
+        if row is None:
+            return None
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for raw in sensor_ids:
+            sid = str(raw or "").strip()
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            unique.append(sid)
+
+        # Detach from any other connection first.
+        if unique:
+            placeholders = ",".join("?" for _ in unique)
+            await self.db.execute(
+                f"""
+                DELETE FROM connection_sensors
+                WHERE sensor_id IN ({placeholders})
+                """,
+                unique,
+            )
+        await self.db.execute(
+            "DELETE FROM connection_sensors WHERE connection_id = ?",
+            (cid,),
+        )
+        now = time.time()
+        hub = str(hub_id or "").strip().lower() or None
+        for sid in unique:
+            await self.db.execute(
+                """
+                INSERT INTO connection_sensors (connection_id, sensor_id)
+                VALUES (?, ?)
+                """,
+                (cid, sid),
+            )
+            await self.ensure_door_sensor(sensor_id=sid, name=sid)
+            if is_outdoor_connection(cid):
+                room = indoor_room_of_outdoor(cid)
+                existing = await self.get_door_sensor(sid)
+                prev_kind = str((existing or {}).get("kind") or "").lower()
+                kind = prev_kind if prev_kind in ("door", "window") else "window"
+            else:
+                a, b = parse_connection_id(cid)
+                if hub and hub in (a, b):
+                    room = b if a == hub else a
+                else:
+                    room = a
+                kind = str(row.get("kind") or "door")
+                if kind not in ("door", "window"):
+                    kind = "door"
+            await self.update_door_sensor(sid, room=room, kind=kind)
+
+        await self.db.execute(
+            "UPDATE connections SET updated_at = ? WHERE connection_id = ?",
+            (now, cid),
+        )
+        await self.db.commit()
+        return await self.get_connection(cid)
+
+    async def force_connection_state(
+        self, connection_id: str, state: str
+    ) -> dict[str, Any] | None:
+        cid = str(connection_id or "").strip().lower()
+        st = str(state or "").strip().lower()
+        if st not in ("open", "closed"):
+            raise ValueError("state must be 'open' or 'closed'")
+        row = await self.get_connection(cid)
+        if row is None:
+            return None
+        now = time.time()
+        await self.db.execute(
+            """
+            UPDATE connections
+            SET forced_state = ?, forced_at = ?, updated_at = ?
+            WHERE connection_id = ?
+            """,
+            (st, now, now, cid),
+        )
+        await self.db.commit()
+        return await self.get_connection(cid)
+
+    async def clear_connection_force(
+        self, connection_id: str
+    ) -> dict[str, Any] | None:
+        cid = str(connection_id or "").strip().lower()
+        row = await self.get_connection(cid)
+        if row is None:
+            return None
+        now = time.time()
+        await self.db.execute(
+            """
+            UPDATE connections
+            SET forced_state = NULL, forced_at = NULL, updated_at = ?
+            WHERE connection_id = ?
+            """,
+            (now, cid),
+        )
+        await self.db.commit()
+        return await self.get_connection(cid)
+
+    async def connection_sensor_count(self) -> int:
+        cursor = await self.db.execute(
+            "SELECT COUNT(*) AS n FROM connection_sensors"
+        )
+        row = await cursor.fetchone()
+        return int(row["n"] if row else 0)
+
+    async def migrate_connections_from_door_rooms(
+        self,
+        *,
+        passable_specs: list[dict[str, str]],
+        hub_id: str | None,
+    ) -> int:
+        """
+        One-shot: assign door_sensors with room/kind onto connections.
+
+        Skips when any link already exists. Returns number of new links.
+        """
+        from govee_charts.connections import migrate_sensor_to_connection
+
+        if await self.connection_sensor_count() > 0:
+            return 0
+
+        sensors = await self.list_door_sensors()
+        assigned = 0
+        by_conn: dict[str, list[str]] = {}
+        for sensor in sensors:
+            sid = str(sensor.get("sensor_id") or "")
+            if not sid:
+                continue
+            target = migrate_sensor_to_connection(
+                room=sensor.get("room"),
+                kind=sensor.get("kind"),
+                passable_edges=passable_specs,
+                hub_id=hub_id,
+            )
+            if not target:
+                continue
+            by_conn.setdefault(target, []).append(sid)
+
+        for cid, sids in by_conn.items():
+            if await self.get_connection(cid) is None:
+                continue
+            updated = await self.set_connection_sensors(
+                cid, sids, hub_id=hub_id
+            )
+            if updated is not None:
+                assigned += len(sids)
+        return assigned
 
     async def insert_hvac_event(
         self,

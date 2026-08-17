@@ -125,6 +125,17 @@
     </div>
     <a href="/settings" data-view="settings" data-i18n="nav.settings">Settings</a>
     <span class="nav-actions">
+      <button
+        type="button"
+        id="nav-update-btn"
+        class="restart-btn nav-update-btn"
+        hidden
+        data-i18n="nav.update"
+        data-i18n-title="nav.updateTitle"
+        title="Update available — pull and reload"
+      >
+        Update
+      </button>
       <a id="home-btn" class="restart-btn" data-i18n="nav.home" data-i18n-title="nav.homeTitle" title="Back to the portal (port 80)">Home</a>
     </span>
   </nav>
@@ -171,17 +182,17 @@
       <p class="status" id="overview-status" data-i18n="overview.loading">Loading…</p>
 
       <div class="overview-head overview-head-secondary">
-        <h2 data-i18n="overview.doorsTitle">Doors &amp; windows</h2>
-        <p class="overview-hint" data-i18n="overview.doorsHint">Contact sensors — set kind/room; click a name for open/close log. Lock overrides the effective state until you unlock (live MQTT/HA still logs).</p>
+        <h2 data-i18n="overview.doorsTitle">Connections</h2>
+        <p class="overview-hint" data-i18n="overview.doorsHint">Assign contact sensors to each room opening; openings without a sensor can be switched manually. Lock freezes the effective state for the map.</p>
       </div>
       <div class="overview-table-wrap">
         <table class="overview-table" id="doors-table">
           <thead>
             <tr>
-              <th scope="col" data-i18n="overview.col.sensor">Sensor</th>
-              <th scope="col" data-i18n="overview.col.state">State</th>
+              <th scope="col" data-i18n="overview.col.connection">Connection</th>
               <th scope="col" data-i18n="overview.col.kind">Kind</th>
-              <th scope="col" data-i18n="overview.col.room">Room</th>
+              <th scope="col" data-i18n="overview.col.sensors">Sensors</th>
+              <th scope="col" data-i18n="overview.col.state">State</th>
               <th scope="col" data-i18n="overview.col.updated">Updated</th>
             </tr>
           </thead>
@@ -581,6 +592,10 @@
             room (map or section) or façade (section) — open charts (metric: Temp / Humidity / Both)
           </li>
           <li>
+            <span class="map-click-keys"><kbd>Click</kbd></span>
+            link (door / partial / façade) — set open / closed / unlock
+          </li>
+          <li>
             <span class="map-click-keys"><kbd>Shift</kbd>+<kbd>Click</kbd></span>
             room — add / remove a cross-section path waypoint
           </li>
@@ -696,10 +711,12 @@
         <div class="network-legend" aria-hidden="true">
           <span class="net-leg net-leg-open">Open / coupled</span>
           <span class="net-leg net-leg-closed">Closed / isolated</span>
+          <span class="net-leg net-leg-locked">Locked</span>
           <span class="net-leg net-leg-unknown">Uncertain</span>
           <span class="net-leg net-leg-wall">Wall</span>
           <span class="net-leg net-leg-partial">Partial wall</span>
           <span class="net-leg net-leg-exterior">Exterior</span>
+          <span class="net-leg net-leg-presence">Person here</span>
           <span class="net-leg net-leg-flow">Cooling draft</span>
           <span class="net-leg net-leg-ac">AC running</span>
           <span class="net-temp-scale" id="network-temp-scale" hidden>
@@ -717,6 +734,14 @@
       <p class="network-airflow" id="network-airflow" aria-live="polite"></p>
       <div class="network-canvas-wrap" id="network-canvas-wrap">
         <svg id="network-svg" class="network-svg" role="img" aria-label="Apartment map"></svg>
+        <div class="network-edge-panel" id="network-edge-panel" hidden>
+          <div class="network-edge-panel-head">
+            <strong id="network-edge-panel-title">Connection</strong>
+            <button type="button" class="network-edge-panel-close" id="network-edge-panel-close" aria-label="Close">×</button>
+          </div>
+          <p class="network-edge-panel-meta" id="network-edge-panel-meta"></p>
+          <div class="network-edge-panel-actions" id="network-edge-panel-actions"></div>
+        </div>
       </div>
       <p class="status" id="network-status">Loading…</p>
     </section>

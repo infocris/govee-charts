@@ -365,6 +365,17 @@ body.sticky-views-enabled .views {
   align-items: center;
 }
 
+.nav-update-btn {
+  color: #8a5a12 !important;
+  border-color: #c4782a !important;
+  background: color-mix(in srgb, #c4782a 14%, transparent) !important;
+  font-weight: 600;
+}
+
+.nav-update-btn:hover {
+  background: color-mix(in srgb, #c4782a 24%, transparent) !important;
+}
+
 .restart-btn {
   color: var(--muted) !important;
   border-color: var(--line) !important;
@@ -1563,22 +1574,87 @@ main {
   font-size: 0.75rem;
   line-height: 1.2;
   padding: 0.15rem 0.45rem;
-  border: 1px solid var(--border, #c5cdd6);
+  border: 1px solid var(--line);
   border-radius: 4px;
-  background: var(--surface, #fff);
-  color: var(--muted, #667);
+  background: color-mix(in srgb, var(--bg-elev) 75%, var(--bg));
+  color: var(--ink);
   cursor: pointer;
 }
 
 .door-force-btn:hover {
-  border-color: var(--accent, #7cb8e8);
-  color: inherit;
+  border-color: var(--accent);
+  color: var(--ink);
 }
 
 .door-force-btn.is-active {
-  border-color: var(--accent, #7cb8e8);
-  background: color-mix(in srgb, var(--accent, #7cb8e8) 18%, transparent);
-  color: inherit;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-elev));
+  color: var(--ink);
+}
+
+.conn-sensors-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 12rem;
+}
+
+.conn-sensors-picker {
+  font-size: 0.85rem;
+}
+
+.conn-sensors-picker > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.conn-sensors-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.4rem;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-elev) 80%, var(--bg));
+  color: var(--ink);
+  max-height: 14rem;
+  overflow: auto;
+}
+
+.conn-sensor-opt {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.35rem;
+  align-items: center;
+  font-size: 0.8rem;
+  color: var(--ink);
+}
+
+.conn-sensor-opt-meta {
+  grid-column: 2 / -1;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.conn-sensor-log {
+  font-size: 0.7rem;
+  padding: 0;
+}
+
+.conn-sensors-apply {
+  align-self: flex-start;
+  margin-top: 0.35rem;
+}
+
+.conn-sensor-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.conn-sensor-chip {
+  font-size: 0.75rem;
 }
 
 .door-force-btn:disabled {
@@ -3349,6 +3425,11 @@ main {
   border-color: #6b7280;
 }
 
+.net-leg-locked::before {
+  border-color: #c4782a;
+  border-width: 4px;
+}
+
 .net-leg-unknown::before {
   border-color: #c4a35a;
   border-style: dashed;
@@ -3368,6 +3449,14 @@ main {
 
 .net-leg-exterior::before {
   border-color: #5b8fd9;
+}
+
+.net-leg-presence::before {
+  width: 0.65rem;
+  height: 0.65rem;
+  border: none;
+  border-radius: 50%;
+  background: #c4782a;
 }
 
 .net-leg-flow::before {
@@ -3814,6 +3903,76 @@ main {
   opacity: 1;
 }
 
+.network-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 16;
+  stroke-linecap: round;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.network-edge.is-locked {
+  stroke-width: 4.75;
+}
+
+.network-edge-door.is-locked,
+.network-edge-wall_partial.is-locked.open,
+.network-edge-wall_partial.is-locked.closed,
+.network-edge-exterior.is-locked {
+  stroke: #c4782a;
+}
+
+.network-edge-panel {
+  position: absolute;
+  z-index: 8;
+  min-width: 12rem;
+  max-width: 16rem;
+  padding: 0.55rem 0.65rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--ink);
+  box-shadow: 0 8px 22px color-mix(in srgb, #000 48%, transparent);
+}
+
+.network-edge-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.network-edge-panel-head strong {
+  font-size: 0.9rem;
+  line-height: 1.25;
+  color: var(--ink);
+}
+
+.network-edge-panel-close {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.15rem;
+}
+
+.network-edge-panel-meta {
+  margin: 0 0 0.45rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.network-edge-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
 .network-edge-door.open {
   stroke: #2f9e6b;
   stroke-width: 3.5;
@@ -3952,6 +4111,21 @@ main {
   pointer-events: none;
 }
 
+.network-presence-dot {
+  fill: #c4782a;
+  stroke: #fff;
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+
+.network-presence-initial {
+  fill: #fff;
+  font-size: calc(10px * var(--map-font-scale, 1));
+  font-weight: 700;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
 .network-sublabel {
   font-size: calc(11px * var(--map-font-scale, 1));
 }
@@ -3980,6 +4154,11 @@ main {
   font-size: calc(11px * var(--map-font-scale, 1));
   text-anchor: middle;
   pointer-events: none;
+}
+
+.network-edge-label.is-locked {
+  fill: #c4782a;
+  font-weight: 700;
 }
 
 /* Map label font sizes above use calc(...* var(--map-font-scale, 1)):

@@ -30,6 +30,7 @@ from govee_charts.doors import DoorHaPoller, DoorMqttListener, DoorsConfig, impo
 from govee_charts.federation import PeerPublisher
 from govee_charts.ha_th import HaThConfig, HaThPoller
 from govee_charts.map_chat_store import MapChatStore
+from govee_charts.presence import PresenceConfig, PresenceService
 from govee_charts.hvac import HvacConfig, HvacHaPoller, import_ha_hvac_history
 from govee_charts.scanner import GoveeScanner, discover_once
 from govee_charts.apartment import (
@@ -117,6 +118,19 @@ DEFAULTS: dict[str, Any] = {
         "ha_token_file": "",
         "ha_poll_seconds": 10,
         "ha_entities": [],
+    },
+    "presence": {
+        "enabled": False,
+        "ha_url": "http://127.0.0.1:8123",
+        "ha_token": "",
+        "ha_token_file": "",
+        "poll_seconds": 10,
+        "entity": "",
+        "label": "Me",
+        "id": "me",
+        "attribute": "",
+        "rooms": {},
+        "people": [],
     },
     "hvac": {
         "enabled": False,
@@ -740,6 +754,20 @@ async def run_ui_server(
     hvac_cfg = workers_runtime.get("hvac_cfg") if workers_runtime else HvacConfig.from_dict(
         cfg.get("hvac")
     )
+    presence_cfg = PresenceConfig.from_dict(cfg.get("presence"))
+    presence_svc = PresenceService(presence_cfg) if presence_cfg.ready else None
+    if presence_cfg.enabled and presence_svc is None:
+        logging.warning(
+            "Presence enabled but not ready "
+            "(set presence.ha_token_file and presence.entity or [[presence.people]])"
+        )
+    elif presence_svc is not None:
+        logging.info(
+            "Presence map marker enabled (%d person%s via %s)",
+            len(presence_cfg.people),
+            "" if len(presence_cfg.people) == 1 else "s",
+            presence_cfg.ha_url,
+        )
 
     servers: list[uvicorn.Server] = []
 
@@ -779,6 +807,7 @@ async def run_ui_server(
         backfill=backfill,
         ssl_port=ssl_port if certfile and keyfile else None,
         hvac=hvac_cfg,
+        presence=presence_svc,
         scanner_enabled=bool(cfg["scanner"].get("enabled", True)),
         ble_alert_stale_after=float(cfg["scanner"].get("alert_stale_after", 300.0)),
         tts=cfg.get("tts") or {},

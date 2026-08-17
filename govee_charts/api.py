@@ -34,6 +34,15 @@ from govee_charts.apartment import (
 )
 from govee_charts.backfill import BackfillService
 from govee_charts.categories import normalize_door_patch, normalize_patch, taxonomy
+from govee_charts.connections import (
+    OUTDOOR,
+    connection_id_for_rooms,
+    effective_opening_from_sensors,
+    is_outdoor_connection,
+    layout_connection_specs,
+    outdoor_connection_id,
+    parse_connection_id,
+)
 from govee_charts.csv_import import MAX_UPLOAD_BYTES, parse_upload, summarize_samples
 from govee_charts.cursor_chat import (
     apartment_snapshot_dict,
@@ -58,6 +67,7 @@ from govee_charts.tts import (
     speak_via_home,
     synthesize,
 )
+from govee_charts.presence import PresenceConfig, PresenceService
 from govee_charts.hvac import HvacConfig, hvac_active_bands, is_hvac_active
 from govee_charts import mail_inbox
 from govee_charts.weather import WeatherService
@@ -128,6 +138,143 @@ def widget_html_response() -> HTMLResponse:
     return HTMLResponse(content=html, headers=dict(_HTML_CACHE_HEADERS))
 
 
+def _layout_hub_id(rooms: list[dict[str, Any]], edges: list[dict[str, Any]]) -> str | None:
+    degree: dict[str, int] = {
+        str(r.get("id") or ""): 0 for r in rooms if r.get("id")
+    }
+    for edge in edges or []:
+        a = str(edge.get("a") or "")
+        b = str(edge.get("b") or "")
+        if a in degree:
+            degree[a] += 1
+        if b in degree:
+            degree[b] += 1
+    return max(degree, key=degree.get) if degree else None
+
+
+def _room_label_map(rooms: list[dict[str, Any]]) -> dict[str, str]:
+    out: dict[str, str] = {OUTDOOR: "Outdoor"}
+    for room in rooms or []:
+        rid = str(room.get("id") or "").strip().lower()
+        if not rid:
+            continue
+        out[rid] = str(room.get("label") or rid)
+    return out
+
+
+async def _ensure_layout_connections(db: Database, layout: Any) -> tuple[str | None, list[dict[str, str]]]:
+    """Sync layout → connections rows; migrate legacy room/kind once."""
+    summary = layout.summary() if hasattr(layout, "summary") else layout
+    rooms = list(summary.get("rooms") or [])
+    edges = list(summary.get("edges") or [])
+    specs = layout_connection_specs(rooms, edges)
+    await db.sync_connections_from_layout(specs)
+    hub_id = _layout_hub_id(rooms, edges)
+    passable = [s for s in specs if s.get("kind") != "outdoor"]
+    try:
+        n = await db.migrate_connections_from_door_rooms(
+            passable_specs=passable,
+            hub_id=hub_id,
+        )
+        if n:
+            logger.info("Migrated %d door sensor(s) onto connections", n)
+    except Exception:
+        logger.exception("Connection migration from door rooms failed")
+    return hub_id, specs
+
+
+def _enrich_connection_payload(
+    row: dict[str, Any],
+    *,
+    linked_ids: list[str],
+    sensors_by_id: dict[str, dict[str, Any]],
+    labels: dict[str, str],
+) -> dict[str, Any]:
+    cid = str(row.get("connection_id") or "")
+    room_a = str(row.get("room_a") or "")
+    room_b = str(row.get("room_b") or "")
+    linked = [sensors_by_id[sid] for sid in linked_ids if sid in sensors_by_id]
+    forced = str(row.get("forced_state") or "").strip().lower()
+    if forced not in ("open", "closed"):
+        forced = ""
+    reported, reported_ts = effective_opening_from_sensors(linked)
+    if forced:
+        state = forced
+        ts = row.get("forced_at") or reported_ts
+        source = "manual"
+        is_forced = True
+    else:
+        state = reported
+        ts = reported_ts
+        source = "contact" if linked else None
+        is_forced = False
+    return {
+        "id": cid,
+        "connection_id": cid,
+        "room_a": room_a,
+        "room_b": room_b,
+        "kind": row.get("kind") or "door",
+        "label_a": labels.get(room_a, room_a),
+        "label_b": labels.get(room_b, room_b),
+        "sensors": linked,
+        "sensor_ids": linked_ids,
+        "state": state,
+        "reported_state": reported,
+        "forced": is_forced,
+        "forced_state": forced or None,
+        "ts": ts,
+        "source": source,
+        "is_outdoor": is_outdoor_connection(cid),
+    }
+
+
+async def _build_connections_response(db: Database, layout: Any) -> dict[str, Any]:
+    hub_id, _specs = await _ensure_layout_connections(db, layout)
+    summary = layout.summary()
+    labels = _room_label_map(list(summary.get("rooms") or []))
+    door_sensors = await db.list_door_sensors()
+    sensors_by_id = {
+        str(s.get("sensor_id") or ""): s
+        for s in door_sensors
+        if s.get("sensor_id")
+    }
+    link_map = await db.list_connection_sensor_map()
+    sensor_to_conn = {
+        sid: cid for cid, sids in link_map.items() for sid in sids
+    }
+    rows = await db.list_connection_rows()
+    connections = [
+        _enrich_connection_payload(
+            row,
+            linked_ids=list(link_map.get(str(row.get("connection_id") or ""), [])),
+            sensors_by_id=sensors_by_id,
+            labels=labels,
+        )
+        for row in rows
+    ]
+    # Stable UI order: inter-room doors first, then outdoor, by label.
+    def _sort_key(c: dict[str, Any]) -> tuple:
+        return (
+            1 if c.get("is_outdoor") else 0,
+            str(c.get("label_a") or ""),
+            str(c.get("label_b") or ""),
+        )
+
+    connections.sort(key=_sort_key)
+    sensors_out = []
+    for s in door_sensors:
+        sid = str(s.get("sensor_id") or "")
+        item = dict(s)
+        item["connection_id"] = sensor_to_conn.get(sid)
+        sensors_out.append(item)
+    return {
+        "connections": connections,
+        "sensors": sensors_out,
+        "hub_id": hub_id,
+        "count": len(connections),
+    }
+
+
 class VersionedStaticFiles(StaticFiles):
     """Static files with short cache; clients bust via ?v= from index.html."""
 
@@ -164,7 +311,7 @@ def peer_browse_url(peer: str, ssl_port: int | None) -> str:
     return peer
 
 
-def _git_output(cmd: list[str]) -> tuple[int, str]:
+def _git_output(cmd: list[str], *, timeout: float = 120.0) -> tuple[int, str]:
     """Run a git command in the project root; return (returncode, combined output)."""
     try:
         proc = subprocess.run(
@@ -172,7 +319,7 @@ def _git_output(cmd: list[str]) -> tuple[int, str]:
             cwd=str(ROOT),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
             check=False,
         )
     except FileNotFoundError:
@@ -181,6 +328,100 @@ def _git_output(cmd: list[str]) -> tuple[int, str]:
         return 124, "git command timed out"
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
     return int(proc.returncode), out
+
+
+def run_git_status(*, fetch: bool = True) -> dict[str, Any]:
+    """Compare local HEAD to its upstream (optional fetch first)."""
+    if not (ROOT / ".git").is_dir():
+        return {
+            "ok": True,
+            "git": False,
+            "update_available": False,
+            "behind": 0,
+            "ahead": 0,
+            "local": None,
+            "remote": None,
+            "upstream": None,
+            "message": "Not a git repository",
+        }
+
+    fetch_output = ""
+    if fetch:
+        rc, fetch_output = _git_output(
+            ["git", "fetch", "--quiet", "--prune"], timeout=90.0
+        )
+        if rc not in (0,):
+            # Still report local vs last-known upstream when fetch fails.
+            logger.warning("git fetch failed (%s): %s", rc, fetch_output[:200])
+
+    rc, local = _git_output(["git", "rev-parse", "--short", "HEAD"])
+    if rc != 0:
+        return {
+            "ok": False,
+            "git": True,
+            "update_available": False,
+            "behind": 0,
+            "ahead": 0,
+            "local": None,
+            "remote": None,
+            "upstream": None,
+            "message": local or "Could not read HEAD",
+            "fetch_output": fetch_output,
+        }
+    local = local.strip() or None
+
+    rc, upstream = _git_output(
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]
+    )
+    if rc != 0:
+        return {
+            "ok": True,
+            "git": True,
+            "update_available": False,
+            "behind": 0,
+            "ahead": 0,
+            "local": local,
+            "remote": None,
+            "upstream": None,
+            "message": "No upstream branch configured",
+            "fetch_output": fetch_output,
+        }
+    upstream = upstream.strip() or None
+
+    rc, remote = _git_output(["git", "rev-parse", "--short", "@{u}"])
+    remote = (remote.strip() or None) if rc == 0 else None
+
+    rc_b, behind_s = _git_output(["git", "rev-list", "--count", "HEAD..@{u}"])
+    rc_a, ahead_s = _git_output(["git", "rev-list", "--count", "@{u}..HEAD"])
+    try:
+        behind = int(behind_s.strip()) if rc_b == 0 else 0
+    except ValueError:
+        behind = 0
+    try:
+        ahead = int(ahead_s.strip()) if rc_a == 0 else 0
+    except ValueError:
+        ahead = 0
+
+    update_available = behind > 0
+    if update_available:
+        message = f"{behind} commit(s) available ({local} → {remote or upstream})"
+    elif ahead > 0:
+        message = f"Local is {ahead} commit(s) ahead of {upstream}"
+    else:
+        message = f"Up to date ({local})"
+
+    return {
+        "ok": True,
+        "git": True,
+        "update_available": update_available,
+        "behind": behind,
+        "ahead": ahead,
+        "local": local,
+        "remote": remote,
+        "upstream": upstream,
+        "message": message,
+        "fetch_output": fetch_output,
+    }
 
 
 def run_git_pull() -> dict[str, Any]:
@@ -328,6 +569,22 @@ class DoorPatch(BaseModel):
 
 class DoorForceBody(BaseModel):
     """Manual open/closed until the next live MQTT/HA transition."""
+
+    state: str = Field(..., min_length=1)
+
+    model_config = {"extra": "forbid"}
+
+
+class ConnectionSensorsBody(BaseModel):
+    """Replace the set of contact sensors linked to a connection."""
+
+    sensor_ids: list[str] = Field(default_factory=list)
+
+    model_config = {"extra": "forbid"}
+
+
+class ConnectionForceBody(BaseModel):
+    """Manual open/closed override for a room connection."""
 
     state: str = Field(..., min_length=1)
 
@@ -533,6 +790,7 @@ def create_app(
     backfill: BackfillService | None = None,
     ssl_port: int | None = None,
     hvac: HvacConfig | None = None,
+    presence: PresenceService | None = None,
     scanner_enabled: bool = True,
     ble_alert_stale_after: float = 300.0,
     tts: dict[str, Any] | None = None,
@@ -556,6 +814,7 @@ def create_app(
     app.state.map_chat_lock = asyncio.Lock()
     app.state.ssl_port = int(ssl_port) if ssl_port else None
     app.state.hvac = hvac or HvacConfig()
+    app.state.presence = presence
     app.state.scanner_enabled = bool(scanner_enabled)
     app.state.ble_alert_stale_after = max(0.0, float(ble_alert_stale_after))
     tts_cfg = dict(tts or {})
@@ -813,11 +1072,12 @@ def create_app(
 
         banner = normalize_banner(body.banner)
 
-        # Fresh apartment snapshot (same builder as GET /api/apartment).
+        # Fresh apartment snapshot (same builder as GET /api/apartment),
+        # with enough future outdoor hours for the chat forecast slice.
         try:
             apartment = await api_apartment(
                 hours=24.0,
-                future_hours=None,
+                future_hours=12.0,
                 latitude=None,
                 longitude=None,
             )
@@ -1595,6 +1855,25 @@ def create_app(
             "verification_codes": codes_all,
         }
 
+    @app.get("/api/git/status")
+    async def api_git_status(
+        fetch: bool = Query(default=True),
+    ) -> dict[str, Any]:
+        """Report whether the tracked branch has remote commits to pull."""
+        lock: asyncio.Lock = app.state.git_pull_lock
+        if lock.locked():
+            return {
+                "ok": True,
+                "git": True,
+                "busy": True,
+                "update_available": False,
+                "behind": 0,
+                "ahead": 0,
+                "message": "Git operation in progress",
+            }
+        async with lock:
+            return await asyncio.to_thread(run_git_status, fetch=bool(fetch))
+
     @app.post("/api/git/pull")
     async def api_git_pull() -> dict[str, Any]:
         """Pull latest commits with --ff-only (does not restart services)."""
@@ -2195,30 +2474,38 @@ def create_app(
 
         # Network graph extras: contacts + opening state on edges / façades.
         try:
-            door_sensors = await db.list_door_sensors()
+            hub_id, _specs = await _ensure_layout_connections(db, layout)
+            conn_payload = await _build_connections_response(db, layout)
+            connections = list(conn_payload.get("connections") or [])
         except Exception as exc:
-            logger.warning("Apartment door list failed: %s", exc)
-            door_sensors = []
-        contacts_by_room: dict[str, list[dict[str, Any]]] = {
-            r["id"]: [] for r in payload["rooms"]
+            logger.warning("Apartment connections failed: %s", exc)
+            hub_id = None
+            connections = []
+        conn_by_id = {
+            str(c.get("id") or ""): c for c in connections if c.get("id")
         }
-        for contact in door_sensors:
-            rid = str(contact.get("room") or "").strip().lower()
-            if rid not in contacts_by_room:
-                continue
-            contacts_by_room[rid].append(
-                {
-                    "sensor_id": contact.get("sensor_id"),
-                    "name": contact.get("name") or contact.get("sensor_id"),
-                    "kind": contact.get("kind") or "door",
-                    "state": contact.get("state"),
-                    "ts": contact.get("ts"),
-                }
-            )
+
         for room in payload["rooms"]:
             rid = room["id"]
-            contacts = contacts_by_room.get(rid, [])
+            outdoor_id = outdoor_connection_id(rid)
+            outdoor_conn = conn_by_id.get(outdoor_id)
+            contacts: list[dict[str, Any]] = []
+            if outdoor_conn:
+                for s in outdoor_conn.get("sensors") or []:
+                    contacts.append(
+                        {
+                            "sensor_id": s.get("sensor_id"),
+                            "name": s.get("name") or s.get("sensor_id"),
+                            "kind": s.get("kind") or "window",
+                            "state": s.get("state"),
+                            "ts": s.get("ts"),
+                        }
+                    )
             room["contacts"] = contacts
+            room["outdoor_connection_id"] = outdoor_id
+            room["window_forced"] = bool(
+                outdoor_conn and outdoor_conn.get("forced")
+            )
             sensors = room.get("sensors") or []
             interior = [
                 s
@@ -2292,7 +2579,15 @@ def create_app(
             windows = [
                 c for c in contacts if str(c.get("kind") or "") == "window"
             ]
-            if any(str(c.get("state") or "").lower() == "open" for c in windows):
+            has_exterior = bool(room.get("exterior"))
+            if (
+                outdoor_conn
+                and outdoor_conn.get("forced")
+                and outdoor_conn.get("state") in ("open", "closed")
+                and (windows or (has_exterior and not contacts))
+            ):
+                room["window_state"] = outdoor_conn["state"]
+            elif any(str(c.get("state") or "").lower() == "open" for c in windows):
                 room["window_state"] = "open"
             elif windows and all(
                 str(c.get("state") or "").lower() == "closed" for c in windows
@@ -2308,52 +2603,54 @@ def create_app(
             if room.get("hist_temp_min") is None and room.get("temp_min") is not None:
                 room["hist_temp_min"] = room["temp_min"]
 
-        degree: dict[str, int] = {r["id"]: 0 for r in payload["rooms"]}
-        for edge in payload.get("edges") or []:
-            a = str(edge.get("a") or "")
-            b = str(edge.get("b") or "")
-            if a in degree:
-                degree[a] += 1
-            if b in degree:
-                degree[b] += 1
-        hub_id = max(degree, key=degree.get) if degree else None
-
         for edge in payload.get("edges") or []:
             kind = str(edge.get("kind") or "door")
             a = str(edge.get("a") or "")
             b = str(edge.get("b") or "")
-            related: list[dict[str, Any]] = []
-            if kind in ("door", "wall_partial"):
-                allowed_kinds = (
-                    ("door",) if kind == "door" else ("door", "other")
-                )
-                for rid in (a, b):
-                    for c in contacts_by_room.get(rid, []):
-                        if str(c.get("kind") or "door") in allowed_kinds:
-                            related.append({**c, "room": rid})
-                # Hub rooms (e.g. corridor) often host shared contacts such as
-                # the entrance door. Only attribute a contact to a hub↔leaf
-                # edge when it belongs to the leaf room; otherwise leave empty
-                # so thermal coupling can infer the opening.
-                if hub_id and hub_id in (a, b) and kind == "door":
-                    leaf = b if a == hub_id else a
-                    related = [c for c in related if c.get("room") == leaf]
-            edge["contacts"] = related
             edge["temp_delta_max_c"] = None
             edge["opening_source"] = None
             if kind == "wall":
+                edge["contacts"] = []
                 edge["opening"] = "sealed"
                 edge["opening_source"] = "layout"
+                edge["connection_id"] = None
+                edge["forced"] = False
+                edge["reported_opening"] = None
+                continue
+            try:
+                cid = connection_id_for_rooms(a, b)
+            except ValueError:
+                edge["contacts"] = []
+                edge["opening"] = "unknown"
+                continue
+            conn = conn_by_id.get(cid)
+            related: list[dict[str, Any]] = []
+            if conn:
+                for s in conn.get("sensors") or []:
+                    related.append(
+                        {
+                            "sensor_id": s.get("sensor_id"),
+                            "name": s.get("name") or s.get("sensor_id"),
+                            "kind": s.get("kind") or "door",
+                            "state": s.get("state"),
+                            "ts": s.get("ts"),
+                            "room": s.get("room"),
+                        }
+                    )
+            edge["contacts"] = related
+            edge["connection_id"] = cid
+            edge["forced"] = bool(conn and conn.get("forced"))
+            edge["reported_opening"] = (
+                conn.get("reported_state") if conn else None
+            )
+            if conn and conn.get("state") in ("open", "closed"):
+                edge["opening"] = conn["state"]
+                edge["opening_source"] = (
+                    "manual" if conn.get("forced") else "contact"
+                )
                 continue
             if related:
-                if any(str(c.get("state") or "").lower() == "open" for c in related):
-                    edge["opening"] = "open"
-                elif all(
-                    str(c.get("state") or "").lower() == "closed" for c in related
-                ):
-                    edge["opening"] = "closed"
-                else:
-                    edge["opening"] = "unknown"
+                edge["opening"] = "unknown"
                 edge["opening_source"] = "contact"
                 continue
             # No door contact: infer air sharing from close 24h maxima.
@@ -2375,6 +2672,7 @@ def create_app(
                 "closed_threshold_c": couple.get("closed_threshold_c"),
             }
 
+        payload["hub_id"] = hub_id
         payload["temp_couple"] = {
             "open_threshold_c": TEMP_COUPLE_OPEN_C,
             "closed_threshold_c": TEMP_COUPLE_CLOSED_C,
@@ -2411,6 +2709,18 @@ def create_app(
             )
         else:
             payload["hvac"] = {"enabled": False, "active": False, "room": hvac_cfg.room}
+
+        presence_svc: PresenceService | None = app.state.presence
+        if presence_svc is not None and presence_svc.cfg.ready:
+            try:
+                payload["presence"] = await presence_svc.snapshot(
+                    apartment_rooms=list(payload.get("rooms") or [])
+                )
+            except Exception as exc:
+                logger.warning("Apartment presence snapshot failed: %s", exc)
+                payload["presence"] = {"enabled": True, "people": [], "error": str(exc)}
+        else:
+            payload["presence"] = {"enabled": False, "people": []}
 
         return payload
 
@@ -2685,6 +2995,95 @@ def create_app(
             payload["since"] = t0
             payload["until"] = t1
         return payload
+
+    @app.get("/api/connections")
+    async def api_connections() -> dict[str, Any]:
+        """Apartment openings with assigned contact sensors and open/closed state."""
+        weather_svc: WeatherService | None = app.state.weather
+        if weather_svc is None or weather_svc.apartment is None:
+            return {
+                "connections": [],
+                "sensors": await db.list_door_sensors(),
+                "hub_id": None,
+                "count": 0,
+                "enabled": False,
+            }
+        payload = await _build_connections_response(db, weather_svc.apartment)
+        payload["enabled"] = True
+        return payload
+
+    @app.put("/api/connections/{connection_id:path}/sensors")
+    async def api_put_connection_sensors(
+        connection_id: str,
+        payload: ConnectionSensorsBody,
+    ) -> dict[str, Any]:
+        weather_svc: WeatherService | None = app.state.weather
+        if weather_svc is None or weather_svc.apartment is None:
+            raise HTTPException(
+                status_code=503, detail="Apartment layout not available"
+            )
+        hub_id, _specs = await _ensure_layout_connections(db, weather_svc.apartment)
+        try:
+            parse_connection_id(connection_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        updated = await db.set_connection_sensors(
+            connection_id,
+            list(payload.sensor_ids or []),
+            hub_id=hub_id,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Unknown connection")
+        full = await _build_connections_response(db, weather_svc.apartment)
+        for conn in full.get("connections") or []:
+            if conn.get("id") == updated.get("connection_id"):
+                return conn
+        raise HTTPException(status_code=404, detail="Unknown connection")
+
+    @app.post("/api/connections/{connection_id:path}/force")
+    async def api_force_connection(
+        connection_id: str,
+        payload: ConnectionForceBody,
+    ) -> dict[str, Any]:
+        weather_svc: WeatherService | None = app.state.weather
+        if weather_svc is None or weather_svc.apartment is None:
+            raise HTTPException(
+                status_code=503, detail="Apartment layout not available"
+            )
+        await _ensure_layout_connections(db, weather_svc.apartment)
+        state = str(payload.state or "").strip().lower()
+        if state not in ("open", "closed"):
+            raise HTTPException(
+                status_code=400, detail="state must be 'open' or 'closed'"
+            )
+        try:
+            updated = await db.force_connection_state(connection_id, state)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Unknown connection")
+        full = await _build_connections_response(db, weather_svc.apartment)
+        for conn in full.get("connections") or []:
+            if conn.get("id") == updated.get("connection_id"):
+                return conn
+        raise HTTPException(status_code=404, detail="Unknown connection")
+
+    @app.post("/api/connections/{connection_id:path}/unlock")
+    async def api_unlock_connection(connection_id: str) -> dict[str, Any]:
+        weather_svc: WeatherService | None = app.state.weather
+        if weather_svc is None or weather_svc.apartment is None:
+            raise HTTPException(
+                status_code=503, detail="Apartment layout not available"
+            )
+        await _ensure_layout_connections(db, weather_svc.apartment)
+        updated = await db.clear_connection_force(connection_id)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Unknown connection")
+        full = await _build_connections_response(db, weather_svc.apartment)
+        for conn in full.get("connections") or []:
+            if conn.get("id") == updated.get("connection_id"):
+                return conn
+        raise HTTPException(status_code=404, detail="Unknown connection")
 
     @app.get("/api/doors")
     async def api_doors() -> dict[str, Any]:

@@ -92,6 +92,19 @@
   const networkTempScaleEl = document.getElementById("network-temp-scale");
   const networkTempScaleLoEl = document.getElementById("network-temp-scale-lo");
   const networkTempScaleHiEl = document.getElementById("network-temp-scale-hi");
+  const networkEdgePanelEl = document.getElementById("network-edge-panel");
+  const networkEdgePanelTitleEl = document.getElementById(
+    "network-edge-panel-title"
+  );
+  const networkEdgePanelMetaEl = document.getElementById(
+    "network-edge-panel-meta"
+  );
+  const networkEdgePanelActionsEl = document.getElementById(
+    "network-edge-panel-actions"
+  );
+  const networkEdgePanelCloseBtn = document.getElementById(
+    "network-edge-panel-close"
+  );
   const sectionSvgEl = document.getElementById("section-svg");
   const sectionMetaEl = document.getElementById("section-meta");
   const sectionTempScaleEl = document.getElementById("section-temp-scale");
@@ -391,8 +404,10 @@
   let customUntil = null;
   let devices = [];
   let taxonomyData = { zones: [], heights: [], rooms: [], contact_kinds: [] };
-  /** @type {Array<{sensor_id:string,name:string,state:string,ts:number,room?:string,kind?:string}>} */
+  /** @type {Array<{sensor_id:string,name:string,state:string,ts:number,room?:string,kind?:string,connection_id?:string}>} */
   let doorSensors = [];
+  /** @type {Array<Record<string, any>>} */
+  let apartmentConnections = [];
   let doorBeepEnabled = localStorage.getItem(DOOR_BEEP_KEY) === "1";
   /** @type {Map<string, string>} sensor_id → last seen state, to detect transitions */
   const doorBeepSeenStates = new Map();
@@ -4550,85 +4565,94 @@
     renderCategoryFilterRow(compareRoomFiltersEl, "room", taxonomyData.rooms);
   }
 
-  function makeDoorSelect(sensor, field, options) {
-    const select = document.createElement("select");
-    select.className = "cat-select";
-    select.dataset.sensorId = sensor.sensor_id;
-    select.dataset.field = field;
-    const empty = document.createElement("option");
-    empty.value = "";
-    empty.textContent = "—";
-    select.appendChild(empty);
-    for (const opt of options || []) {
-      const option = document.createElement("option");
-      option.value = opt.id;
-      option.textContent = opt.label;
-      select.appendChild(option);
-    }
-    select.value = sensor[field] || "";
-    select.addEventListener("click", (ev) => ev.stopPropagation());
-    select.addEventListener("mousedown", (ev) => ev.stopPropagation());
-    select.addEventListener("change", async (ev) => {
-      ev.stopPropagation();
-      const value = select.value === "" ? null : select.value;
-      select.disabled = true;
-      try {
-        const res = await fetch(
-          `/api/doors/${encodeURIComponent(sensor.sensor_id)}`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ [field]: value }),
-          }
-        );
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.detail || `HTTP ${res.status}`);
-        }
-        const updated = await res.json();
-        const idx = doorSensors.findIndex(
-          (d) => d.sensor_id === sensor.sensor_id
-        );
-        if (idx >= 0) {
-          doorSensors[idx] = { ...doorSensors[idx], ...updated };
-        }
-        updateDoorsTable();
-        updateWindowBanner(null).catch((err) => console.warn(err));
-      } catch (err) {
-        select.value = sensor[field] || "";
-        if (doorsStatus) {
-          doorsStatus.hidden = false;
-          doorsStatus.textContent = `Save failed: ${err.message}`;
-        }
-      } finally {
-        select.disabled = false;
-      }
-    });
-    return select;
+  function connectionKindLabel(kind) {
+    const key = `overview.connKind.${kind || "door"}`;
+    const label = t(key);
+    return label === key ? String(kind || "door") : label;
   }
 
-  async function applyDoorSensorUpdate(sensor, updated) {
-    const idx = doorSensors.findIndex((d) => d.sensor_id === sensor.sensor_id);
-    if (idx >= 0) {
-      doorSensors[idx] = { ...doorSensors[idx], ...updated };
-    }
+  function applyConnectionsPayload(data) {
+    apartmentConnections = Array.isArray(data.connections) ? data.connections : [];
+    doorSensors = Array.isArray(data.sensors) ? data.sensors : [];
     evaluateDoorBeeps(doorSensors);
     updateDoorsTable();
-    if (selectedDoorId === sensor.sensor_id) {
-      const next = idx >= 0 ? doorSensors[idx] : { ...sensor, ...updated };
-      loadDoorLog(next).catch((err) => console.warn(err));
-    }
     updateWindowBanner(null).catch((err) => console.warn(err));
   }
 
-  async function forceDoorState(sensor, state) {
+  async function applyConnectionUpdate(updated) {
+    const id = updated && (updated.id || updated.connection_id);
+    if (!id) return;
+    const idx = apartmentConnections.findIndex(
+      (c) => (c.id || c.connection_id) === id
+    );
+    if (idx >= 0) {
+      apartmentConnections[idx] = { ...apartmentConnections[idx], ...updated };
+    } else {
+      apartmentConnections.push(updated);
+    }
+    // Keep doorSensors in sync with linked sensors on this connection.
+    const linked = new Map(
+      (updated.sensors || []).map((s) => [s.sensor_id, s])
+    );
+    doorSensors = doorSensors.map((s) => {
+      if (linked.has(s.sensor_id)) {
+        return { ...s, ...linked.get(s.sensor_id), connection_id: id };
+      }
+      if (s.connection_id === id && !linked.has(s.sensor_id)) {
+        const next = { ...s };
+        delete next.connection_id;
+        return next;
+      }
+      return s;
+    });
+    for (const s of linked.values()) {
+      if (!doorSensors.some((d) => d.sensor_id === s.sensor_id)) {
+        doorSensors.push({ ...s, connection_id: id });
+      }
+    }
+    evaluateDoorBeeps(doorSensors);
+    updateDoorsTable();
+    updateWindowBanner(null).catch((err) => console.warn(err));
+  }
+
+  async function saveConnectionSensors(connection, sensorIds) {
     if (doorsStatus) {
       doorsStatus.hidden = true;
       doorsStatus.textContent = "";
     }
     try {
       const res = await fetch(
-        `/api/doors/${encodeURIComponent(sensor.sensor_id)}/force`,
+        `/api/connections/${encodeURIComponent(connection.id || connection.connection_id)}/sensors`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sensor_ids: sensorIds }),
+        }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      await loadDoors();
+    } catch (err) {
+      if (doorsStatus) {
+        doorsStatus.hidden = false;
+        doorsStatus.textContent = t("overview.connSensorsSaveFailed", {
+          error: err.message,
+        });
+      }
+      await loadDoors();
+    }
+  }
+
+  async function forceConnectionState(connection, state) {
+    if (doorsStatus) {
+      doorsStatus.hidden = true;
+      doorsStatus.textContent = "";
+    }
+    try {
+      const res = await fetch(
+        `/api/connections/${encodeURIComponent(connection.id || connection.connection_id)}/force`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -4639,7 +4663,7 @@
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
       }
-      await applyDoorSensorUpdate(sensor, await res.json());
+      await applyConnectionUpdate(await res.json());
     } catch (err) {
       if (doorsStatus) {
         doorsStatus.hidden = false;
@@ -4650,21 +4674,21 @@
     }
   }
 
-  async function unlockDoorState(sensor) {
+  async function unlockConnectionState(connection) {
     if (doorsStatus) {
       doorsStatus.hidden = true;
       doorsStatus.textContent = "";
     }
     try {
       const res = await fetch(
-        `/api/doors/${encodeURIComponent(sensor.sensor_id)}/unlock`,
+        `/api/connections/${encodeURIComponent(connection.id || connection.connection_id)}/unlock`,
         { method: "POST" }
       );
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${res.status}`);
       }
-      await applyDoorSensorUpdate(sensor, await res.json());
+      await applyConnectionUpdate(await res.json());
     } catch (err) {
       if (doorsStatus) {
         doorsStatus.hidden = false;
@@ -4675,23 +4699,173 @@
     }
   }
 
-  function makeDoorStateCell(sensor) {
+  function connectionIdForPair(a, b) {
+    const left = String(a || "").trim().toLowerCase();
+    const right = String(b || "").trim().toLowerCase();
+    if (!left || !right || left === right) return "";
+    return left < right ? `${left}|${right}` : `${right}|${left}`;
+  }
+
+  function hideNetworkEdgePanel() {
+    if (networkEdgePanelEl) networkEdgePanelEl.hidden = true;
+  }
+
+  async function refreshMapAfterConnectionChange() {
+    hideNetworkEdgePanel();
+    try {
+      await loadNetwork();
+    } catch (err) {
+      console.warn(err);
+    }
+    if (currentView === "overview") {
+      loadDoors().catch((err) => console.warn(err));
+    }
+    updateWindowBanner(null).catch((err) => console.warn(err));
+  }
+
+  async function forceNetworkConnection(connectionId, state) {
+    const res = await fetch(
+      `/api/connections/${encodeURIComponent(connectionId)}/force`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state }),
+      }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    await refreshMapAfterConnectionChange();
+  }
+
+  async function unlockNetworkConnection(connectionId) {
+    const res = await fetch(
+      `/api/connections/${encodeURIComponent(connectionId)}/unlock`,
+      { method: "POST" }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    await refreshMapAfterConnectionChange();
+  }
+
+  function showNetworkEdgePanel(info, clientX, clientY) {
+    if (
+      !networkEdgePanelEl ||
+      !networkEdgePanelTitleEl ||
+      !networkEdgePanelMetaEl ||
+      !networkEdgePanelActionsEl
+    ) {
+      return;
+    }
+    const cid = info.connectionId;
+    if (!cid) return;
+    networkEdgePanelTitleEl.textContent = info.title || cid;
+    const opening = info.opening || "unknown";
+    const bits = [
+      t("map.edge.state", { state: opening }),
+      info.forced
+        ? t("map.edge.locked")
+        : t("map.edge.unlocked"),
+    ];
+    if (info.source) bits.push(String(info.source));
+    if (info.reported && info.forced && info.reported !== opening) {
+      bits.push(t("map.edge.reported", { state: info.reported }));
+    }
+    if (info.contacts) bits.push(info.contacts);
+    networkEdgePanelMetaEl.textContent = bits.filter(Boolean).join(" · ");
+
+    networkEdgePanelActionsEl.replaceChildren();
+    const mkBtn = (label, className, onClick) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `door-force-btn ${className || ""}`;
+      btn.textContent = label;
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        onClick().catch((err) => {
+          if (networkStatusEl) {
+            networkStatusEl.textContent = t("overview.doorLockFailed", {
+              error: err.message,
+            });
+          }
+        });
+      });
+      return btn;
+    };
+
+    networkEdgePanelActionsEl.appendChild(
+      mkBtn(t("overview.doorForceOpen"), info.forced && opening === "open" ? "is-active" : "", () =>
+        forceNetworkConnection(cid, "open")
+      )
+    );
+    networkEdgePanelActionsEl.appendChild(
+      mkBtn(
+        t("overview.doorForceClosed"),
+        info.forced && opening === "closed" ? "is-active" : "",
+        () => forceNetworkConnection(cid, "closed")
+      )
+    );
+    if (info.forced) {
+      networkEdgePanelActionsEl.appendChild(
+        mkBtn(t("overview.doorUnlock"), "is-active door-lock-btn", () =>
+          unlockNetworkConnection(cid)
+        )
+      );
+    } else if (opening === "open" || opening === "closed") {
+      networkEdgePanelActionsEl.appendChild(
+        mkBtn(t("overview.doorLock"), "door-lock-btn", () =>
+          forceNetworkConnection(cid, opening)
+        )
+      );
+    }
+
+    networkEdgePanelEl.hidden = false;
+    const wrap = networkCanvasWrapEl;
+    if (wrap) {
+      const rect = wrap.getBoundingClientRect();
+      const left = Math.min(
+        Math.max(8, clientX - rect.left + wrap.scrollLeft - 20),
+        Math.max(8, wrap.clientWidth - 260)
+      );
+      const top = Math.min(
+        Math.max(8, clientY - rect.top + wrap.scrollTop + 12),
+        Math.max(8, wrap.clientHeight - 140)
+      );
+      networkEdgePanelEl.style.left = `${left}px`;
+      networkEdgePanelEl.style.top = `${top}px`;
+    }
+  }
+
+  function wireNetworkEdgeClick(hitEl, info) {
+    hitEl.style.cursor = "pointer";
+    hitEl.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      showNetworkEdgePanel(info, ev.clientX, ev.clientY);
+    });
+  }
+
+  function makeConnectionStateCell(connection) {
     const wrap = document.createElement("div");
     wrap.className = "door-state-cell";
-    const st = sensor.state || "—";
+    const st = connection.state || "—";
     const label = document.createElement("span");
     label.className = `door-state door-state-${st}`;
     label.textContent = st;
     wrap.appendChild(label);
 
-    if (sensor.forced) {
+    if (connection.forced) {
       const badge = document.createElement("span");
       badge.className = "door-forced-badge";
       badge.textContent = t("overview.doorLocked");
       label.appendChild(document.createTextNode(" "));
       label.appendChild(badge);
 
-      const live = String(sensor.reported_state || "").toLowerCase();
+      const live = String(connection.reported_state || "").toLowerCase();
       if (live === "open" || live === "closed") {
         const liveEl = document.createElement("span");
         if (live !== st) {
@@ -4714,12 +4888,12 @@
     const lockBtn = document.createElement("button");
     lockBtn.type = "button";
     lockBtn.className = "door-force-btn door-lock-btn";
-    if (sensor.forced) {
+    if (connection.forced) {
       lockBtn.classList.add("is-active");
       lockBtn.textContent = t("overview.doorUnlock");
       lockBtn.addEventListener("click", (ev) => {
         ev.stopPropagation();
-        unlockDoorState(sensor).catch((err) => console.warn(err));
+        unlockConnectionState(connection).catch((err) => console.warn(err));
       });
     } else {
       lockBtn.textContent = t("overview.doorLock");
@@ -4727,7 +4901,7 @@
       lockBtn.addEventListener("click", (ev) => {
         ev.stopPropagation();
         if (st !== "open" && st !== "closed") return;
-        forceDoorState(sensor, st).catch((err) => console.warn(err));
+        forceConnectionState(connection, st).catch((err) => console.warn(err));
       });
     }
     actions.appendChild(lockBtn);
@@ -4739,14 +4913,14 @@
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "door-force-btn";
-      if (sensor.forced && sensor.state === value) {
+      if (connection.forced && connection.state === value) {
         btn.classList.add("is-active");
       }
       btn.textContent = t(key);
       btn.title = t("overview.doorForceSetTitle");
       btn.addEventListener("click", (ev) => {
         ev.stopPropagation();
-        forceDoorState(sensor, value).catch((err) => console.warn(err));
+        forceConnectionState(connection, value).catch((err) => console.warn(err));
       });
       actions.appendChild(btn);
     }
@@ -4754,16 +4928,129 @@
     return wrap;
   }
 
+  function makeConnectionSensorsCell(connection) {
+    const wrap = document.createElement("div");
+    wrap.className = "conn-sensors-cell";
+    const cid = connection.id || connection.connection_id;
+    const assigned = new Set(connection.sensor_ids || []);
+    const details = document.createElement("details");
+    details.className = "conn-sensors-picker";
+    const summary = document.createElement("summary");
+    const n = assigned.size;
+    summary.textContent = n
+      ? t("overview.connSensorsCount", { n })
+      : t("overview.connSensorsNone");
+    details.appendChild(summary);
+
+    const list = document.createElement("div");
+    list.className = "conn-sensors-list";
+
+    const linkedFirst = [...doorSensors].sort((a, b) => {
+      const aOn = a.connection_id === cid || assigned.has(a.sensor_id) ? 0 : 1;
+      const bOn = b.connection_id === cid || assigned.has(b.sensor_id) ? 0 : 1;
+      if (aOn !== bOn) return aOn - bOn;
+      return String(a.name || a.sensor_id).localeCompare(
+        String(b.name || b.sensor_id),
+        undefined,
+        { sensitivity: "base" }
+      );
+    });
+
+    for (const sensor of linkedFirst) {
+      const sid = sensor.sensor_id;
+      const other =
+        sensor.connection_id && sensor.connection_id !== cid
+          ? sensor.connection_id
+          : null;
+      const label = document.createElement("label");
+      label.className = "conn-sensor-opt";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = sid;
+      input.checked = assigned.has(sid);
+      if (other) {
+        input.title = other;
+      }
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "conn-sensor-opt-name";
+      nameSpan.textContent = sensor.name || sid;
+      label.appendChild(input);
+      label.appendChild(nameSpan);
+      if (other) {
+        const meta = document.createElement("span");
+        meta.className = "conn-sensor-opt-meta";
+        meta.textContent = other;
+        label.appendChild(meta);
+      }
+      const logBtn = document.createElement("button");
+      logBtn.type = "button";
+      logBtn.className = "door-sensor-link conn-sensor-log";
+      logBtn.textContent = "log";
+      logBtn.title = t("overview.doorLogTitle");
+      logBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        loadDoorLog(sensor).catch((err) => console.warn(err));
+      });
+      label.appendChild(logBtn);
+      list.appendChild(label);
+    }
+    if (!linkedFirst.length) {
+      const empty = document.createElement("p");
+      empty.className = "overview-hint";
+      empty.textContent = t("overview.noDoors");
+      list.appendChild(empty);
+    }
+
+    const applyBtn = document.createElement("button");
+    applyBtn.type = "button";
+    applyBtn.className = "door-force-btn conn-sensors-apply";
+    applyBtn.textContent = t("overview.connSensorsSave");
+    applyBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const ids = [...list.querySelectorAll('input[type="checkbox"]:checked')].map(
+        (el) => el.value
+      );
+      details.open = false;
+      saveConnectionSensors(connection, ids).catch((err) => console.warn(err));
+    });
+    list.appendChild(applyBtn);
+    details.appendChild(list);
+    wrap.appendChild(details);
+
+    // Quick chips for assigned sensors (open log).
+    if (n) {
+      const chips = document.createElement("div");
+      chips.className = "conn-sensor-chips";
+      for (const sensor of connection.sensors || []) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "door-sensor-link conn-sensor-chip";
+        if (selectedDoorId && sensor.sensor_id === selectedDoorId) {
+          btn.classList.add("is-active");
+        }
+        btn.textContent = sensor.name || sensor.sensor_id;
+        btn.addEventListener("click", () => {
+          loadDoorLog(sensor).catch((err) => console.warn(err));
+        });
+        chips.appendChild(btn);
+      }
+      wrap.appendChild(chips);
+    }
+    return wrap;
+  }
+
   function updateDoorsTable() {
     if (!doorsBody) return;
     doorsBody.innerHTML = "";
-    if (!doorSensors.length) {
+    if (!apartmentConnections.length) {
       doorsBody.innerHTML = `<tr><td colspan="5" class="overview-empty">${escapeHtml(
-        t("overview.noDoorsYet")
+        t("overview.noConnections")
       )}</td></tr>`;
       if (doorsStatus) {
         doorsStatus.hidden = false;
-        doorsStatus.textContent = t("overview.waitingDoors");
+        doorsStatus.textContent = t("overview.waitingConnections");
       }
       if (doorLogEl) doorLogEl.hidden = true;
       return;
@@ -4772,44 +5059,33 @@
       doorsStatus.hidden = true;
       doorsStatus.textContent = "";
     }
-    const kinds = taxonomyData.contact_kinds || [];
-    const rooms = taxonomyData.rooms || [];
-    for (const sensor of doorSensors) {
+    for (const connection of apartmentConnections) {
       const tr = document.createElement("tr");
-      if (selectedDoorId && sensor.sensor_id === selectedDoorId) {
-        tr.classList.add("is-selected");
-      }
       const nameTd = document.createElement("td");
-      const nameBtn = document.createElement("button");
-      nameBtn.type = "button";
-      nameBtn.className = "door-sensor-link";
-      if (selectedDoorId && sensor.sensor_id === selectedDoorId) {
-        nameBtn.classList.add("is-active");
-      }
-      nameBtn.innerHTML = `
-        <span class="overview-name">${escapeHtml(sensor.name || sensor.sensor_id)}</span>
-        <span class="overview-meta">${escapeHtml(sensor.sensor_id)}</span>
-      `;
-      nameBtn.addEventListener("click", () => {
-        loadDoorLog(sensor).catch((err) => console.warn(err));
-      });
-      nameTd.appendChild(nameBtn);
-
-      const stateTd = document.createElement("td");
-      stateTd.appendChild(makeDoorStateCell(sensor));
+      nameTd.innerHTML =
+        `<span class="overview-name">${escapeHtml(
+          `${connection.label_a || connection.room_a} ↔ ${
+            connection.label_b || connection.room_b
+          }`
+        )}</span>` +
+        `<span class="overview-meta">${escapeHtml(
+          connection.id || connection.connection_id || ""
+        )}</span>`;
 
       const kindTd = document.createElement("td");
-      kindTd.className = "cat-cell";
-      kindTd.appendChild(makeDoorSelect(sensor, "kind", kinds));
+      kindTd.textContent = connectionKindLabel(connection.kind);
 
-      const roomTd = document.createElement("td");
-      roomTd.className = "cat-cell";
-      roomTd.appendChild(makeDoorSelect(sensor, "room", rooms));
+      const sensorsTd = document.createElement("td");
+      sensorsTd.className = "conn-sensors-td";
+      sensorsTd.appendChild(makeConnectionSensorsCell(connection));
+
+      const stateTd = document.createElement("td");
+      stateTd.appendChild(makeConnectionStateCell(connection));
 
       const timeTd = document.createElement("td");
-      timeTd.textContent = fmtTime(sensor.ts);
+      timeTd.textContent = connection.ts ? fmtTime(connection.ts) : "—";
 
-      tr.append(nameTd, stateTd, kindTd, roomTd, timeTd);
+      tr.append(nameTd, kindTd, sensorsTd, stateTd, timeTd);
       doorsBody.appendChild(tr);
     }
   }
@@ -4854,7 +5130,6 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const events = Array.isArray(data.events) ? data.events.slice() : [];
-      // Newest first for a log view.
       events.reverse();
       if (!events.length) {
         doorLogBodyEl.innerHTML =
@@ -4885,16 +5160,14 @@
 
   async function loadDoors() {
     try {
-      const res = await fetch("/api/doors");
-      if (!res.ok) throw new Error(`doors HTTP ${res.status}`);
+      const res = await fetch("/api/connections");
+      if (!res.ok) throw new Error(`connections HTTP ${res.status}`);
       const data = await res.json();
-      doorSensors = data.sensors || [];
-      evaluateDoorBeeps(doorSensors);
-      updateDoorsTable();
+      applyConnectionsPayload(data);
     } catch (err) {
       if (doorsBody) {
         doorsBody.innerHTML = `<tr><td colspan="5" class="overview-empty">${escapeHtml(
-          t("overview.doorsUnavailable")
+          t("overview.connectionsUnavailable")
         )}</td></tr>`;
       }
       if (doorsStatus) {
@@ -7034,9 +7307,37 @@
       if (!pa || !pb) continue;
       const a = toXY(pa);
       const b = toXY(pb);
-      const line = document.createElementNS(NS, "line");
       const kind = edge.kind || "door";
       const opening = edge.opening || "unknown";
+      const forced = !!edge.forced;
+      const connectionId =
+        edge.connection_id ||
+        (kind === "door" || kind === "wall_partial"
+          ? connectionIdForPair(edge.a, edge.b)
+          : "");
+
+      if (kind === "door" || kind === "wall_partial") {
+        const hit = document.createElementNS(NS, "line");
+        hit.setAttribute("x1", String(a.x));
+        hit.setAttribute("y1", String(a.y));
+        hit.setAttribute("x2", String(b.x));
+        hit.setAttribute("y2", String(b.y));
+        hit.setAttribute("class", "network-edge-hit");
+        wireNetworkEdgeClick(hit, {
+          connectionId,
+          title: `${edge.a} ↔ ${edge.b}`,
+          opening,
+          forced,
+          source: edge.opening_source || "",
+          reported: edge.reported_opening || "",
+          contacts: (edge.contacts || [])
+            .map((c) => `${c.name || c.sensor_id}: ${c.state || "?"}`)
+            .join(", "),
+        });
+        gEdges.appendChild(hit);
+      }
+
+      const line = document.createElementNS(NS, "line");
       line.setAttribute("x1", String(a.x));
       line.setAttribute("y1", String(a.y));
       line.setAttribute("x2", String(b.x));
@@ -7045,7 +7346,7 @@
         "class",
         `network-edge network-edge-${kind}${
           kind === "door" || kind === "wall_partial" ? ` ${opening}` : ""
-        }${
+        }${forced ? " is-locked" : ""}${
           sectionEdgeKeys.has(`${edge.a}|${edge.b}`)
             ? " is-section-path"
             : ""
@@ -7062,9 +7363,13 @@
         `${edge.a} ↔ ${edge.b} (${kind}` +
         (kind === "wall" ? "" : `, ${opening}`) +
         `)` +
+        (forced ? " · locked" : "") +
         (src ? ` · ${src}` : "") +
         (delta ? ` · ${delta}` : "") +
-        (contactNames ? ` — ${contactNames}` : "");
+        (contactNames ? ` — ${contactNames}` : "") +
+        (kind === "door" || kind === "wall_partial"
+          ? " — click to set open/closed"
+          : "");
       line.appendChild(title);
       gEdges.appendChild(line);
 
@@ -7074,7 +7379,10 @@
         const lab = document.createElementNS(NS, "text");
         lab.setAttribute("x", String(midX));
         lab.setAttribute("y", String(midY - 6));
-        lab.setAttribute("class", "network-edge-label");
+        lab.setAttribute(
+          "class",
+          `network-edge-label${forced ? " is-locked" : ""}`
+        );
         let text;
         if (src === "temp_coupling" && edge.temp_delta_max_c != null) {
           const tag =
@@ -7090,6 +7398,7 @@
         } else {
           text = opening;
         }
+        if (forced) text = `${text} · locked`;
         lab.textContent = text;
         gLabels.appendChild(lab);
       }
@@ -7151,7 +7460,30 @@
         extXY[room.id] = exy;
         const xy = toXY(pos[room.id]);
         const wState = room.window_state;
+        const wForced = !!room.window_forced;
+        const outdoorId =
+          room.outdoor_connection_id ||
+          connectionIdForPair(room.id, "outdoor");
         if (wState === "open") openWindows += 1;
+
+        const hit = document.createElementNS(NS, "line");
+        hit.setAttribute("x1", String(xy.x));
+        hit.setAttribute("y1", String(xy.y));
+        hit.setAttribute("x2", String(exy.x));
+        hit.setAttribute("y2", String(exy.y));
+        hit.setAttribute("class", "network-edge-hit");
+        wireNetworkEdgeClick(hit, {
+          connectionId: outdoorId,
+          title: `${room.label || room.id} ↔ outdoor`,
+          opening: wState || "unknown",
+          forced: wForced,
+          source: wForced ? "manual" : wState ? "contact" : "",
+          contacts: (room.contacts || [])
+            .map((c) => `${c.name || c.sensor_id}: ${c.state || "?"}`)
+            .join(", "),
+        });
+        gEdges.appendChild(hit);
+
         const line = document.createElementNS(NS, "line");
         line.setAttribute("x1", String(xy.x));
         line.setAttribute("y1", String(xy.y));
@@ -7159,14 +7491,34 @@
         line.setAttribute("y2", String(exy.y));
         line.setAttribute(
           "class",
-          `network-edge network-edge-exterior ${wState || "unknown"}`
+          `network-edge network-edge-exterior ${wState || "unknown"}${
+            wForced ? " is-locked" : ""
+          }`
         );
         const title = document.createElementNS(NS, "title");
         title.textContent =
           `${room.label || room.id} → façade ${group.orients.join(", ").toUpperCase()}` +
-          (wState ? ` — window ${wState}` : "");
+          (wState ? ` — window ${wState}` : "") +
+          (wForced ? " · locked" : "") +
+          " — click to set open/closed";
         line.appendChild(title);
         gEdges.appendChild(line);
+
+        if (wForced || wState) {
+          const midX = (xy.x + exy.x) / 2;
+          const midY = (xy.y + exy.y) / 2;
+          const lab = document.createElementNS(NS, "text");
+          lab.setAttribute("x", String(midX));
+          lab.setAttribute("y", String(midY - 6));
+          lab.setAttribute(
+            "class",
+            `network-edge-label${wForced ? " is-locked" : ""}`
+          );
+          lab.textContent = wForced
+            ? `${wState || "?"} · locked`
+            : String(wState);
+          gLabels.appendChild(lab);
+        }
       }
 
       const bands = networkFacadeTempBands(group.rooms);
@@ -7539,6 +7891,46 @@
       }
     }
 
+    const presencePeople = ((data.presence || {}).people || []).filter(
+      (p) => p && p.room_id && roomXY[p.room_id]
+    );
+    /** @type {Record<string, Array<Record<string, any>>>} */
+    const presenceByRoom = {};
+    for (const person of presencePeople) {
+      const rid = String(person.room_id);
+      if (!presenceByRoom[rid]) presenceByRoom[rid] = [];
+      presenceByRoom[rid].push(person);
+    }
+    const gPresence = document.createElementNS(NS, "g");
+    gPresence.setAttribute("class", "network-presence");
+    for (const [rid, people] of Object.entries(presenceByRoom)) {
+      const xy = roomXY[rid];
+      if (!xy) continue;
+      people.forEach((person, idx) => {
+        const ox = (idx - (people.length - 1) / 2) * 18;
+        const cx = xy.x + ROOM_W / 2 - 14 + ox;
+        const cy = xy.y - ROOM_H / 2 + 14;
+        const marker = document.createElementNS(NS, "circle");
+        marker.setAttribute("cx", String(cx));
+        marker.setAttribute("cy", String(cy));
+        marker.setAttribute("r", "9");
+        marker.setAttribute("class", "network-presence-dot");
+        const title = document.createElementNS(NS, "title");
+        const raw = person.room_raw ? ` (${person.room_raw})` : "";
+        const conf = person.confidence ? ` · ${person.confidence}` : "";
+        title.textContent = `${person.label || person.id} here${raw}${conf}`;
+        marker.appendChild(title);
+        gPresence.appendChild(marker);
+        const initial = document.createElementNS(NS, "text");
+        initial.setAttribute("x", String(cx));
+        initial.setAttribute("y", String(cy + 3.5));
+        initial.setAttribute("class", "network-presence-initial");
+        const label = String(person.label || person.id || "?").trim();
+        initial.textContent = label ? label.charAt(0).toUpperCase() : "?";
+        gPresence.appendChild(initial);
+      });
+    }
+
     function resolveFlowPoint(id) {
       if (!id) return null;
       if (String(id).startsWith("ext:")) {
@@ -7619,6 +8011,7 @@
     networkSvgEl.appendChild(gEdges);
     networkSvgEl.appendChild(gFlows);
     networkSvgEl.appendChild(gNodes);
+    networkSvgEl.appendChild(gPresence);
     networkSvgEl.appendChild(gLabels);
 
     const outdoor = data.outdoor || {};
@@ -7661,11 +8054,21 @@
         })
         .join(" → ");
       const pathBit = pathLabels ? ` · cut ${pathLabels}` : "";
+      const presenceBit = presencePeople.length
+        ? ` · ${presencePeople
+            .map((p) => {
+              const room = rooms.find((r) => r.id === p.room_id);
+              const where = (room && (room.label || room.id)) || p.room_id;
+              return `${p.label || p.id} @ ${where}`;
+            })
+            .join(", ")}`
+        : "";
       networkMetaEl.textContent =
         `${rooms.length} rooms · ${edges.length} links` +
         (openDoors ? ` · ${openDoors} contact open` : "") +
         (coupledLinks ? ` · ${coupledLinks} thermally coupled` : "") +
         (openWindows ? ` · ${openWindows} window(s) open` : "") +
+        presenceBit +
         outBit +
         coupleBit +
         acBit +
@@ -11726,6 +12129,25 @@
       applyNetworkViewBox();
     });
   }
+  if (networkEdgePanelCloseBtn) {
+    networkEdgePanelCloseBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      hideNetworkEdgePanel();
+    });
+  }
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") hideNetworkEdgePanel();
+  });
+  if (networkCanvasWrapEl) {
+    networkCanvasWrapEl.addEventListener("click", (ev) => {
+      if (!networkEdgePanelEl || networkEdgePanelEl.hidden) return;
+      if (networkEdgePanelEl.contains(ev.target)) return;
+      // Clicks on SVG edge hits stopPropagation; bare canvas closes the panel.
+      if (ev.target === networkSvgEl || ev.target === networkCanvasWrapEl) {
+        hideNetworkEdgePanel();
+      }
+    });
+  }
   networkMetricButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
       setNetworkMapMetric(btn.dataset.mapMetric);
@@ -13151,6 +13573,82 @@
     // Portal lives on plain HTTP port 80 of the same host, regardless of
     // which protocol/port this dashboard itself was reached on.
     homeBtn.href = `http://${window.location.hostname}/`;
+  }
+
+  const navUpdateBtn = document.getElementById("nav-update-btn");
+  let gitUpdateBehind = 0;
+
+  function setNavUpdateVisible(status) {
+    if (!navUpdateBtn) return;
+    const behind = Number(status && status.behind) || 0;
+    const ready = !!(status && status.update_available && behind > 0);
+    gitUpdateBehind = ready ? behind : 0;
+    navUpdateBtn.hidden = !ready;
+    if (!ready) return;
+    navUpdateBtn.textContent = t("nav.updateReady", { n: behind });
+    navUpdateBtn.title =
+      (status && status.message) || t("nav.updateTitle");
+  }
+
+  async function checkGitUpdateStatus({ fetchRemote = true } = {}) {
+    if (!navUpdateBtn) return;
+    try {
+      const res = await fetch(
+        `/api/git/status?fetch=${fetchRemote ? "1" : "0"}`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.busy) return;
+      setNavUpdateVisible(data);
+    } catch (err) {
+      console.warn("[git] status check failed", err);
+    }
+  }
+
+  if (navUpdateBtn) {
+    navUpdateBtn.addEventListener("click", async () => {
+      const n = gitUpdateBehind || 1;
+      if (!window.confirm(t("nav.updateConfirm", { n }))) return;
+      navUpdateBtn.disabled = true;
+      const prevLabel = navUpdateBtn.textContent;
+      navUpdateBtn.textContent = t("nav.updatePulling");
+      try {
+        const res = await fetch("/api/git/pull", { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const detail =
+            typeof data.detail === "string"
+              ? data.detail
+              : data.message || `HTTP ${res.status}`;
+          throw new Error(detail);
+        }
+        if (data.changed) {
+          // Python code needs a process restart; static assets need a hard reload.
+          try {
+            await fetch("/api/restart?target=ui", { method: "POST" });
+          } catch (_) {
+            /* continue to wait/reload anyway */
+          }
+          const ok = await waitForHealth();
+          hardReload();
+          if (!ok) {
+            navUpdateBtn.textContent = prevLabel;
+          }
+          return;
+        }
+        await checkGitUpdateStatus({ fetchRemote: false });
+      } catch (err) {
+        window.alert(t("nav.updateFailed", { error: err.message }));
+        navUpdateBtn.textContent = prevLabel;
+      } finally {
+        navUpdateBtn.disabled = false;
+      }
+    });
+    checkGitUpdateStatus({ fetchRemote: true }).catch((err) => console.warn(err));
+    setInterval(() => {
+      checkGitUpdateStatus({ fetchRemote: true }).catch((err) => console.warn(err));
+    }, 10 * 60 * 1000);
   }
 
   if (gitPullBtn) {
