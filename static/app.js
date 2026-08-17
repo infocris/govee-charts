@@ -123,6 +123,24 @@
   const mapRoomRangeButtons = [
     ...document.querySelectorAll(".map-room-ranges > button[data-map-hours]"),
   ];
+  const mapOverviewChartsEl = document.getElementById("map-overview-charts");
+  const mapOverviewChartsTitleEl = document.getElementById(
+    "map-overview-charts-title"
+  );
+  const mapOverviewChartsMetaEl = document.getElementById(
+    "map-overview-charts-meta"
+  );
+  const mapOverviewChartsStatusEl = document.getElementById(
+    "map-overview-charts-status"
+  );
+  const mapOverviewTempCanvas = document.getElementById(
+    "map-overview-temp-chart"
+  );
+  const mapOverviewRangeButtons = [
+    ...document.querySelectorAll(
+      ".map-overview-ranges > button[data-map-overview-hours]"
+    ),
+  ];
   const networkMetricButtons = [
     ...document.querySelectorAll(".network-metric-ranges > button[data-map-metric]"),
   ];
@@ -141,9 +159,11 @@
   let mapChatModel = "auto";
   let mapChatSessionsLoaded = false;
   const sectionShowSmallEl = document.getElementById("section-show-small");
+  const sectionShowHeightsEl = document.getElementById("section-show-heights");
   const sectionPathClearBtn = document.getElementById("section-path-clear");
   const NETWORK_VB_W = 920;
   const NETWORK_VB_H = 640;
+  let networkLayoutVb = { w: NETWORK_VB_W, h: NETWORK_VB_H };
   const SECTION_VB_W = 960;
   const NETWORK_ZOOM_MIN = 0.6;
   const NETWORK_ZOOM_MAX = 4;
@@ -151,7 +171,7 @@
   // Same viewBox on every screen size means text shrinks a lot more on a
   // narrow phone than the rest of the UI — start pre-zoomed there so
   // room names/temperatures are legible without an extra manual zoom step.
-  let networkZoom = window.innerWidth <= 640 ? 2.2 : 1.1;
+  let networkZoom = window.innerWidth <= 640 ? 2.2 : 1;
   /** @type {{x:number,y:number}} viewBox top-left offset at current zoom */
   let networkPan = { x: 0, y: 0 };
   /** @type {{x:number,y:number}|null} */
@@ -160,11 +180,18 @@
   let networkMapMetric = "temp";
   /** Include bathroom / WC (area < 3.5 m²) in the cross-section. */
   let sectionShowSmall = false;
+  /** Show cm axis + sensor height on open-room cross-section labels. */
+  let sectionShowHeights = true;
   /** Ordered room ids clicked on the topology graph (section waypoints). */
   let sectionWaypoints = [];
   /** Room id selected on the map for temperature charts. */
   let selectedMapRoomId = null;
   let mapRoomHours = 24;
+  let mapOverviewHours = 24;
+  /** @type {import('chart.js').Chart | null} */
+  let mapOverviewTempChart = null;
+  let mapOverviewBusy = false;
+  let mapOverviewGen = 0;
   /** @type {import('chart.js').Chart | null} */
   let mapRoomTempChart = null;
   /** Chart.js instance embedded in the cross-section room volume. */
@@ -1078,6 +1105,12 @@
           facadeStatusEl.textContent = `Error: ${err.message}`;
         }
       });
+    } else if (currentView === "network") {
+      loadMapOverviewChart().catch((err) => {
+        if (mapOverviewChartsStatusEl) {
+          mapOverviewChartsStatusEl.textContent = `Error: ${err.message}`;
+        }
+      });
     }
   }
 
@@ -1109,6 +1142,12 @@
       loadFacades().catch((err) => {
         if (facadeStatusEl) {
           facadeStatusEl.textContent = `Error: ${err.message}`;
+        }
+      });
+    } else if (currentView === "network") {
+      loadMapOverviewChart().catch((err) => {
+        if (mapOverviewChartsStatusEl) {
+          mapOverviewChartsStatusEl.textContent = `Error: ${err.message}`;
         }
       });
     }
@@ -5398,6 +5437,11 @@
     networkLastData = data;
     if (data.rooms) apartmentLastRooms = data.rooms;
     renderNetwork(data);
+    loadMapOverviewChart().catch((err) => {
+      if (mapOverviewChartsStatusEl) {
+        mapOverviewChartsStatusEl.textContent = `Error: ${err.message}`;
+      }
+    });
   }
 
   function networkMetricField() {
@@ -5405,8 +5449,11 @@
     return networkMapMetric === "humidity" ? "humidity" : "temperature_c";
   }
 
-  /** Seconds after last reading before a sensor is ignored on the plan / section. */
+  /** Seconds after last reading before a sensor is ignored on the plan / section.
+   *  Per-sensor override: API `stale_after_s` (Tuya HA T&H defaults to 2 h). */
   const NETWORK_SENSOR_STALE_AFTER_S = 900;
+  /** Warning icon next to a temperature when the last sample is older than this. */
+  const TEMP_UPDATE_WARN_AFTER_S = 600;
 
   function networkSensorIsStale(sensor) {
     if (!sensor) return true;
@@ -5420,6 +5467,22 @@
     return Date.now() / 1000 - ts > after;
   }
 
+  function sensorUpdateAgeS(sensor) {
+    const ts = Number(sensor && (sensor.last_reading_ts || sensor.last_seen));
+    if (!Number.isFinite(ts)) return Infinity;
+    return Math.max(0, Date.now() / 1000 - ts);
+  }
+
+  function sensorTempNeedsWarn(sensor) {
+    if (!sensor) return false;
+    return sensorUpdateAgeS(sensor) > TEMP_UPDATE_WARN_AFTER_S;
+  }
+
+  function sensorsTempNeedsWarn(sensors) {
+    const list = (sensors || []).filter(Boolean);
+    return list.some((s) => sensorTempNeedsWarn(s));
+  }
+
   function networkSensorAgeLabel(sensor) {
     const ts = Number(sensor && (sensor.last_reading_ts || sensor.last_seen));
     if (!Number.isFinite(ts)) return "no update time";
@@ -5430,26 +5493,13 @@
     return `${(age / 86400).toFixed(1)} d ago`;
   }
 
-  /** Compact age for cross-section labels (icon already signals stale). */
-  function networkSensorAgeShort(sensor) {
-    const ts = Number(sensor && (sensor.last_reading_ts || sensor.last_seen));
-    if (!Number.isFinite(ts)) return "?";
-    const age = Math.max(0, Date.now() / 1000 - ts);
-    if (age < 90) return `${Math.round(age)}s`;
-    if (age < 3600) return `${Math.round(age / 60)} min`;
-    if (age < 86400) {
-      const h = age / 3600;
-      return h < 10 ? `${h.toFixed(1)} h` : `${Math.round(h)} h`;
-    }
-    const d = age / 86400;
-    return d < 10 ? `${d.toFixed(1)} d` : `${Math.round(d)} d`;
-  }
-
   function networkShowsBothMetrics() {
     return networkMapMetric === "both";
   }
 
   function networkSensorFieldValue(sensor, field) {
+    // Fresh readings only for colours / averages. Stale sensors stay on the
+    // map as a "stale" label (do not hide them or substitute another height).
     if (networkSensorIsStale(sensor)) return NaN;
     const v = Number(sensor && sensor[field]);
     return Number.isFinite(v) ? v : NaN;
@@ -5502,7 +5552,20 @@
       }
       mapRoomTempChart = null;
     }
+    if (mapOverviewTempChart) {
+      try {
+        mapOverviewTempChart.destroy();
+      } catch {
+        /* ignore */
+      }
+      mapOverviewTempChart = null;
+    }
     if (networkLastData) renderNetwork(networkLastData);
+    loadMapOverviewChart().catch((err) => {
+      if (mapOverviewChartsStatusEl) {
+        mapOverviewChartsStatusEl.textContent = `Error: ${err.message}`;
+      }
+    });
     if (selectedMapRoomId && mapRoomChartSeriesCache) {
       paintMapRoomChartDatasets(mapRoomChartSeriesCache.series || []);
       const series = mapRoomChartSeriesCache.series || [];
@@ -5531,7 +5594,7 @@
       dx = Math.min(-0.35, dx);
       dy = Math.max(0.35, dy);
     }
-    // Keep façade nodes close enough to stay inside the padded viewBox.
+    // Keep façade direction stable; pixel gap is applied in networkPlaceGraph.
     return { x: p.x + dx * 0.38, y: p.y + dy * 0.38 };
   }
 
@@ -5546,6 +5609,39 @@
   /** High / low exterior sensors for a façade group (all rooms on that face). */
   function networkFacadeTempBands(groupRooms) {
     return networkFacadeFieldBands(groupRooms, networkMetricField());
+  }
+
+  /**
+   * Ceiling, door lintel, and categorical high/mid/low in cm.
+   * Door frames ≈ 2.0 m in a 2.5 m storey; transom is the pocket above.
+   */
+  function apartmentGeometry(data) {
+    const ceilingM = Math.max(1.5, Number(data && data.ceiling_m) || 2.5);
+    let doorM = Number(data && data.door_height_m);
+    if (!Number.isFinite(doorM) || doorM < 0.8) doorM = 2.0;
+    if (doorM >= ceilingM) doorM = ceilingM * 0.8;
+    const ceilingCm = Math.max(50, Math.round(ceilingM * 100));
+    const doorCm = Math.min(ceilingCm - 5, Math.max(50, Math.round(doorM * 100)));
+    const bands = (data && data.height_bands_cm) || {};
+    const highCm = Number.isFinite(Number(bands.high))
+      ? Math.round(Number(bands.high))
+      : Math.round((doorCm + ceilingCm) / 2);
+    const midCm = Number.isFinite(Number(bands.mid))
+      ? Math.round(Number(bands.mid))
+      : Math.round(doorCm / 2);
+    const lowCm = Number.isFinite(Number(bands.low))
+      ? Math.round(Number(bands.low))
+      : Math.round(Math.max(20, doorCm * 0.15));
+    let sillM = Number(data && data.window_sill_m);
+    if (!Number.isFinite(sillM) || sillM < 0) sillM = 0.9;
+    const sillCm = Math.min(doorCm - 20, Math.max(0, Math.round(sillM * 100)));
+    return { ceilingM, doorM, ceilingCm, doorCm, highCm, midCm, lowCm, sillCm };
+  }
+
+  function sectionYFromCm(cm, geom, padT, plotH) {
+    const ceil = Math.max(geom.ceilingCm, 1);
+    const h = Math.min(ceil, Math.max(0, Number(cm) || 0));
+    return padT + ((ceil - h) / ceil) * plotH;
   }
 
   /**
@@ -5583,14 +5679,44 @@
     return `url(#${gradId})`;
   }
 
-  /** Prefer exact height_cm; else map high/mid/low onto ceiling fractions. */
-  function sensorHeightCm(sensor, ceilingCm) {
+  function cmToGradientOffset(cm, ceilingCm) {
+    const ceil = Math.max(Number(ceilingCm) || 250, 1);
+    const fromTop = Math.min(1, Math.max(0, (ceil - cm) / ceil));
+    return `${(fromTop * 100).toFixed(1)}%`;
+  }
+
+  /** Place high/mid/low gradient stops on the door / transom geometry. */
+  function categoricalHeightLevels(stops, geom) {
+    return [
+      { offset: "0%", temp: stops.high },
+      { offset: cmToGradientOffset(geom.highCm, geom.ceilingCm), temp: stops.high },
+      { offset: cmToGradientOffset(geom.midCm, geom.ceilingCm), temp: stops.mid },
+      { offset: cmToGradientOffset(geom.lowCm, geom.ceilingCm), temp: stops.low },
+      { offset: "100%", temp: stops.low },
+    ];
+  }
+
+  function networkFillLevels(contLevels, heightStops, geom) {
+    if (contLevels) return contLevels;
+    if (
+      !heightStops ||
+      (heightStops.high == null &&
+        heightStops.mid == null &&
+        heightStops.low == null)
+    ) {
+      return null;
+    }
+    return categoricalHeightLevels(heightStops, geom);
+  }
+
+  /** Prefer exact height_cm; else map high/mid/low onto door / transom bands. */
+  function sensorHeightCm(sensor, geom) {
     const cm = Number(sensor && sensor.height_cm);
     if (Number.isFinite(cm) && cm >= 0) return cm;
     const h = String((sensor && sensor.height) || "").toLowerCase();
-    if (h === "high") return ceilingCm * 0.85;
-    if (h === "mid") return ceilingCm * 0.5;
-    if (h === "low") return ceilingCm * 0.15;
+    if (h === "high") return geom.highCm;
+    if (h === "mid") return geom.midCm;
+    if (h === "low") return geom.lowCm;
     return null;
   }
 
@@ -5598,8 +5724,8 @@
    * Build SVG gradient stops from sensors (offset 0% = ceiling / top).
    * Returns null when no usable heights+temps.
    */
-  function networkSensorGradientLevels(sensors, ceilingCm, { exterior = false } = {}) {
-    const ceil = Math.max(Number(ceilingCm) || 250, 1);
+  function networkSensorGradientLevels(sensors, geom, { exterior = false } = {}) {
+    const ceil = Math.max(Number(geom && geom.ceilingCm) || 250, 1);
     /** @type {Map<number, number[]>} */
     const byCm = new Map();
     for (const s of sensors || []) {
@@ -5609,7 +5735,7 @@
       } else if (zone === "exterior") {
         continue;
       }
-      const cm = sensorHeightCm(s, ceil);
+      const cm = sensorHeightCm(s, geom);
       const t = networkSensorMetric(s);
       if (cm == null || !Number.isFinite(t)) continue;
       const key = Math.round(cm);
@@ -5632,13 +5758,10 @@
     if (bot.cm > ceil * 0.05) {
       points.push({ cm: 0, temp: bot.temp });
     }
-    return points.map((p) => {
-      const fromTop = Math.min(1, Math.max(0, (ceil - p.cm) / ceil));
-      return {
-        offset: `${(fromTop * 100).toFixed(1)}%`,
-        temp: p.temp,
-      };
-    });
+    return points.map((p) => ({
+      offset: cmToGradientOffset(p.cm, ceil),
+      temp: p.temp,
+    }));
   }
 
   /** Preferred relative positions for the default T3 layout (unit circle). */
@@ -5653,11 +5776,169 @@
 
   /** Minimum centre-to-centre distance in layout units (before pixel scale). */
   const NETWORK_MIN_NODE_DIST = 0.72;
+  const NETWORK_ROOM_W = 64;
+  const NETWORK_ROOM_H = 100;
+  const NETWORK_FACADE_W = 52;
+  const NETWORK_FACADE_H = 80;
+  /** ViewBox margin so labels, locks, and façades are not clipped. */
+  const NETWORK_PAD_PX = 88;
+  /** Centre-to-centre after scale: pill + padlock / ΔT air. */
+  const NETWORK_MIN_NODE_GAP_PX = 128;
+  /** Room centre → façade centre (half-pill + half-façade + lock on the link). */
+  const NETWORK_FACADE_GAP_PX = 118;
+
+  function networkFacadeDir(room, p) {
+    const off = networkExteriorOffset(room, p);
+    const dx = off.x - p.x;
+    const dy = off.y - p.y;
+    const len = Math.hypot(dx, dy) || 1;
+    return { x: dx / len, y: dy / len };
+  }
+
+  function networkMinPairDist(points) {
+    let min = Infinity;
+    for (let i = 0; i < points.length; i += 1) {
+      for (let j = i + 1; j < points.length; j += 1) {
+        const d = Math.hypot(
+          points[j].x - points[i].x,
+          points[j].y - points[i].y
+        );
+        if (d > 1e-6 && d < min) min = d;
+      }
+    }
+    return min;
+  }
 
   /**
-   * Push overlapping room centres apart so pills stay readable.
-   * Iterative pairwise repulsion in layout space.
+   * Scale rooms so connections stay visible, place façades at a fixed pixel
+   * gap, then grow/center the viewBox so nothing sits on the edges.
    */
+  function networkPlaceGraph(pos, rooms, baseW, baseH) {
+    const pad = NETWORK_PAD_PX;
+    const roomHW = NETWORK_ROOM_W / 2 + 8;
+    const roomHH = NETWORK_ROOM_H / 2 + 22;
+    const facHW = NETWORK_FACADE_W / 2 + 6;
+    const facHH = NETWORK_FACADE_H / 2 + 8;
+    const layoutPts = Object.keys(pos).map((id) => pos[id]);
+    const minLayout = networkMinPairDist(layoutPts);
+    const gapLayout =
+      Number.isFinite(minLayout) && minLayout > 1e-6
+        ? minLayout
+        : NETWORK_MIN_NODE_DIST;
+    const scale = NETWORK_MIN_NODE_GAP_PX / gapLayout;
+
+    /** @type {{key:string,rooms:any[],dir:{x:number,y:number}}[]} */
+    const facadeGroups = [];
+    const seen = new Map();
+    for (const room of rooms || []) {
+      const p = pos[room.id];
+      if (!p) continue;
+      const key = networkFacadeKey(room);
+      if (!key) continue;
+      if (!seen.has(key)) {
+        const g = { key, rooms: [], dir: { x: 0, y: 0 } };
+        seen.set(key, g);
+        facadeGroups.push(g);
+      }
+      seen.get(key).rooms.push(room);
+    }
+    for (const g of facadeGroups) {
+      let dx = 0;
+      let dy = 0;
+      let n = 0;
+      for (const room of g.rooms) {
+        const p = pos[room.id];
+        if (!p) continue;
+        const d = networkFacadeDir(room, p);
+        dx += d.x;
+        dy += d.y;
+        n += 1;
+      }
+      const len = Math.hypot(dx, dy) || 1;
+      g.dir = { x: dx / len, y: dy / len };
+    }
+
+    function layoutAt(s, originX, originY) {
+      const roomXY = {};
+      for (const id of Object.keys(pos)) {
+        roomXY[id] = {
+          x: originX + pos[id].x * s,
+          y: originY + pos[id].y * s,
+        };
+      }
+      const facadeXY = {};
+      for (const g of facadeGroups) {
+        let sx = 0;
+        let sy = 0;
+        let n = 0;
+        for (const room of g.rooms) {
+          const xy = roomXY[room.id];
+          if (!xy) continue;
+          sx += xy.x;
+          sy += xy.y;
+          n += 1;
+        }
+        if (!n) continue;
+        facadeXY[g.key] = {
+          x: sx / n + g.dir.x * NETWORK_FACADE_GAP_PX,
+          y: sy / n + g.dir.y * NETWORK_FACADE_GAP_PX,
+        };
+      }
+      return { roomXY, facadeXY };
+    }
+
+    function contentBox(laid) {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      const bump = (x, y, hw, hh) => {
+        minX = Math.min(minX, x - hw);
+        maxX = Math.max(maxX, x + hw);
+        minY = Math.min(minY, y - hh);
+        maxY = Math.max(maxY, y + hh);
+      };
+      for (const xy of Object.values(laid.roomXY)) {
+        bump(xy.x, xy.y, roomHW, roomHH);
+      }
+      for (const xy of Object.values(laid.facadeXY)) {
+        bump(xy.x, xy.y, facHW, facHH);
+      }
+      if (!Number.isFinite(minX)) {
+        return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+      }
+      return { minX, minY, maxX, maxY };
+    }
+
+    let ox = baseW / 2;
+    let oy = baseH / 2;
+    let laid = layoutAt(scale, ox, oy);
+    let box = contentBox(laid);
+    const w = Math.max(baseW, Math.ceil(box.maxX - box.minX + 2 * pad));
+    const h = Math.max(baseH, Math.ceil(box.maxY - box.minY + 2 * pad));
+    ox = w / 2;
+    oy = h / 2;
+    laid = layoutAt(scale, ox, oy);
+    box = contentBox(laid);
+    const dx = pad + (w - 2 * pad - (box.maxX - box.minX)) / 2 - box.minX;
+    const dy = pad + (h - 2 * pad - (box.maxY - box.minY)) / 2 - box.minY;
+    const facadeXY = {};
+    for (const key of Object.keys(laid.facadeXY)) {
+      const xy = laid.facadeXY[key];
+      facadeXY[key] = { x: xy.x + dx, y: xy.y + dy };
+    }
+    return {
+      w,
+      h,
+      toXY: (p) => ({
+        x: ox + p.x * scale + dx,
+        y: oy + p.y * scale + dy,
+      }),
+      facadeXY,
+    };
+  }
+
+  /** Push overlapping room centres apart so pills stay readable. */
   function separateNetworkPositions(pos, minDist) {
     const ids = Object.keys(pos);
     if (ids.length < 2) return;
@@ -5752,6 +6033,20 @@
     return t || h;
   }
 
+  function networkBandAllStale(sensors) {
+    const list = (sensors || []).filter(Boolean);
+    return list.length > 0 && list.every((s) => networkSensorIsStale(s));
+  }
+
+  /** Temperature text for a height band, or "stale" when that band has only stale sensors. */
+  function formatNetworkBandLabel(sensors, tempVals, humVals) {
+    if (networkBandAllStale(sensors)) return "stale";
+    if (networkShowsBothMetrics()) {
+      return formatNetworkBothBand(tempVals, humVals);
+    }
+    return formatNetworkTempBand(tempVals);
+  }
+
   function formatNetworkSensorReading(sensor) {
     if (networkSensorIsStale(sensor)) {
       return `stale (${networkSensorAgeLabel(sensor)})`;
@@ -5770,47 +6065,89 @@
     return Number.isFinite(t) ? `${t.toFixed(1)}°C` : "—";
   }
 
-  /** Warning triangle for stale sensors on the open-room cross-section. */
-  function appendSectionStaleSensorIcon(parent, NS, cx, cy, sensor) {
-    const g = document.createElementNS(NS, "g");
-    g.setAttribute("class", "section-sensor-stale");
-    g.setAttribute("pointer-events", "none");
-    const tri = document.createElementNS(NS, "path");
-    tri.setAttribute(
-      "d",
-      `M ${cx} ${cy - 8} L ${cx + 8} ${cy + 7} L ${cx - 8} ${cy + 7} Z`
-    );
-    tri.setAttribute("fill", "#c4782a");
-    tri.setAttribute("stroke", "#fff");
-    tri.setAttribute("stroke-width", "1.25");
-    tri.setAttribute("stroke-linejoin", "round");
-    g.appendChild(tri);
-    const bang = document.createElementNS(NS, "text");
-    bang.setAttribute("x", String(cx));
-    bang.setAttribute("y", String(cy + 5));
-    bang.setAttribute("text-anchor", "middle");
-    bang.setAttribute("class", "section-sensor-stale-mark");
-    bang.textContent = "!";
-    g.appendChild(bang);
-    const tip = document.createElementNS(NS, "title");
-    const cm =
-      sensor &&
-      sensor.height_cm != null &&
-      Number.isFinite(Number(sensor.height_cm))
-        ? ` @ ${Math.round(Number(sensor.height_cm))} cm`
-        : "";
-    tip.textContent = `${(sensor && sensor.name) || "Sensor"}${cm}: ${formatNetworkSensorReading(
-      sensor
-    )}`;
-    g.appendChild(tip);
-    parent.appendChild(g);
+  function tempTrendDir(sensor) {
+    if (!sensor || networkSensorIsStale(sensor)) return "";
+    const dir = String(sensor.temp_trend || "").toLowerCase();
+    return dir === "up" || dir === "down" ? dir : "";
+  }
 
-    const lab = document.createElementNS(NS, "text");
-    lab.setAttribute("x", String(cx + 10));
-    lab.setAttribute("y", String(cy + 4));
-    lab.setAttribute("class", "section-sensor-label section-sensor-stale-label");
-    lab.textContent = networkSensorAgeShort(sensor);
-    parent.appendChild(lab);
+  function sensorsTempTrend(sensors) {
+    if (networkMapMetric === "humidity") return "";
+    const dirs = (sensors || []).map((s) => tempTrendDir(s)).filter(Boolean);
+    if (!dirs.length) return "";
+    const up = dirs.filter((d) => d === "up").length;
+    const down = dirs.length - up;
+    if (up && !down) return "up";
+    if (down && !up) return "down";
+    return "";
+  }
+
+  function heightBandSensors(sensors, height, { exterior = false } = {}) {
+    const want = String(height || "").toLowerCase();
+    const out = [];
+    for (const s of sensors || []) {
+      const zone = String(s.zone || "").toLowerCase();
+      if (exterior) {
+        if (zone !== "exterior") continue;
+      } else if (zone === "exterior") {
+        continue;
+      }
+      const h = String(s.height || "").toLowerCase();
+      if (want && h !== want) continue;
+      out.push(s);
+    }
+    return out;
+  }
+
+  function setSvgTextWithTrend(textEl, NS, body, trend, warn) {
+    if (!textEl) return;
+    textEl.textContent = "";
+    if (trend === "up" || trend === "down") {
+      const mark = document.createElementNS(NS, "tspan");
+      mark.setAttribute("class", `temp-trend is-${trend}`);
+      mark.textContent = trend === "up" ? "▲ " : "▼ ";
+      mark.setAttribute("data-trend", trend === "up" ? "rising" : "falling");
+      textEl.appendChild(mark);
+    }
+    textEl.appendChild(document.createTextNode(body == null ? "" : String(body)));
+    if (warn) {
+      const mark = document.createElementNS(NS, "tspan");
+      mark.setAttribute("class", "temp-stale-warn");
+      mark.textContent = " ⚠";
+      textEl.appendChild(mark);
+    }
+  }
+
+  function tempTrendHtml(trend) {
+    if (trend === "up") {
+      return '<span class="temp-trend is-up" title="Rising">▲</span> ';
+    }
+    if (trend === "down") {
+      return '<span class="temp-trend is-down" title="Falling">▼</span> ';
+    }
+    return "";
+  }
+
+  function tempUpdateWarnHtml(sensor) {
+    if (!sensorTempNeedsWarn(sensor)) return "";
+    const age = networkSensorAgeLabel(sensor);
+    return ` <span class="temp-stale-warn" title="Last update ${escapeHtml(
+      age
+    )}">⚠</span>`;
+  }
+
+  function tempTrendTitle(sensor) {
+    const dir = tempTrendDir(sensor);
+    if (!dir) return "";
+    const delta = Number(sensor && sensor.temp_delta_c);
+    const rate = Number(sensor && sensor.temp_rate_c_h);
+    const dBit = Number.isFinite(delta)
+      ? ` ${delta > 0 ? "+" : ""}${delta.toFixed(1)}°`
+      : "";
+    const rBit = Number.isFinite(rate)
+      ? ` (${rate > 0 ? "+" : ""}${rate.toFixed(1)}°/h)`
+      : "";
+    return (dir === "up" ? "rising" : "falling") + dBit + rBit;
   }
 
   /** Split sensors by height for a given metric field. */
@@ -6002,27 +6339,33 @@
   }
 
   function clampNetworkPan() {
-    const vw = NETWORK_VB_W / networkZoom;
-    const vh = NETWORK_VB_H / networkZoom;
-    const maxX = Math.max(0, NETWORK_VB_W - vw);
-    const maxY = Math.max(0, NETWORK_VB_H - vh);
+    const W = networkLayoutVb.w;
+    const H = networkLayoutVb.h;
+    const vw = W / networkZoom;
+    const vh = H / networkZoom;
+    const maxX = Math.max(0, W - vw);
+    const maxY = Math.max(0, H - vh);
     networkPan.x = Math.min(maxX, Math.max(0, networkPan.x));
     networkPan.y = Math.min(maxY, Math.max(0, networkPan.y));
   }
 
   function centerNetworkPan() {
-    const vw = NETWORK_VB_W / networkZoom;
-    const vh = NETWORK_VB_H / networkZoom;
-    networkPan.x = Math.max(0, (NETWORK_VB_W - vw) / 2);
-    networkPan.y = Math.max(0, (NETWORK_VB_H - vh) / 2);
+    const W = networkLayoutVb.w;
+    const H = networkLayoutVb.h;
+    const vw = W / networkZoom;
+    const vh = H / networkZoom;
+    networkPan.x = Math.max(0, (W - vw) / 2);
+    networkPan.y = Math.max(0, (H - vh) / 2);
     clampNetworkPan();
   }
 
   function applyNetworkViewBox() {
     if (!networkSvgEl) return;
     clampNetworkPan();
-    const vw = NETWORK_VB_W / networkZoom;
-    const vh = NETWORK_VB_H / networkZoom;
+    const W = networkLayoutVb.w;
+    const H = networkLayoutVb.h;
+    const vw = W / networkZoom;
+    const vh = H / networkZoom;
     networkSvgEl.setAttribute(
       "viewBox",
       `${networkPan.x} ${networkPan.y} ${vw} ${vh}`
@@ -6039,6 +6382,8 @@
       NETWORK_ZOOM_MAX,
       Math.max(NETWORK_ZOOM_MIN, next)
     );
+    const W = networkLayoutVb.w;
+    const H = networkLayoutVb.h;
     if (networkZoom === prev) {
       applyNetworkViewBox();
       return;
@@ -6055,12 +6400,12 @@
       anchorClientY != null && rect
         ? (anchorClientY - rect.top) / Math.max(rect.height, 1)
         : 0.5;
-    const prevW = NETWORK_VB_W / prev;
-    const prevH = NETWORK_VB_H / prev;
+    const prevW = W / prev;
+    const prevH = H / prev;
     const focusX = networkPan.x + ax * prevW;
     const focusY = networkPan.y + ay * prevH;
-    const nextW = NETWORK_VB_W / networkZoom;
-    const nextH = NETWORK_VB_H / networkZoom;
+    const nextW = W / networkZoom;
+    const nextH = H / networkZoom;
     networkPan.x = focusX - ax * nextW;
     networkPan.y = focusY - ay * nextH;
     applyNetworkViewBox();
@@ -6251,6 +6596,10 @@
         sectionShowSmall ? "1" : "0"
       );
       localStorage.setItem(
+        "govee-charts.sectionShowHeights",
+        sectionShowHeights ? "1" : "0"
+      );
+      localStorage.setItem(
         "govee-charts.sectionWaypoints",
         JSON.stringify(sectionWaypoints)
       );
@@ -6262,6 +6611,9 @@
   function syncSectionPathControls() {
     if (sectionShowSmallEl) {
       sectionShowSmallEl.checked = !!sectionShowSmall;
+    }
+    if (sectionShowHeightsEl) {
+      sectionShowHeightsEl.checked = !!sectionShowHeights;
     }
     const custom = sectionWaypoints.length > 0;
     if (sectionPathClearBtn) {
@@ -6319,6 +6671,13 @@
 
   function setSectionShowSmall(on) {
     sectionShowSmall = !!on;
+    persistSectionPathState();
+    syncSectionPathControls();
+    if (networkLastData) renderNetwork(networkLastData);
+  }
+
+  function setSectionShowHeights(on) {
+    sectionShowHeights = !!on;
     persistSectionPathState();
     syncSectionPathControls();
     if (networkLastData) renderNetwork(networkLastData);
@@ -6395,9 +6754,11 @@
         };
       }
     }
+    opts.layout = compact
+      ? { padding: { top: 10, right: 8, bottom: 6, left: 6 } }
+      : { padding: { top: 12, right: 10, bottom: 8, left: 8 } };
     if (compact) {
       opts.maintainAspectRatio = false;
-      opts.layout = { padding: { top: 4, right: 4, bottom: 0, left: 2 } };
       if (opts.scales) {
         for (const axis of Object.values(opts.scales)) {
           if (!axis || typeof axis !== "object") continue;
@@ -6518,6 +6879,7 @@
           : { display: true, text: "°C", color: "#c4782a" },
         ticks: { ...tickBase, color: compact ? tickBase.color : "#c4782a" },
         grid: { color: gridColor },
+        grace: "8%",
       };
       chart.options.scales.y1 = {
         type: "linear",
@@ -6527,12 +6889,14 @@
           : { display: true, text: "% RH", color: "#5b8fd9" },
         ticks: { ...tickBase, color: compact ? "rgba(180,210,255,0.85)" : "#5b8fd9" },
         grid: { drawOnChartArea: false },
+        grace: "8%",
       };
     } else {
       delete chart.options.scales.y1;
       chart.options.scales.y = {
         ticks: tickBase,
         grid: { color: gridColor },
+        grace: "8%",
       };
     }
   }
@@ -6715,6 +7079,322 @@
     }
   }
 
+  function mapOverviewInteriorRooms(data) {
+    const rooms = [];
+    for (const room of (data && data.rooms) || []) {
+      const sensors = (room.sensors || []).filter(
+        (s) =>
+          String(s.zone || "").toLowerCase() !== "exterior" &&
+          String(s.address || "").trim()
+      );
+      if (!sensors.length) continue;
+      rooms.push({
+        id: String(room.id),
+        label: room.label || room.id,
+        sensors,
+      });
+    }
+    return rooms;
+  }
+
+  function mapOverviewBucketS(pastHours) {
+    if (pastHours <= 6) return 5 * 60;
+    if (pastHours <= 24) return 10 * 60;
+    return 30 * 60;
+  }
+
+  function bucketAveragePoints(points, field, bucketS) {
+    /** @type {Map<number, {sum:number,n:number}>} */
+    const buckets = new Map();
+    for (const p of points || []) {
+      const y = Number(p[field]);
+      const ts = Number(p.ts);
+      if (!Number.isFinite(y) || !Number.isFinite(ts)) continue;
+      const key = Math.floor(ts / bucketS) * bucketS;
+      let acc = buckets.get(key);
+      if (!acc) {
+        acc = { sum: 0, n: 0 };
+        buckets.set(key, acc);
+      }
+      acc.sum += y;
+      acc.n += 1;
+    }
+    return [...buckets.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([ts, acc]) => ({ x: ts * 1000, y: acc.sum / acc.n }));
+  }
+
+  function ensureMapOverviewTempChart() {
+    if (
+      mapOverviewTempChart ||
+      !mapOverviewTempCanvas ||
+      typeof Chart === "undefined"
+    ) {
+      return mapOverviewTempChart;
+    }
+    mapOverviewTempChart = new Chart(mapOverviewTempCanvas.getContext("2d"), {
+      type: "line",
+      data: { datasets: [] },
+      options: mapRoomChartOptions(false),
+    });
+    return mapOverviewTempChart;
+  }
+
+  async function fetchHistoryPoints(address, hours) {
+    const params = new URLSearchParams({
+      address,
+      hours: String(hours),
+      max_points: "4000",
+    });
+    const res = await fetch(`/api/history?${params}`);
+    if (!res.ok) throw new Error(`history HTTP ${res.status}`);
+    const payload = await res.json();
+    return payload.points || [];
+  }
+
+  async function loadMapOverviewChart() {
+    if (!mapOverviewChartsEl) return;
+    const data = networkLastData;
+    if (!data || !data.enabled) {
+      if (mapOverviewChartsMetaEl) {
+        mapOverviewChartsMetaEl.textContent =
+          "Enable [apartment] in config.toml to chart indoor averages.";
+      }
+      if (mapOverviewChartsStatusEl) mapOverviewChartsStatusEl.textContent = "";
+      if (mapOverviewTempChart) {
+        mapOverviewTempChart.data.datasets = [];
+        mapOverviewTempChart.update();
+      }
+      return;
+    }
+    const rooms = mapOverviewInteriorRooms(data);
+    const addrs = [
+      ...new Set(
+        rooms.flatMap((r) =>
+          r.sensors.map((s) => String(s.address || "").toUpperCase())
+        )
+      ),
+    ].filter(Boolean);
+    const gen = (mapOverviewGen += 1);
+    const pastH = mapOverviewHours;
+    const futH = Number(forecastFutureHours) || 24;
+    const bucketS = mapOverviewBucketS(pastH);
+    const metricLabel = networkMetricLabel();
+    if (mapOverviewChartsTitleEl) {
+      mapOverviewChartsTitleEl.textContent =
+        networkMapMetric === "humidity"
+          ? "Indoor humidity"
+          : "Indoor average";
+    }
+    if (mapOverviewChartsMetaEl) {
+      mapOverviewChartsMetaEl.textContent = addrs.length
+        ? `${addrs.length} interior sensor(s) · last ${pastH} h · +${futH} h forecast`
+        : "No interior sensors to average.";
+    }
+    if (mapOverviewChartsStatusEl) {
+      mapOverviewChartsStatusEl.textContent = "Loading…";
+    }
+    mapOverviewBusy = true;
+    try {
+      const [histResults, forecast] = await Promise.all([
+        Promise.all(
+          addrs.map(async (address) => {
+            try {
+              const points = await fetchHistoryPoints(address, pastH);
+              return { address, points };
+            } catch (err) {
+              console.warn("map overview history", address, err);
+              return { address, points: [] };
+            }
+          })
+        ),
+        fetchForecast([], { hours: pastH, futureHours: futH }).catch((err) => {
+          console.warn(err);
+          return {
+            enabled: false,
+            outdoor: [],
+            station: { stations: [] },
+            error: err.message,
+          };
+        }),
+      ]);
+      if (gen !== mapOverviewGen) return;
+
+      const allPoints = [];
+      for (const row of histResults) {
+        if (row.points && row.points.length) allPoints.push(...row.points);
+      }
+      const indoorTemp = bucketAveragePoints(
+        allPoints,
+        "temperature_c",
+        bucketS
+      );
+      const indoorHum = bucketAveragePoints(allPoints, "humidity", bucketS);
+      const datasets = [];
+      if (networkMapMetric === "humidity") {
+        if (indoorHum.length) {
+          datasets.push(
+            makeDataset("Indoor", "#f0d48a", indoorHum, true, {
+              borderWidth: 2.5,
+            })
+          );
+        }
+      } else if (networkMapMetric === "both") {
+        if (indoorTemp.length) {
+          datasets.push(
+            makeDataset("Indoor °C", "#f0d48a", indoorTemp, false, {
+              yAxisID: "y",
+              borderWidth: 2.5,
+            })
+          );
+        }
+        if (indoorHum.length) {
+          datasets.push(
+            makeDataset("Indoor RH", "#8ec5f0", indoorHum, false, {
+              yAxisID: "y1",
+              borderWidth: 2,
+              borderDash: [5, 3],
+            })
+          );
+        }
+      } else if (indoorTemp.length) {
+        datasets.push(
+          makeDataset("Indoor", "#f0d48a", indoorTemp, true, {
+            borderWidth: 2.5,
+          })
+        );
+      }
+
+      const outdoor = (forecast && forecast.outdoor) || [];
+      const locName =
+        (forecast && forecast.location && forecast.location.name) || "Weather";
+      const weatherColor = "#c5c9c4";
+      if (forecast && forecast.enabled && outdoor.length) {
+        if (networkMapMetric !== "humidity") {
+          datasets.push(
+            makeDataset(
+              `${locName} (forecast)`,
+              weatherColor,
+              outdoor
+                .filter((p) => p.temperature_c != null)
+                .map((p) => ({ x: p.ts * 1000, y: Number(p.temperature_c) })),
+              false,
+              {
+                borderDash: [6, 4],
+                borderWidth: 1.75,
+                yAxisID: networkShowsBothMetrics() ? "y" : "y",
+              }
+            )
+          );
+        }
+        if (networkMapMetric === "humidity" || networkShowsBothMetrics()) {
+          datasets.push(
+            makeDataset(
+              `${locName} RH (forecast)`,
+              weatherColor,
+              outdoor
+                .filter(
+                  (p) => p.humidity != null && Number.isFinite(Number(p.humidity))
+                )
+                .map((p) => ({ x: p.ts * 1000, y: Number(p.humidity) })),
+              false,
+              {
+                borderDash: [6, 4],
+                borderWidth: 1.6,
+                yAxisID: networkShowsBothMetrics() ? "y1" : "y",
+              }
+            )
+          );
+        }
+      }
+
+      const stationBlock = (forecast && forecast.station) || {};
+      rememberAvailableStations(stationBlock);
+      const stationList = filterStationList(stationsFromBlock(stationBlock));
+      const stationColors = ["#6fbf73", "#e8a838", "#5dade2", "#af7ac5"];
+      stationList.forEach((station, idx) => {
+        const stationPts = (station && station.points) || [];
+        if (!station || !station.enabled || !stationPts.length) return;
+        const stName = station.station_name || station.station_id || "Station";
+        const stColor = stationColors[idx % stationColors.length];
+        if (networkMapMetric !== "humidity") {
+          datasets.push(
+            makeDataset(
+              `${stName} (station)`,
+              stColor,
+              stationPts
+                .filter((p) => p.temperature_c != null)
+                .map((p) => ({ x: p.ts * 1000, y: Number(p.temperature_c) })),
+              false,
+              {
+                borderWidth: 2.1,
+                pointRadius: 2,
+                yAxisID: networkShowsBothMetrics() ? "y" : "y",
+              }
+            )
+          );
+        }
+        const humPts = stationPts.filter(
+          (p) => p.humidity != null && Number.isFinite(Number(p.humidity))
+        );
+        if (
+          humPts.length &&
+          (networkMapMetric === "humidity" || networkShowsBothMetrics())
+        ) {
+          datasets.push(
+            makeDataset(
+              `${stName} RH (station)`,
+              stColor,
+              humPts.map((p) => ({ x: p.ts * 1000, y: Number(p.humidity) })),
+              false,
+              {
+                borderWidth: 1.8,
+                pointRadius: 2,
+                yAxisID: networkShowsBothMetrics() ? "y1" : "y",
+              }
+            )
+          );
+        }
+      });
+
+      if (typeof Chart === "undefined") {
+        if (mapOverviewChartsStatusEl) {
+          mapOverviewChartsStatusEl.textContent = "Chart.js unavailable.";
+        }
+        return;
+      }
+      const chart = ensureMapOverviewTempChart();
+      if (!chart) return;
+      configureMapRoomChartAxes(chart, false);
+      const now = Date.now();
+      if (chart.options.scales && chart.options.scales.x) {
+        chart.options.scales.x.min = now - pastH * 3600 * 1000;
+        chart.options.scales.x.max = now + futH * 3600 * 1000;
+      }
+      chart.data.datasets = datasets;
+      chart.update();
+      const nIndoor = indoorTemp.length || indoorHum.length;
+      const nSt = stationList.filter(
+        (s) => s && s.enabled && (s.points || []).length
+      ).length;
+      if (mapOverviewChartsStatusEl) {
+        mapOverviewChartsStatusEl.textContent = nIndoor
+          ? `Indoor ${metricLabel}` +
+            (forecast && forecast.enabled ? ` · ${locName}` : "") +
+            (nSt ? ` · ${nSt} station(s)` : "") +
+            ` · ${new Date().toLocaleTimeString("en-GB")}`
+          : `No ${metricLabel} samples in this range.`;
+      }
+    } catch (err) {
+      if (gen !== mapOverviewGen) return;
+      if (mapOverviewChartsStatusEl) {
+        mapOverviewChartsStatusEl.textContent = `Error: ${err.message}`;
+      }
+    } finally {
+      if (gen === mapOverviewGen) mapOverviewBusy = false;
+    }
+  }
+
   function toggleSectionWaypoint(roomId) {
     const id = String(roomId || "");
     if (!id) return;
@@ -6861,10 +7541,7 @@
       return;
     }
 
-    const ceilingCm = Math.max(
-      50,
-      Math.round(Number(data.ceiling_m || 2.5) * 100)
-    );
+    const geom = apartmentGeometry(data);
     const columns = buildSectionColumns(path, rooms, byId);
     // Scale across interiors + façades in this cut.
     const scaleRooms = [
@@ -6885,7 +7562,7 @@
       }
     }
 
-    const padL = 52;
+    const padL = sectionShowHeights ? 52 : 18;
     const padR = 18;
     const padT = 28;
     const padB = 48;
@@ -6904,42 +7581,45 @@
     const defs = document.createElementNS(NS, "defs");
     sectionSvgEl.appendChild(defs);
 
-    // Height axis
-    const axisG = document.createElementNS(NS, "g");
-    axisG.setAttribute("class", "section-axis");
-    const axisLine = document.createElementNS(NS, "line");
-    axisLine.setAttribute("x1", String(padL - 8));
-    axisLine.setAttribute("x2", String(padL - 8));
-    axisLine.setAttribute("y1", String(padT));
-    axisLine.setAttribute("y2", String(padT + plotH));
-    axisLine.setAttribute("stroke", "var(--line)");
-    axisLine.setAttribute("stroke-width", "1.5");
-    axisG.appendChild(axisLine);
-    const ticks = [0, 0.25, 0.5, 0.75, 1];
-    for (const u of ticks) {
-      const cm = Math.round(ceilingCm * (1 - u));
-      const y = padT + u * plotH;
-      const tick = document.createElementNS(NS, "line");
-      tick.setAttribute("x1", String(padL - 12));
-      tick.setAttribute("x2", String(padL - 4));
-      tick.setAttribute("y1", String(y));
-      tick.setAttribute("y2", String(y));
-      tick.setAttribute("stroke", "var(--line)");
-      axisG.appendChild(tick);
-      const lab = document.createElementNS(NS, "text");
-      lab.setAttribute("x", String(padL - 16));
-      lab.setAttribute("y", String(y + 4));
-      lab.setAttribute("class", "section-axis-label");
-      lab.textContent = `${cm}`;
-      axisG.appendChild(lab);
+    // Height axis (optional — Heights checkbox).
+    if (sectionShowHeights) {
+      const axisG = document.createElementNS(NS, "g");
+      axisG.setAttribute("class", "section-axis");
+      const axisLine = document.createElementNS(NS, "line");
+      axisLine.setAttribute("x1", String(padL - 8));
+      axisLine.setAttribute("x2", String(padL - 8));
+      axisLine.setAttribute("y1", String(padT));
+      axisLine.setAttribute("y2", String(padT + plotH));
+      axisLine.setAttribute("stroke", "var(--line)");
+      axisLine.setAttribute("stroke-width", "1.5");
+      axisG.appendChild(axisLine);
+      const ticks = [...new Set([geom.ceilingCm, geom.doorCm, geom.midCm, 0])].sort(
+        (a, b) => b - a
+      );
+      for (const cm of ticks) {
+        const y = sectionYFromCm(cm, geom, padT, plotH);
+        const tick = document.createElementNS(NS, "line");
+        tick.setAttribute("x1", String(padL - 12));
+        tick.setAttribute("x2", String(padL - 4));
+        tick.setAttribute("y1", String(y));
+        tick.setAttribute("y2", String(y));
+        tick.setAttribute("stroke", "var(--line)");
+        axisG.appendChild(tick);
+        const lab = document.createElementNS(NS, "text");
+        lab.setAttribute("x", String(padL - 16));
+        lab.setAttribute("y", String(y + 4));
+        lab.setAttribute("class", "section-axis-label");
+        lab.textContent = `${cm}`;
+        axisG.appendChild(lab);
+      }
+      const axisTitle = document.createElementNS(NS, "text");
+      axisTitle.setAttribute("x", String(padL - 16));
+      axisTitle.setAttribute("y", String(padT - 10));
+      axisTitle.setAttribute("class", "section-axis-label");
+      axisTitle.textContent = "cm";
+      axisG.appendChild(axisTitle);
+      sectionSvgEl.appendChild(axisG);
     }
-    const axisTitle = document.createElementNS(NS, "text");
-    axisTitle.setAttribute("x", String(padL - 16));
-    axisTitle.setAttribute("y", String(padT - 10));
-    axisTitle.setAttribute("class", "section-axis-label");
-    axisTitle.textContent = "cm";
-    axisG.appendChild(axisTitle);
-    sectionSvgEl.appendChild(axisG);
 
     // Floor / ceiling guides
     const guides = document.createElementNS(NS, "g");
@@ -6957,12 +7637,22 @@
     }
     sectionSvgEl.appendChild(guides);
 
+    // Lintel guide: door frames ≈ 2.0 m, transom pocket above.
+    const yLintel = sectionYFromCm(geom.doorCm, geom, padT, plotH);
+    const lintel = document.createElementNS(NS, "line");
+    lintel.setAttribute("x1", String(padL));
+    lintel.setAttribute("x2", String(W - padR));
+    lintel.setAttribute("y1", String(yLintel));
+    lintel.setAttribute("y2", String(yLintel));
+    lintel.setAttribute("class", "section-lintel-guide");
+    sectionSvgEl.appendChild(lintel);
+
     let x = padL;
     const linkBits = [];
     for (let i = 0; i < columns.length; i += 1) {
       const col = columns[i];
       const w = widths[i];
-      const contLevels = networkSensorGradientLevels(col.sensors, ceilingCm, {
+      const contLevels = networkSensorGradientLevels(col.sensors, geom, {
         exterior: !!col.exterior,
       });
       // Fallback categorical bands for rooms without height_cm.
@@ -6974,23 +7664,11 @@
           networkFacadeTempBands([{ sensors: col.sensors }])
         );
       }
-      const hasTemp = !!(
-        contLevels ||
-        (fallbackStops &&
-          (fallbackStops.high != null ||
-            fallbackStops.mid != null ||
-            fallbackStops.low != null))
-      );
+      const fillLevels = networkFillLevels(contLevels, fallbackStops, geom);
+      const hasTemp = !!fillLevels;
       const gradId = `section-grad-${String(col.id).replace(/[^a-z0-9_-]/gi, "_")}`;
       const fill = hasTemp
-        ? appendHeightGradient(
-            defs,
-            NS,
-            gradId,
-            contLevels || fallbackStops,
-            tMin,
-            tMax
-          )
+        ? appendHeightGradient(defs, NS, gradId, fillLevels, tMin, tMax)
         : col.kind === "facade"
           ? "#354860"
           : "#2a3230";
@@ -7069,40 +7747,89 @@
 
       if (!isMapSelected) {
         for (const s of col.sensors || []) {
-          const cm = sensorHeightCm(s, ceilingCm);
+          const cm = sensorHeightCm(s, geom);
           if (cm == null) continue;
-          const y = padT + ((ceilingCm - cm) / ceilingCm) * plotH;
+          const y = sectionYFromCm(cm, geom, padT, plotH);
           const cx = x + w * 0.5;
-          if (networkSensorIsStale(s)) {
-            appendSectionStaleSensorIcon(roomGroup, NS, cx, y, s);
-            continue;
+          const stale = networkSensorIsStale(s);
+          const t = networkShowsBothMetrics()
+            ? networkSensorFieldValue(s, "temperature_c")
+            : networkSensorFieldValue(s, networkMetricField());
+          const hVal = networkSensorFieldValue(s, "humidity");
+          if (!stale) {
+            if (networkShowsBothMetrics()) {
+              if (!Number.isFinite(t) && !Number.isFinite(hVal)) continue;
+            } else if (!Number.isFinite(t)) {
+              continue;
+            }
           }
-          const t = networkSensorMetric(s);
-          if (!Number.isFinite(t)) continue;
+          const tColor = networkSensorMetric(s);
           const dot = document.createElementNS(NS, "circle");
           dot.setAttribute("cx", String(cx));
           dot.setAttribute("cy", String(y));
           dot.setAttribute("r", "5");
-          dot.setAttribute("fill", networkTempColor(t, tMin, tMax));
+          dot.setAttribute(
+            "fill",
+            Number.isFinite(tColor)
+              ? networkTempColor(tColor, tMin, tMax)
+              : "#8a908c"
+          );
           dot.setAttribute("stroke", "#fff");
           dot.setAttribute("stroke-width", "1.5");
           dot.setAttribute("pointer-events", "none");
           const tip = document.createElementNS(NS, "title");
-          tip.textContent = `${s.name}: ${formatNetworkSensorReading(s)} @ ${Math.round(cm)} cm`;
+          const trendHint = tempTrendTitle(s);
+          const ageHint =
+            stale || sensorTempNeedsWarn(s)
+              ? ` · last update ${networkSensorAgeLabel(s)}`
+              : "";
+          tip.textContent =
+            `${s.name}: ${formatNetworkSensorReading(s)} @ ${Math.round(cm)} cm` +
+            (trendHint ? ` · ${trendHint}` : "") +
+            ageHint;
           dot.appendChild(tip);
           roomGroup.appendChild(dot);
 
           const lab = document.createElementNS(NS, "text");
           lab.setAttribute("x", String(cx + 8));
           lab.setAttribute("y", String(y + 4));
-          lab.setAttribute("class", "section-sensor-label");
+          lab.setAttribute(
+            "class",
+            `section-sensor-label${stale ? " is-stale" : ""}`
+          );
+          const colorSrc = Number.isFinite(t) ? t : tColor;
           lab.setAttribute(
             "fill",
-            t >= (tMin + tMax) / 2 ? "var(--temp)" : "var(--hum)"
+            stale
+              ? "#c4782a"
+              : Number.isFinite(colorSrc) && colorSrc >= (tMin + tMax) / 2
+                ? "var(--temp)"
+                : "var(--hum)"
           );
-          lab.textContent = networkShowsBothMetrics()
-            ? `${formatNetworkSensorReading(s)} · ${Math.round(cm)}`
-            : `${t.toFixed(1)}${networkMetricUnitShort()} · ${Math.round(cm)}`;
+          const reading = stale
+            ? "stale"
+            : networkShowsBothMetrics()
+              ? [
+                  Number.isFinite(t) ? `${t.toFixed(1)}°` : null,
+                  Number.isFinite(hVal) ? `${Math.round(hVal)}%` : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ") || "—"
+              : `${t.toFixed(1)}${networkMetricUnitShort()}`;
+          const body = sectionShowHeights
+            ? `${reading} · ${Math.round(cm)}`
+            : reading;
+          const trend =
+            stale || networkMapMetric === "humidity" ? "" : tempTrendDir(s);
+          setSvgTextWithTrend(
+            lab,
+            NS,
+            body,
+            trend,
+            !stale &&
+              networkMapMetric !== "humidity" &&
+              sensorTempNeedsWarn(s)
+          );
           roomGroup.appendChild(lab);
         }
       } else if (w >= 72) {
@@ -7137,13 +7864,19 @@
           clearMapRoomSelection();
         });
         toolbar.appendChild(closeBtn);
+        const canvasWrap = document.createElementNS(
+          "http://www.w3.org/1999/xhtml",
+          "div"
+        );
+        canvasWrap.className = "section-room-chart-canvas-wrap";
         const canvas = document.createElementNS(
           "http://www.w3.org/1999/xhtml",
           "canvas"
         );
         canvas.className = "section-room-temp-chart";
+        canvasWrap.appendChild(canvas);
         host.appendChild(toolbar);
-        host.appendChild(canvas);
+        host.appendChild(canvasWrap);
         fo.appendChild(host);
         // Chart clicks should not toggle selection; use Close.
         fo.addEventListener("click", (ev) => ev.stopPropagation());
@@ -7208,16 +7941,58 @@
           );
         }
         const kindClass = `section-link-${String(linkKind).replace(/[^a-z0-9_-]/gi, "_")}`;
-        const door = document.createElementNS(NS, "line");
-        door.setAttribute("x1", String(doorX));
-        door.setAttribute("x2", String(doorX));
-        door.setAttribute("y1", String(padT + plotH * 0.18));
-        door.setAttribute("y2", String(padT + plotH * 0.82));
-        door.setAttribute("class", `section-door ${kindClass} ${opening}`);
-        const dTitle = document.createElementNS(NS, "title");
-        dTitle.textContent = linkTitle;
-        door.appendChild(dTitle);
-        sectionSvgEl.appendChild(door);
+        const yCeil = padT;
+        const yFloor = padT + plotH;
+        if (linkKind === "wall") {
+          const wall = document.createElementNS(NS, "line");
+          wall.setAttribute("x1", String(doorX));
+          wall.setAttribute("x2", String(doorX));
+          wall.setAttribute("y1", String(yCeil));
+          wall.setAttribute("y2", String(yFloor));
+          wall.setAttribute("class", `section-door ${kindClass}`);
+          const wTitle = document.createElementNS(NS, "title");
+          wTitle.textContent = linkTitle;
+          wall.appendChild(wTitle);
+          sectionSvgEl.appendChild(wall);
+        } else {
+          let headCm = geom.doorCm;
+          let sillCm = 0;
+          if (linkKind === "wall_partial") {
+            headCm = Math.round(geom.ceilingCm * 0.92);
+          } else if (linkKind === "exterior") {
+            sillCm = geom.sillCm;
+          }
+          const yHead = sectionYFromCm(headCm, geom, padT, plotH);
+          const ySill = sectionYFromCm(sillCm, geom, padT, plotH);
+          if (yHead > yCeil + 1) {
+            const transom = document.createElementNS(NS, "line");
+            transom.setAttribute("x1", String(doorX));
+            transom.setAttribute("x2", String(doorX));
+            transom.setAttribute("y1", String(yCeil));
+            transom.setAttribute("y2", String(yHead));
+            transom.setAttribute("class", "section-transom");
+            sectionSvgEl.appendChild(transom);
+          }
+          const door = document.createElementNS(NS, "line");
+          door.setAttribute("x1", String(doorX));
+          door.setAttribute("x2", String(doorX));
+          door.setAttribute("y1", String(yHead));
+          door.setAttribute("y2", String(ySill));
+          door.setAttribute("class", `section-door ${kindClass} ${opening}`);
+          const dTitle = document.createElementNS(NS, "title");
+          dTitle.textContent = linkTitle;
+          door.appendChild(dTitle);
+          sectionSvgEl.appendChild(door);
+          if (sillCm > 0 && ySill < yFloor - 1) {
+            const apron = document.createElementNS(NS, "line");
+            apron.setAttribute("x1", String(doorX));
+            apron.setAttribute("x2", String(doorX));
+            apron.setAttribute("y1", String(ySill));
+            apron.setAttribute("y2", String(yFloor));
+            apron.setAttribute("class", "section-transom");
+            sectionSvgEl.appendChild(apron);
+          }
+        }
         x += w + gap;
       } else {
         x += w;
@@ -7229,7 +8004,7 @@
         c.kind === "facade" ? `ext ${c.label}` : c.label
       );
       sectionMetaEl.textContent =
-        `Ceiling ${ceilingCm} cm · ${labels.join(" → ")}` +
+        `Ceiling ${geom.ceilingCm} cm · doors ${geom.doorCm} cm · ${labels.join(" → ")}` +
         (linkBits.length ? ` · ${linkBits.join(", ")}` : "") +
         ` · scale ${tMin.toFixed(1)}–${tMax.toFixed(1)} ${networkMetricUnit()}`;
     }
@@ -7248,6 +8023,13 @@
           String(mapRoomChartSeriesCache.roomId) === String(selectedMapRoomId)
         ) {
           paintMapRoomChartDatasets(series);
+          if (sectionRoomChart) {
+            try {
+              sectionRoomChart.resize();
+            } catch {
+              /* ignore */
+            }
+          }
         }
       });
     }
@@ -7291,16 +8073,9 @@
       sectionEdgeKeys.add(`${b}|${a}`);
     }
     const waypointSet = new Set(sectionWaypoints);
-    const W = NETWORK_VB_W;
-    const H = NETWORK_VB_H;
-    // Leave room for node radii + façade offsets so edge nodes are not clipped.
-    const pad = 72;
-    const usable = Math.min(W - 2 * pad, H - 2 * pad);
-    const cx = W / 2;
-    const cy = H / 2;
-    // Larger scale + NETWORK_MIN_NODE_DIST keep room pills from overlapping.
-    const scale = usable * 0.52;
-    const toXY = (p) => ({ x: cx + p.x * scale, y: cy + p.y * scale });
+    const placed = networkPlaceGraph(pos, rooms, NETWORK_VB_W, NETWORK_VB_H);
+    networkLayoutVb = { w: placed.w, h: placed.h };
+    const toXY = placed.toXY;
 
     centerNetworkPan();
     applyNetworkViewBox();
@@ -7329,10 +8104,7 @@
     networkSvgEl.appendChild(defs);
 
     const { tMin, tMax } = networkTempScale(rooms);
-    const ceilingCm = Math.max(
-      50,
-      Math.round(Number(data.ceiling_m || 2.5) * 100)
-    );
+    const geom = apartmentGeometry(data);
     if (networkTempScaleEl) {
       networkTempScaleEl.hidden = false;
       const u = networkMetricUnitShort();
@@ -7550,19 +8322,8 @@
     }
 
     for (const group of facadeGroups.values()) {
-      let sx = 0;
-      let sy = 0;
-      let n = 0;
-      for (const room of group.rooms) {
-        const p = pos[room.id];
-        if (!p) continue;
-        const off = networkExteriorOffset(room, p);
-        sx += off.x;
-        sy += off.y;
-        n += 1;
-      }
-      if (!n) continue;
-      const exy = toXY({ x: sx / n, y: sy / n });
+      const exy = placed.facadeXY[group.key];
+      if (!exy) continue;
       group.exy = exy;
 
       for (const room of group.rooms) {
@@ -7671,15 +8432,34 @@
       const humBands = networkShowsBothMetrics()
         ? networkFacadeFieldBands(group.rooms, "humidity")
         : null;
-      const highTxt = networkShowsBothMetrics()
-        ? formatNetworkBothBand(bands.high, humBands.high)
-        : formatNetworkTempBand(bands.high);
-      const lowTxt = networkShowsBothMetrics()
-        ? formatNetworkBothBand(bands.low, humBands.low)
-        : formatNetworkTempBand(bands.low);
-      const otherTxt = networkShowsBothMetrics()
-        ? formatNetworkBothBand(bands.other, humBands.other)
-        : formatNetworkTempBand(bands.other);
+      const facadeSensors = group.rooms.flatMap((r) => r.sensors || []);
+      const highSensors = heightBandSensors(facadeSensors, "high", {
+        exterior: true,
+      });
+      const lowSensors = heightBandSensors(facadeSensors, "low", {
+        exterior: true,
+      });
+      const otherSensors = heightBandSensors(facadeSensors, "", {
+        exterior: true,
+      }).filter((s) => {
+        const h = String(s.height || "").toLowerCase();
+        return h !== "high" && h !== "low";
+      });
+      const highTxt = formatNetworkBandLabel(
+        highSensors,
+        bands.high,
+        humBands && humBands.high
+      );
+      const lowTxt = formatNetworkBandLabel(
+        lowSensors,
+        bands.low,
+        humBands && humBands.low
+      );
+      const otherTxt = formatNetworkBandLabel(
+        otherSensors,
+        bands.other,
+        humBands && humBands.other
+      );
       const roomLabels = group.rooms
         .map((r) => r.label || r.id)
         .join(" + ");
@@ -7705,29 +8485,16 @@
         }
       }
 
-      const facadeSensors = group.rooms.flatMap((r) => r.sensors || []);
-      const contLevels = networkSensorGradientLevels(facadeSensors, ceilingCm, {
+      const contLevels = networkSensorGradientLevels(facadeSensors, geom, {
         exterior: true,
       });
       const heightStops = networkHeightStops(bands);
-      const hasTemp = !!(
-        contLevels ||
-        heightStops.high != null ||
-        heightStops.mid != null ||
-        heightStops.low != null
-      );
-      const extW = 52;
-      const extH = 80;
+      const fillLevels = networkFillLevels(contLevels, heightStops, geom);
+      const extW = NETWORK_FACADE_W;
+      const extH = NETWORK_FACADE_H;
       const gradId = `ext-grad-${group.key.replace(/[^a-z0-9+_-]/gi, "_")}`;
-      const fill = hasTemp
-        ? appendHeightGradient(
-            defs,
-            NS,
-            gradId,
-            contLevels || heightStops,
-            tMin,
-            tMax
-          )
+      const fill = fillLevels
+        ? appendHeightGradient(defs, NS, gradId, fillLevels, tMin, tMax)
         : "#354860";
       const extNode = document.createElementNS(NS, "rect");
       extNode.setAttribute("x", String(exy.x - extW / 2));
@@ -7773,8 +8540,21 @@
         const highLab = document.createElementNS(NS, "text");
         highLab.setAttribute("x", String(exy.x));
         highLab.setAttribute("y", String(exy.y - extH / 2 + 16));
-        highLab.setAttribute("class", "network-sublabel network-temp-high");
-        highLab.textContent = highTxt;
+        highLab.setAttribute(
+          "class",
+          `network-sublabel network-temp-high${highTxt === "stale" ? " is-stale" : ""}`
+        );
+        setSvgTextWithTrend(
+          highLab,
+          NS,
+          highTxt,
+          highTxt === "stale"
+            ? ""
+            : sensorsTempTrend(highSensors),
+          highTxt !== "stale" &&
+            networkMapMetric !== "humidity" &&
+            sensorsTempNeedsWarn(highSensors)
+        );
         gLabels.appendChild(highLab);
       }
 
@@ -7788,27 +8568,34 @@
       const bottomTxt =
         lowTxt ||
         (!highTxt
-          ? otherTxt ||
-            (networkMapMetric === "temp" &&
-            facadeLo != null &&
-            facadeHi != null
-              ? facadeLo === facadeHi
-                ? `${facadeLo.toFixed(1)}°C`
-                : `${facadeLo.toFixed(1)}–${facadeHi.toFixed(1)}°C`
-              : null)
+          ? otherTxt
           : null);
       if (bottomTxt) {
         const lowLab = document.createElementNS(NS, "text");
         lowLab.setAttribute("x", String(exy.x));
         lowLab.setAttribute("y", String(exy.y + extH / 2 - 10));
-        lowLab.setAttribute("class", "network-sublabel network-temp-low");
-        lowLab.textContent = bottomTxt;
+        lowLab.setAttribute(
+          "class",
+          `network-sublabel network-temp-low${
+            bottomTxt === "stale" ? " is-stale" : ""
+          }`
+        );
+        const bottomSensors = lowTxt ? lowSensors : otherSensors;
+        setSvgTextWithTrend(
+          lowLab,
+          NS,
+          bottomTxt,
+          bottomTxt === "stale" ? "" : sensorsTempTrend(bottomSensors),
+          bottomTxt !== "stale" &&
+            networkMapMetric !== "humidity" &&
+            sensorsTempNeedsWarn(bottomSensors)
+        );
         gLabels.appendChild(lowLab);
       }
     }
 
-    const ROOM_W = 64;
-    const ROOM_H = 100;
+    const ROOM_W = NETWORK_ROOM_W;
+    const ROOM_H = NETWORK_ROOM_H;
 
     for (const room of rooms) {
       const p = pos[room.id];
@@ -7827,26 +8614,14 @@
         : null;
       const contLevels = networkSensorGradientLevels(
         room.sensors || [],
-        ceilingCm,
+        geom,
         { exterior: false }
       );
       const heightStops = networkHeightStops(bands);
-      const hasTemp = !!(
-        contLevels ||
-        heightStops.high != null ||
-        heightStops.mid != null ||
-        heightStops.low != null
-      );
+      const fillLevels = networkFillLevels(contLevels, heightStops, geom);
       const gradId = `room-grad-${String(room.id).replace(/[^a-z0-9_-]/gi, "_")}`;
-      const fill = hasTemp
-        ? appendHeightGradient(
-            defs,
-            NS,
-            gradId,
-            contLevels || heightStops,
-            tMin,
-            tMax
-          )
+      const fill = fillLevels
+        ? appendHeightGradient(defs, NS, gradId, fillLevels, tMin, tMax)
         : roomColor(room.id, 0) + "44";
       const isOnPath = sectionPathSet.has(room.id);
       const isWaypoint = waypointSet.has(room.id);
@@ -7894,20 +8669,35 @@
       } else if (hasAc) {
         node.setAttribute("stroke", "#2b7bbf");
       }
-      const highTxt = networkShowsBothMetrics()
-        ? formatNetworkBothBand(bands.high, humBands.high)
-        : formatNetworkTempBand(bands.high);
-      const lowTxt = networkShowsBothMetrics()
-        ? formatNetworkBothBand(bands.low, humBands.low)
-        : formatNetworkTempBand(bands.low);
-      const otherTxt = networkShowsBothMetrics()
-        ? formatNetworkBothBand(
-            [...(bands.mid || []), ...(bands.other || [])],
-            [...(humBands.mid || []), ...(humBands.other || [])]
-          )
-        : formatNetworkTempBand(
-            [...(bands.mid || []), ...(bands.other || [])]
-          );
+      const indoorSensors = (room.sensors || []).filter(
+        (s) => String(s.zone || "").toLowerCase() !== "exterior"
+      );
+      const highSensors = heightBandSensors(indoorSensors, "high");
+      const lowSensors = heightBandSensors(indoorSensors, "low");
+      const otherSensors = [
+        ...heightBandSensors(indoorSensors, "mid"),
+        ...heightBandSensors(indoorSensors, "").filter((s) => {
+          const h = String(s.height || "").toLowerCase();
+          return h !== "high" && h !== "low" && h !== "mid";
+        }),
+      ];
+      const highTxt = formatNetworkBandLabel(
+        highSensors,
+        bands.high,
+        humBands && humBands.high
+      );
+      const lowTxt = formatNetworkBandLabel(
+        lowSensors,
+        bands.low,
+        humBands && humBands.low
+      );
+      const otherTxt = formatNetworkBandLabel(
+        otherSensors,
+        [...(bands.mid || []), ...(bands.other || [])],
+        humBands
+          ? [...(humBands.mid || []), ...(humBands.other || [])]
+          : null
+      );
       const title = document.createElementNS(NS, "title");
       const sensorBits = (room.sensors || [])
         .map((s) => {
@@ -7973,9 +8763,19 @@
         highLab.setAttribute("y", String(xy.y - ROOM_H / 2 + 16));
         highLab.setAttribute(
           "class",
-          `network-sublabel network-temp-high${isHottest ? " is-hottest" : ""}`
+          `network-sublabel network-temp-high${
+            isHottest ? " is-hottest" : ""
+          }${highTxt === "stale" ? " is-stale" : ""}`
         );
-        highLab.textContent = highTxt;
+        setSvgTextWithTrend(
+          highLab,
+          NS,
+          highTxt,
+          highTxt === "stale" ? "" : sensorsTempTrend(highSensors),
+          highTxt !== "stale" &&
+            networkMapMetric !== "humidity" &&
+            sensorsTempNeedsWarn(highSensors)
+        );
         gLabels.appendChild(highLab);
       }
 
@@ -7989,9 +8789,6 @@
       lab.textContent = room.label || room.id;
       gLabels.appendChild(lab);
 
-      const indoorSensors = (room.sensors || []).filter(
-        (s) => String(s.zone || "").toLowerCase() !== "exterior"
-      );
       const roomFallback = networkShowsBothMetrics()
         ? formatNetworkBothBand(
             indoorSensors.map((s) =>
@@ -8014,9 +8811,20 @@
         lowLab.setAttribute("y", String(xy.y + ROOM_H / 2 - 10));
         lowLab.setAttribute(
           "class",
-          `network-sublabel network-temp-low${isHottest ? " is-hottest" : ""}`
+          `network-sublabel network-temp-low${
+            isHottest ? " is-hottest" : ""
+          }${bottomTxt === "stale" ? " is-stale" : ""}`
         );
-        lowLab.textContent = bottomTxt;
+        const bottomSensors = lowTxt ? lowSensors : indoorSensors;
+        setSvgTextWithTrend(
+          lowLab,
+          NS,
+          bottomTxt,
+          bottomTxt === "stale" ? "" : sensorsTempTrend(bottomSensors),
+          bottomTxt !== "stale" &&
+            networkMapMetric !== "humidity" &&
+            sensorsTempNeedsWarn(bottomSensors)
+        );
         gLabels.appendChild(lowLab);
       }
 
@@ -8267,7 +9075,7 @@
       networkStatusEl.textContent = `Updated ${new Date().toLocaleTimeString("en-GB")}`;
     }
     requestAnimationFrame(() =>
-      applyMapFontScale(networkSvgEl, NETWORK_VB_W / networkZoom)
+      applyMapFontScale(networkSvgEl, networkLayoutVb.w / networkZoom)
     );
   }
 
@@ -10870,13 +11678,19 @@
     }
   }
 
-  async function fetchForecast(addresses) {
+  async function fetchForecast(addresses, opts = {}) {
     await requestBrowserGeo(false);
+    const pastH =
+      opts.hours != null ? Number(opts.hours) : rangeSpanHours();
+    const futH =
+      opts.futureHours != null
+        ? Number(opts.futureHours)
+        : forecastFutureHours;
     const params = new URLSearchParams({
       // Past outdoor for bands / alignment; future horizon is independent.
       // Open-Meteo forecast max is 16 d (384 h).
-      hours: String(Math.min(rangeSpanHours(), 384)),
-      future_hours: String(forecastFutureHours),
+      hours: String(Math.min(Math.max(pastH, 1 / 60), 384)),
+      future_hours: String(Math.min(Math.max(futH, 0), 384)),
     });
     for (const address of addresses) {
       params.append("address", address);
@@ -11168,9 +11982,13 @@
       const readings = document.createElement("div");
       readings.className = "overview-card-readings";
       readings.innerHTML =
-        `<span class="overview-card-temp temp">${escapeHtml(
+        `<span class="overview-card-temp temp">${
+          device.temperature_c != null ? tempTrendHtml(device.temp_trend) : ""
+        }${escapeHtml(
           fmtNum(device.temperature_c, 1, " °C")
-        )}</span>` +
+        )}${
+          device.temperature_c != null ? tempUpdateWarnHtml(device) : ""
+        }</span>` +
         `<span class="overview-card-hum">${escapeHtml(
           fmtNum(device.humidity, 1, " %")
         )}</span>`;
@@ -11317,7 +12135,11 @@
         <div class="device-current-metrics">
           <div class="metric">
             <span class="metric-label">${escapeHtml(t("compare.metric.temp"))}</span>
-            <span class="metric-value">${fmtNum(device.temperature_c, 1, " °C")}</span>
+            <span class="metric-value">${
+              device.temperature_c != null ? tempTrendHtml(device.temp_trend) : ""
+            }${fmtNum(device.temperature_c, 1, " °C")}${
+              device.temperature_c != null ? tempUpdateWarnHtml(device) : ""
+            }</span>
           </div>
           <div class="metric">
             <span class="metric-label">${escapeHtml(t("compare.metric.humidity"))}</span>
@@ -12254,7 +13076,7 @@
     clearTimeout(mapFontScaleResizeTimer);
     mapFontScaleResizeTimer = setTimeout(() => {
       applyMapFontScale(sectionSvgEl, SECTION_VB_W);
-      applyMapFontScale(networkSvgEl, NETWORK_VB_W / networkZoom);
+      applyMapFontScale(networkSvgEl, networkLayoutVb.w / networkZoom);
     }, 150);
   });
 
@@ -12826,11 +13648,30 @@
       setSectionShowSmall(sectionShowSmallEl.checked);
     });
   }
+  if (sectionShowHeightsEl) {
+    sectionShowHeightsEl.addEventListener("change", () => {
+      setSectionShowHeights(sectionShowHeightsEl.checked);
+    });
+  }
   if (sectionPathClearBtn) {
     sectionPathClearBtn.addEventListener("click", () => {
       clearSectionWaypoints();
     });
   }
+  mapOverviewRangeButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const h = Number(btn.dataset.mapOverviewHours);
+      if (!Number.isFinite(h) || h <= 0) return;
+      mapOverviewHours = h;
+      mapOverviewRangeButtons.forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      loadMapOverviewChart().catch((err) => {
+        if (mapOverviewChartsStatusEl) {
+          mapOverviewChartsStatusEl.textContent = `Error: ${err.message}`;
+        }
+      });
+    });
+  });
   mapRoomRangeButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
       const h = Number(btn.dataset.mapHours);
@@ -14401,6 +15242,12 @@
   );
   if (savedSectionShowSmall === "1" || savedSectionShowSmall === "0") {
     sectionShowSmall = savedSectionShowSmall === "1";
+  }
+  const savedSectionShowHeights = localStorage.getItem(
+    "govee-charts.sectionShowHeights"
+  );
+  if (savedSectionShowHeights === "1" || savedSectionShowHeights === "0") {
+    sectionShowHeights = savedSectionShowHeights === "1";
   }
   try {
     const rawWp = localStorage.getItem("govee-charts.sectionWaypoints");

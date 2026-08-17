@@ -55,7 +55,12 @@ from govee_charts.cursor_chat import (
     resolve_workspace,
     stream_agent_chat,
 )
-from govee_charts.db import Database, coverage_from_minute_set, is_db_locked
+from govee_charts.db import (
+    Database,
+    WORKERS_HEARTBEAT_MAX_AGE_S,
+    coverage_from_minute_set,
+    is_db_locked,
+)
 from govee_charts.decode import Reading
 from govee_charts.federation import csv_source
 from govee_charts.energy import build_energy_summary, estimate_live_ac_watts
@@ -68,6 +73,7 @@ from govee_charts.tts import (
     synthesize,
 )
 from govee_charts.presence import PresenceConfig, PresenceService
+from govee_charts.ha_th import HaThConfig, map_stale_after_s
 from govee_charts.hvac import HvacConfig, hvac_active_bands, is_hvac_active
 from govee_charts import mail_inbox
 from govee_charts.weather import WeatherService
@@ -793,6 +799,7 @@ def create_app(
     presence: PresenceService | None = None,
     scanner_enabled: bool = True,
     ble_alert_stale_after: float = 300.0,
+    ha_th: HaThConfig | None = None,
     tts: dict[str, Any] | None = None,
     cursor_chat: dict[str, Any] | None = None,
     map_chat_store: MapChatStore | None = None,
@@ -817,6 +824,7 @@ def create_app(
     app.state.presence = presence
     app.state.scanner_enabled = bool(scanner_enabled)
     app.state.ble_alert_stale_after = max(0.0, float(ble_alert_stale_after))
+    app.state.ha_th = ha_th or HaThConfig()
     tts_cfg = dict(tts or {})
     home_url = str(tts_cfg.get("home_url") or "").strip().rstrip("/")
     return_audio = tts_cfg.get("return_audio")
@@ -858,19 +866,42 @@ def create_app(
         """Standalone embeddable chart (iframe / link share)."""
         return widget_html_response()
 
+    async def _health_heartbeat(component: str) -> float | None:
+        try:
+            return await db.get_runtime_heartbeat(component)
+        except Exception as exc:
+            if is_db_locked(exc):
+                logger.warning("Health heartbeat read blocked (%s): %s", component, exc)
+                return None
+            raise
+
     @app.get("/api/health")
     async def api_health() -> dict[str, Any]:
-        hb = await db.get_runtime_heartbeat("workers")
-        ble_hb = await db.get_runtime_heartbeat("ble")
-        pause_hb = await db.get_runtime_heartbeat("ble_pause")
+        hb_sql = await _health_heartbeat("workers")
+        hb_file = db.read_workers_heartbeat_file()
+        hb_candidates = [t for t in (hb_sql, hb_file) if t is not None]
+        hb = max(hb_candidates) if hb_candidates else None
+        ble_hb = await _health_heartbeat("ble")
+        pause_hb = await _health_heartbeat("ble_pause")
         now = time.time()
         age = (now - hb) if hb is not None else None
-        workers_available = bool(age is not None and age <= 15.0)
         stale_after = float(app.state.ble_alert_stale_after)
         scanner_enabled = bool(app.state.scanner_enabled)
         ble_age = (now - ble_hb) if ble_hb is not None else None
         pause_age = (now - pause_hb) if pause_hb is not None else None
         paused_for_gatt = bool(pause_age is not None and pause_age <= 20.0)
+        workers_available = bool(
+            age is not None and age <= WORKERS_HEARTBEAT_MAX_AGE_S
+        )
+        # BLE ads are written by the same process; a SQLite lock can stall the
+        # workers row without stopping the scanner.
+        if (
+            not workers_available
+            and scanner_enabled
+            and ble_age is not None
+            and ble_age <= WORKERS_HEARTBEAT_MAX_AGE_S
+        ):
+            workers_available = True
         if not scanner_enabled or stale_after <= 0:
             ble_ok = True
         elif paused_for_gatt:
@@ -1963,9 +1994,17 @@ def create_app(
     @app.get("/api/devices")
     async def api_devices() -> list[dict[str, Any]]:
         labels: dict[str, str] = app.state.labels
-        return [
-            enrich_device(d, labels) for d in await db.list_devices()
-        ]
+        devices = [enrich_device(d, labels) for d in await db.list_devices()]
+        trends = await db.temperature_trends(
+            [str(d.get("address") or "") for d in devices]
+        )
+        for d in devices:
+            trend = trends.get(str(d.get("address") or "").upper())
+            if trend:
+                d["temp_trend"] = trend.get("dir")
+                d["temp_delta_c"] = trend.get("delta_c")
+                d["temp_rate_c_h"] = trend.get("rate_c_h")
+        return devices
 
     @app.get("/api/coverage")
     async def api_coverage(
@@ -2123,7 +2162,9 @@ def create_app(
             r["id"]: [] for r in payload["rooms"]
         }
         # Live map / cross-section: ignore readings older than this (seconds).
-        sensor_stale_after_s = 900.0
+        # BLE Govee ~15 min; Tuya HA T&H uses ha_th.stale_after (default 2 h).
+        ha_th_cfg: HaThConfig | None = getattr(app.state, "ha_th", None)
+        sensor_stale_after_s = map_stale_after_s(cfg=ha_th_cfg)
         now_ts = time.time()
         for d in devices:
             room = (d.get("room") or "").strip().lower()
@@ -2136,7 +2177,12 @@ def create_app(
                 last_f = float(last_ts) if last_ts is not None else None
             except (TypeError, ValueError):
                 last_f = None
-            stale = last_f is None or (now_ts - last_f) > sensor_stale_after_s
+            after_s = map_stale_after_s(
+                address=str(d.get("address") or ""),
+                model=str(d.get("model") or ""),
+                cfg=ha_th_cfg,
+            )
+            stale = last_f is None or (now_ts - last_f) > after_s
             by_room[room].append(
                 {
                     "address": d.get("address"),
@@ -2148,9 +2194,20 @@ def create_app(
                     "humidity": d.get("humidity"),
                     "last_reading_ts": last_f,
                     "stale": stale,
-                    "stale_after_s": sensor_stale_after_s,
+                    "stale_after_s": after_s,
                 }
             )
+        trends = await db.temperature_trends(
+            [str(s.get("address") or "") for sensors in by_room.values() for s in sensors]
+        )
+        for sensors in by_room.values():
+            for s in sensors:
+                trend = trends.get(str(s.get("address") or "").upper())
+                if not trend:
+                    continue
+                s["temp_trend"] = trend.get("dir")
+                s["temp_delta_c"] = trend.get("delta_c")
+                s["temp_rate_c_h"] = trend.get("rate_c_h")
         for room in payload["rooms"]:
             room["sensors"] = by_room.get(room["id"], [])
         payload["sensor_stale_after_s"] = sensor_stale_after_s
@@ -2160,14 +2217,13 @@ def create_app(
         ) -> list[dict[str, Any]]:
             """Exterior sensors for façade comparison — prefer height=high.
 
-            Stale sensors are ignored so a fresh low sensor can replace a
-            dead high one on the plan temperature bands.
+            Keep a stale high sensor (show last reading + warning on the map)
+            rather than substituting a fresh low sensor.
             """
             exterior = [
                 s
                 for s in sensors
                 if str(s.get("zone") or "").lower() == "exterior"
-                and not s.get("stale")
             ]
             high = [
                 s
@@ -2515,8 +2571,6 @@ def create_app(
             exterior = _exterior_comparative(sensors)
             live_temps: list[float] = []
             for s in interior:
-                if s.get("stale"):
-                    continue
                 try:
                     if s.get("temperature_c") is not None:
                         live_temps.append(float(s["temperature_c"]))
@@ -2532,8 +2586,6 @@ def create_app(
                 room["temp_c"] = None
             facade_temps: list[float] = []
             for s in exterior:
-                if s.get("stale"):
-                    continue
                 try:
                     if s.get("temperature_c") is not None:
                         facade_temps.append(float(s["temperature_c"]))
@@ -2548,7 +2600,7 @@ def create_app(
                 room["facade_sensor_names"] = [
                     str(s.get("name") or s.get("address") or "")
                     for s in exterior
-                    if not s.get("stale") and s.get("temperature_c") is not None
+                    if s.get("temperature_c") is not None
                 ]
             else:
                 room["facade_sensor_names"] = []
@@ -2568,8 +2620,6 @@ def create_app(
                     room["facade_temp_c"] = None
             hums: list[float] = []
             for s in interior:
-                if s.get("stale"):
-                    continue
                 try:
                     if s.get("humidity") is not None:
                         hums.append(float(s["humidity"]))

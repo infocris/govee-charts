@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -20,8 +21,9 @@ from govee_charts.address import (
 from govee_charts.decode import Reading
 from govee_charts.federation import source_bucket_sql
 
-_HEARTBEAT_LOCK_RETRIES = 3
-_HEARTBEAT_LOCK_BACKOFF_S = 0.05
+# SQLITE_LOCKED is not covered by busy_timeout; wait as long as PRAGMA busy_timeout.
+_HEARTBEAT_LOCK_WAIT_S = 15.0
+WORKERS_HEARTBEAT_MAX_AGE_S = 15.0
 
 
 def is_db_locked(exc: BaseException) -> bool:
@@ -442,12 +444,34 @@ class Database:
             return (0, 0, 0)
         return (int(row[0]), int(row[1]), int(row[2]))
 
-    async def touch_runtime_heartbeat(self, component: str) -> None:
-        """Upsert the latest heartbeat timestamp for a runtime component."""
-        key = str(component).strip().lower()
-        last_exc: BaseException | None = None
-        for attempt in range(_HEARTBEAT_LOCK_RETRIES):
-            ts = time.time()
+    def workers_heartbeat_path(self) -> Path:
+        """Sidecar file for workers liveness (independent of SQLite locks)."""
+        return self.path.with_name(self.path.name + ".workers-hb")
+
+    def write_workers_heartbeat_file(self, ts: float | None = None) -> None:
+        """Write the workers heartbeat timestamp to the sidecar file."""
+        when = float(time.time() if ts is None else ts)
+        self.workers_heartbeat_path().write_text(f"{when:.6f}\n", encoding="ascii")
+
+    def read_workers_heartbeat_file(self) -> float | None:
+        """Return the sidecar workers heartbeat, or None if missing/invalid."""
+        try:
+            raw = self.workers_heartbeat_path().read_text(encoding="ascii").strip()
+        except OSError:
+            return None
+        try:
+            return float(raw.split()[0])
+        except (ValueError, IndexError):
+            return None
+
+    async def _touch_runtime_heartbeat_sql(
+        self, key: str, ts: float, wait_s: float | None = None
+    ) -> None:
+        deadline = time.monotonic() + (
+            _HEARTBEAT_LOCK_WAIT_S if wait_s is None else max(0.0, float(wait_s))
+        )
+        delay = 0.05
+        while True:
             try:
                 await self.db.execute(
                     """
@@ -461,12 +485,31 @@ class Database:
                 await self.db.commit()
                 return
             except sqlite3.OperationalError as exc:
-                last_exc = exc
-                if not is_db_locked(exc) or attempt + 1 >= _HEARTBEAT_LOCK_RETRIES:
+                if not is_db_locked(exc) or time.monotonic() >= deadline:
                     raise
-                await asyncio.sleep(_HEARTBEAT_LOCK_BACKOFF_S * (attempt + 1))
-        if last_exc is not None:
-            raise last_exc
+                await asyncio.sleep(delay)
+                delay = min(1.0, delay * 2)
+
+    async def touch_runtime_heartbeat(self, component: str) -> None:
+        """Upsert the latest heartbeat timestamp for a runtime component."""
+        key = str(component).strip().lower()
+        ts = time.time()
+        file_ok = False
+        if key == "workers":
+            try:
+                self.write_workers_heartbeat_file(ts)
+                file_ok = True
+            except OSError:
+                pass
+        try:
+            # Sidecar already proves liveness; don't stall the loop on SQLite.
+            await self._touch_runtime_heartbeat_sql(
+                key, ts, wait_s=1.0 if file_ok else None
+            )
+        except Exception:
+            if file_ok:
+                return
+            raise
 
     async def get_runtime_heartbeat(self, component: str) -> float | None:
         """Return last heartbeat timestamp for a runtime component."""
@@ -2047,6 +2090,88 @@ class Database:
             (address.upper(), lim),
         )
         return [dict(row) for row in await cursor.fetchall()]
+
+    async def temperature_trends(
+        self,
+        addresses: list[str],
+        *,
+        window_s: float = 7200.0,
+        target_lag_s: float = 1200.0,
+        min_lag_s: float = 180.0,
+        deadband_c: float = 0.15,
+    ) -> dict[str, dict[str, Any]]:
+        """Short-term temperature derivative per device (up / down / flat).
+
+        Compares the latest sample to a point about ``target_lag_s`` earlier
+        (clamped to ``[min_lag_s, window_s]``). Changes within ``deadband_c``
+        are ``flat`` so 0.1 °C Govee noise does not flicker the arrow.
+        """
+        addrs = [str(a or "").strip().upper() for a in addresses if str(a or "").strip()]
+        addrs = list(dict.fromkeys(addrs))
+        if not addrs:
+            return {}
+        now = time.time()
+        window_s = max(float(min_lag_s) + 60.0, float(window_s))
+        cutoff = now - window_s
+        placeholders = ",".join("?" * len(addrs))
+        cursor = await self.db.execute(
+            f"""
+            SELECT address, ts, temperature_c
+            FROM readings
+            WHERE address IN ({placeholders}) AND ts >= ?
+            ORDER BY address, ts DESC
+            """,
+            (*addrs, cutoff),
+        )
+        by_addr: dict[str, list[tuple[float, float]]] = {a: [] for a in addrs}
+        for row in await cursor.fetchall():
+            addr = str(row["address"] or "").upper()
+            try:
+                ts = float(row["ts"])
+                temp = float(row["temperature_c"])
+            except (TypeError, ValueError):
+                continue
+            if addr not in by_addr or not math.isfinite(ts) or not math.isfinite(temp):
+                continue
+            by_addr[addr].append((ts, temp))
+
+        min_lag = max(60.0, float(min_lag_s))
+        target_lag = max(min_lag, float(target_lag_s))
+        deadband = max(0.0, float(deadband_c))
+        out: dict[str, dict[str, Any]] = {}
+        for addr, samples in by_addr.items():
+            if len(samples) < 2:
+                continue
+            ts_now, t_now = samples[0]
+            best: tuple[float, float] | None = None
+            best_err = None
+            for ts_then, t_then in samples[1:]:
+                lag = ts_now - ts_then
+                if lag < min_lag:
+                    continue
+                err = abs(lag - target_lag)
+                if best_err is None or err < best_err:
+                    best = (ts_then, t_then)
+                    best_err = err
+            if best is None:
+                continue
+            ts_then, t_then = best
+            delta = t_now - t_then
+            span = ts_now - ts_then
+            if abs(delta) < deadband:
+                direction = "flat"
+            elif delta > 0:
+                direction = "up"
+            else:
+                direction = "down"
+            rate = (delta / span) * 3600.0 if span > 0 else 0.0
+            out[addr] = {
+                "dir": direction,
+                "delta_c": round(delta, 2),
+                "rate_c_h": round(rate, 2),
+                "span_s": round(span, 1),
+            }
+        return out
 
     async def history_aggregate(
         self,

@@ -19,6 +19,12 @@ from govee_charts.decode import Reading
 
 logger = logging.getLogger(__name__)
 
+# Map / cross-section: Tuya cloud T&H often reports only on 0.5 °C change
+# or ~hourly heartbeat, with 1–2 h night silences. 2 h covers that; 15 min
+# (BLE default) would mark a healthy sensor stale most of the time.
+DEFAULT_STALE_AFTER_S = 7200.0
+BLE_SENSOR_STALE_AFTER_S = 900.0
+
 BATTERY_STATE_PCT = {
     "high": 100,
     "full": 100,
@@ -103,6 +109,7 @@ class HaThDevice:
     zone: str = "exterior"
     height: str = ""
     room: str = ""
+    stale_after: float | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> HaThDevice | None:
@@ -118,6 +125,15 @@ class HaThDevice:
         label = str(raw.get("label") or raw.get("name") or "").strip()
         if not label:
             label = address
+        raw_stale = raw.get("stale_after")
+        stale_after: float | None = None
+        if raw_stale not in (None, ""):
+            try:
+                parsed = float(raw_stale)
+            except (TypeError, ValueError):
+                parsed = 0.0
+            if parsed > 0:
+                stale_after = parsed
         return cls(
             address=address,
             label=label,
@@ -128,6 +144,7 @@ class HaThDevice:
             zone=str(raw.get("zone") or "").strip().lower(),
             height=str(raw.get("height") or "").strip().lower(),
             room=str(raw.get("room") or "").strip().lower(),
+            stale_after=stale_after,
         )
 
 
@@ -139,6 +156,7 @@ class HaThConfig:
     ha_token_file: str = ""
     poll_seconds: float = 60.0
     sample_interval: float = 60.0
+    stale_after: float = DEFAULT_STALE_AFTER_S
     devices: tuple[HaThDevice, ...] = ()
 
     @classmethod
@@ -174,12 +192,43 @@ class HaThConfig:
             sample_interval=max(
                 10.0, float(raw.get("sample_interval") or 60.0)
             ),
+            stale_after=max(
+                60.0, float(raw.get("stale_after") or DEFAULT_STALE_AFTER_S)
+            ),
             devices=tuple(devices),
         )
+
+    def stale_after_for(self, *, address: str = "", model: str = "") -> float:
+        """Seconds without a new reading before the map treats this sensor as stale."""
+        addr = (address or "").strip().upper()
+        for device in self.devices:
+            if device.address == addr:
+                if device.stale_after is not None and device.stale_after > 0:
+                    return float(device.stale_after)
+                return float(self.stale_after)
+        model_l = (model or "").strip().lower()
+        if model_l == "tuya-th" or model_l.startswith("tuya"):
+            return float(self.stale_after)
+        return BLE_SENSOR_STALE_AFTER_S
 
     @property
     def ready(self) -> bool:
         return bool(self.enabled and self.ha_token and self.devices)
+
+
+def map_stale_after_s(
+    *,
+    address: str = "",
+    model: str = "",
+    cfg: HaThConfig | None = None,
+) -> float:
+    """Per-sensor stale window for the apartment map (BLE vs Tuya T&H)."""
+    if cfg is not None:
+        return cfg.stale_after_for(address=address, model=model)
+    model_l = (model or "").strip().lower()
+    if model_l == "tuya-th" or model_l.startswith("tuya"):
+        return DEFAULT_STALE_AFTER_S
+    return BLE_SENSOR_STALE_AFTER_S
 
 
 class HaThPoller:

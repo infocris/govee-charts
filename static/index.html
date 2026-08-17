@@ -612,6 +612,10 @@
             — include bathroom / WC in the cross-section (off by default)
           </li>
           <li>
+            <span class="map-click-keys"><kbd>Heights</kbd></span>
+            — show the cm axis and sensor heights on the cross-section
+          </li>
+          <li>
             <span class="map-click-keys"><kbd>+</kbd> · <kbd>−</kbd> · <kbd>100%</kbd></span>
             — zoom the topology map
           </li>
@@ -659,13 +663,44 @@
       </div>
       <p class="network-meta" id="network-meta" aria-live="polite">Loading…</p>
 
+      <div class="map-overview-charts" id="map-overview-charts">
+        <div class="map-overview-charts-head">
+          <h3 id="map-overview-charts-title">Indoor average</h3>
+          <div class="map-overview-charts-actions">
+            <div class="ranges map-overview-ranges" role="group" aria-label="Overview chart range">
+              <button type="button" data-map-overview-hours="6">6 h</button>
+              <button type="button" data-map-overview-hours="24" class="active">24 h</button>
+              <button type="button" data-map-overview-hours="168">7 d</button>
+            </div>
+            <div class="ranges forecast-future-ranges" role="group" aria-label="Forecast horizon">
+              <span class="forecast-future-label">Future</span>
+              <button type="button" data-forecast-future="1">+1 h</button>
+              <button type="button" data-forecast-future="6">+6 h</button>
+              <button type="button" data-forecast-future="12">+12 h</button>
+              <button type="button" data-forecast-future="24" class="active">+24 h</button>
+              <button type="button" data-forecast-future="72">+3 d</button>
+              <button type="button" data-forecast-future="168">+7 d</button>
+            </div>
+          </div>
+        </div>
+        <p class="map-overview-charts-meta" id="map-overview-charts-meta"></p>
+        <figure class="chart-block map-overview-chart-block">
+          <canvas id="map-overview-temp-chart" height="200"></canvas>
+        </figure>
+        <p class="status" id="map-overview-charts-status" aria-live="polite"></p>
+      </div>
+
       <div class="section-panel">
         <div class="section-head">
           <h3>Open-room cross-section</h3>
           <div class="section-head-right">
-            <label class="section-small-rooms" title="Bathroom, WC, and other rooms under 3.5 m²">
+            <label class="section-toggle" title="Bathroom, WC, and other rooms under 3.5 m²">
               <input type="checkbox" id="section-show-small" />
               Small rooms
+            </label>
+            <label class="section-toggle" title="Show the cm axis and sensor height on labels">
+              <input type="checkbox" id="section-show-heights" checked />
+              Heights
             </label>
             <button type="button" id="section-path-clear" class="section-path-clear" title="Clear clicked rooms">Clear</button>
             <span class="net-temp-scale" id="section-temp-scale" hidden>
@@ -1346,7 +1381,7 @@
             No weather stations configured on this node.
           </p>
           <span class="settings-field-help" data-i18n="settings.stationsHelp">
-            Choose which stations appear on Compare charts and projection cards. Stored in this browser.
+            Choose which stations appear on the Map overview, Compare charts, and projection cards. Stored in this browser.
           </span>
         </fieldset>
         <fieldset class="settings-field settings-service-field">

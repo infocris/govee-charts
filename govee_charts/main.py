@@ -158,6 +158,7 @@ DEFAULTS: dict[str, Any] = {
         "ha_token_file": "",
         "poll_seconds": 60.0,
         "sample_interval": 60.0,
+        "stale_after": 7200.0,
         "devices": [],
     },
     "backfill": {
@@ -756,6 +757,7 @@ async def run_ui_server(
     )
     presence_cfg = PresenceConfig.from_dict(cfg.get("presence"))
     presence_svc = PresenceService(presence_cfg) if presence_cfg.ready else None
+    ha_th_cfg = HaThConfig.from_dict(cfg.get("ha_th"))
     if presence_cfg.enabled and presence_svc is None:
         logging.warning(
             "Presence enabled but not ready "
@@ -810,6 +812,7 @@ async def run_ui_server(
         presence=presence_svc,
         scanner_enabled=bool(cfg["scanner"].get("enabled", True)),
         ble_alert_stale_after=float(cfg["scanner"].get("alert_stale_after", 300.0)),
+        ha_th=ha_th_cfg,
         tts=cfg.get("tts") or {},
         cursor_chat=cfg.get("cursor_chat") or {},
         map_chat_store=map_chat_store,

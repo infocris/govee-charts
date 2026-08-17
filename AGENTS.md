@@ -47,6 +47,8 @@ Chat replies to the repository owner may follow their preferred language; projec
 - Do not invent cloud/Govee HTTP APIs — collection is BLE advertisement decode only (H5075 / H5179).
 - After dependency changes, update `requirements.txt`.
 - Keep the UI simple: overview table + compare charts; avoid heavy frameworks.
+- **Map topology graph** (`static/app.js`): keep a minimum gap between room/façade nodes so connections (edges, padlocks) stay visible, and keep the layout away from the viewBox edges so labels and icons are not clipped. See `.cursor/rules/map-graph-layout.mdc`.
+- **Apartment geometry**: ceiling ≈ **2.5 m**, interior door frames ≈ **2.0 m** (`apartment.ceiling_m` / `apartment.door_height_m`). Cross-section doors run floor→lintel with a transom above; categorical high/mid/low map onto transom / mid-door / near-floor. See `.cursor/rules/apartment-geometry.mdc`.
 - After adding or changing settings in `config.example.toml` / `DEFAULTS`, **also update the local gitignored `config.toml`** when it exists: merge new keys with the documented defaults (enable new optional features that are on by default in the example). Do not overwrite existing user values, secrets, labels, peers, or paths. Mention a restart if the running service must reload config.
 - **Web notifications** (window alerts): HTTPS + root `/sw.js` + `registration.showNotification()`; Safari standalone quirks and diagnostic UX are documented in the personal Cursor skill `web-notifications` (see `~/.cursor/skills/web-notifications/SKILL.md`).
 

@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OVERRIDES_PATH = ROOT / "data" / "apartment_overrides.json"
 
+# Storey geometry (T3): ~2.5 m ceiling, interior door frames ~2.0 m.
+# The ~0.5 m transom above the lintel is a weakly mixed ceiling pocket.
+DEFAULT_CEILING_M = 2.5
+DEFAULT_DOOR_HEIGHT_M = 2.0
+# Typical window sill (not surveyed). Window heads align with door frames.
+DEFAULT_WINDOW_SILL_M = 0.9
+# K_door is calibrated for a 2.0 m leaf in a 2.5 m storey.
+_DOOR_K_REF_OPENING_FRAC = DEFAULT_DOOR_HEIGHT_M / DEFAULT_CEILING_M
+
 # Relative conductances (W/K scale factors); absolute scale set by K_SCALE.
 K_BY_EDGE = {
     "door": 25.0,
@@ -59,6 +68,25 @@ WIND_MIN_MS = 1.5
 # Close daily maxima ⇒ rooms likely share air (door open / large opening).
 TEMP_COUPLE_OPEN_C = 0.8
 TEMP_COUPLE_CLOSED_C = 2.0
+
+
+def height_bands_cm(
+    ceiling_m: float = DEFAULT_CEILING_M,
+    door_height_m: float = DEFAULT_DOOR_HEIGHT_M,
+) -> dict[str, int]:
+    """Map high/mid/low categories onto the door / transom geometry.
+
+    high — midpoint of the transom (above the lintel)
+    mid  — midpoint of the door opening
+    low  — near the floor (~15 % of the door leaf)
+    """
+    ceil_cm = max(50.0, float(ceiling_m) * 100.0)
+    door_cm = min(ceil_cm - 5.0, max(50.0, float(door_height_m) * 100.0))
+    return {
+        "high": int(round((door_cm + ceil_cm) / 2.0)),
+        "mid": int(round(door_cm / 2.0)),
+        "low": int(round(max(20.0, door_cm * 0.15))),
+    }
 
 
 def infer_temp_coupling(
@@ -637,7 +665,8 @@ class EdgeSpec:
 @dataclass
 class ApartmentLayout:
     enabled: bool = False
-    ceiling_m: float = 2.5
+    ceiling_m: float = DEFAULT_CEILING_M
+    door_height_m: float = DEFAULT_DOOR_HEIGHT_M
     area_m2: float = 35.0
     floor: int = 3
     floors_total: int = 7
@@ -653,7 +682,14 @@ class ApartmentLayout:
     def from_dict(cls, raw: dict[str, Any] | None) -> ApartmentLayout:
         raw = raw or {}
         enabled = bool(raw.get("enabled", False))
-        ceiling_m = float(raw.get("ceiling_m") or 2.5)
+        ceiling_m = float(raw.get("ceiling_m") or DEFAULT_CEILING_M)
+        if ceiling_m < 1.5:
+            ceiling_m = 1.5
+        door_height_m = float(raw.get("door_height_m") or DEFAULT_DOOR_HEIGHT_M)
+        if door_height_m < 0.8:
+            door_height_m = 0.8
+        if door_height_m >= ceiling_m:
+            door_height_m = ceiling_m * _DOOR_K_REF_OPENING_FRAC
         area_m2 = float(raw.get("area_m2") or 35.0)
         floor = int(raw.get("floor") or 3)
         floors_total = int(raw.get("floors_total") or 7)
@@ -703,6 +739,7 @@ class ApartmentLayout:
         layout = cls(
             enabled=enabled,
             ceiling_m=ceiling_m,
+            door_height_m=door_height_m,
             area_m2=area_m2,
             floor=floor,
             floors_total=floors_total,
@@ -724,8 +761,14 @@ class ApartmentLayout:
                 self.k_ext[rid] = K_EXT_PER_M2 * room.area_m2 * K_SCALE
             else:
                 self.k_ext[rid] = 0.0
+        door_scale = min(1.0, max(0.25, self.door_height_m / self.ceiling_m)) / (
+            _DOOR_K_REF_OPENING_FRAC or 1.0
+        )
         for edge in self.edges:
             k = K_BY_EDGE.get(edge.kind, K_BY_EDGE["door"]) * K_SCALE
+            if edge.kind == "door":
+                # Open-door mixing cannot vent the transom above the lintel.
+                k *= door_scale
             key = (edge.a, edge.b) if edge.a < edge.b else (edge.b, edge.a)
             self.k_pair[key] = self.k_pair.get(key, 0.0) + k
 
@@ -733,6 +776,11 @@ class ApartmentLayout:
         return {
             "enabled": self.enabled,
             "ceiling_m": self.ceiling_m,
+            "door_height_m": self.door_height_m,
+            "window_sill_m": DEFAULT_WINDOW_SILL_M,
+            "height_bands_cm": height_bands_cm(
+                self.ceiling_m, self.door_height_m
+            ),
             "area_m2": self.area_m2,
             "floor": self.floor,
             "floors_total": self.floors_total,
@@ -1071,7 +1119,8 @@ def default_apartment_dict() -> dict[str, Any]:
     """Canonical layout for the user's T3 (config.example defaults)."""
     return {
         "enabled": False,
-        "ceiling_m": 2.5,
+        "ceiling_m": DEFAULT_CEILING_M,
+        "door_height_m": DEFAULT_DOOR_HEIGHT_M,
         "area_m2": 35.0,
         "floor": 3,
         "floors_total": 7,

@@ -129,7 +129,7 @@
         "Diagnoses browser permission issues (especially Safari standalone) and offers fixes.",
       "settings.stations": "Weather stations",
       "settings.stationsHelp":
-        "Choose which stations appear on Compare charts and projection cards. Stored in this browser.",
+        "Choose which stations appear on the Map overview, Compare charts, and projection cards. Stored in this browser.",
       "settings.stationsEmpty": "No weather stations configured on this node.",
       "settings.stationsCoords": "{lat}, {lon}",
       "settings.service": "Service",
@@ -549,7 +549,7 @@
         "Diagnostique les problèmes de permission (surtout Safari standalone) et propose des correctifs.",
       "settings.stations": "Stations météo",
       "settings.stationsHelp":
-        "Choisir les stations affichées sur les graphiques Comparer et les cartes de projection. Enregistré dans ce navigateur.",
+        "Choisir les stations affichées sur le plan, les graphiques Comparer et les cartes de projection. Enregistré dans ce navigateur.",
       "settings.stationsEmpty": "Aucune station météo configurée sur ce nœud.",
       "settings.stationsCoords": "{lat}, {lon}",
       "settings.service": "Service",

@@ -20,10 +20,13 @@ USER_MESSAGE_MAX = 4_000
 
 SYSTEM_PREAMBLE = (
     "You are advising on apartment climate for the Govee Charts Map view. "
-    "Use the live snapshot below (rooms, sensors, doors/windows, outdoor now, "
-    "next-12h outdoor forecast, HVAC, thermal coupling). Answer clearly in the "
-    "user's language. Ask mode is read-only: do not edit files or run mutating "
-    "commands."
+    "The JSON snapshot includes the apartment layout (room areas, façade "
+    "orientations, ceiling and door-frame heights) plus live sensors, "
+    "doors/windows, outdoor now, next-12h forecast, HVAC, and thermal "
+    "coupling — use that JSON; do not open config.toml. Ceiling is about "
+    "2.5 m and interior door frames about 2.0 m: air above the lintel is a "
+    "weakly mixed pocket. Answer clearly in the user's language. Ask mode is "
+    "read-only: do not edit files or run mutating commands."
 )
 
 FORECAST_CHAT_HOURS = 12.0
@@ -126,31 +129,43 @@ def _outdoor_forecast_next_hours(
 
 def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
     """Compact /api/apartment payload for prompts and chat history."""
+    ceiling_m = _round_num(payload.get("ceiling_m"), 2)
     rooms_out: list[dict[str, Any]] = []
     for room in payload.get("rooms") or []:
         sensors = []
         for s in room.get("sensors") or []:
             if s.get("stale"):
                 continue
-            sensors.append(
-                {
-                    "name": s.get("name"),
-                    "zone": s.get("zone"),
-                    "height_cm": s.get("height_cm"),
-                    "temp_c": _round_num(s.get("temperature_c")),
-                    "humidity": _round_num(s.get("humidity"), 0),
-                }
-            )
-        rooms_out.append(
-            {
-                "id": room.get("id"),
-                "label": room.get("label"),
-                "temp_c": _round_num(room.get("temp_avg") or room.get("temp_now") or room.get("temp_c")),
-                "humidity": _round_num(room.get("humidity"), 0),
-                "window": room.get("window_state"),
-                "sensors": sensors,
+            item: dict[str, Any] = {
+                "name": s.get("name"),
+                "zone": s.get("zone"),
+                "temp_c": _round_num(s.get("temperature_c")),
+                "humidity": _round_num(s.get("humidity"), 0),
             }
-        )
+            if s.get("height"):
+                item["height"] = s.get("height")
+            if s.get("height_cm") is not None:
+                item["height_cm"] = _round_num(s.get("height_cm"), 0)
+            sensors.append(item)
+        area_m2 = _round_num(room.get("area_m2"), 1)
+        exterior = [
+            str(o).strip().lower()
+            for o in (room.get("exterior") or [])
+            if str(o).strip()
+        ]
+        room_row: dict[str, Any] = {
+            "id": room.get("id"),
+            "label": room.get("label"),
+            "area_m2": area_m2,
+            "exterior": exterior,
+            "temp_c": _round_num(room.get("temp_avg") or room.get("temp_now") or room.get("temp_c")),
+            "humidity": _round_num(room.get("humidity"), 0),
+            "window": room.get("window_state"),
+            "sensors": sensors,
+        }
+        if area_m2 is not None and ceiling_m is not None:
+            room_row["volume_m3"] = _round_num(area_m2 * ceiling_m, 1)
+        rooms_out.append(room_row)
 
     edges_out: list[dict[str, Any]] = []
     for edge in payload.get("edges") or []:
@@ -174,6 +189,15 @@ def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
     loc = outdoor.get("location") or {}
 
     return {
+        "layout": {
+            "ceiling_m": ceiling_m,
+            "door_height_m": _round_num(payload.get("door_height_m"), 2),
+            "window_sill_m": _round_num(payload.get("window_sill_m"), 2),
+            "height_bands_cm": payload.get("height_bands_cm"),
+            "area_m2": _round_num(payload.get("area_m2"), 1),
+            "floor": payload.get("floor"),
+            "floors_total": payload.get("floors_total"),
+        },
         "rooms": rooms_out,
         "edges": edges_out,
         "outdoor_temp_c": _round_num(

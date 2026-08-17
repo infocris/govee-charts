@@ -1,0 +1,19 @@
+---
+description: Apartment storey geometry — ceiling, door frames, height bands
+globs: static/app.js,govee_charts/apartment.py,config.example.toml
+alwaysApply: false
+---
+
+# Apartment storey geometry
+
+This T3 is modelled with:
+
+- **Ceiling** ≈ **2.5 m** (`apartment.ceiling_m`)
+- **Interior door frames** ≈ **2.0 m** (`apartment.door_height_m`)
+- The **~0.5 m transom** above the lintel is a weakly mixed ceiling pocket (open doors do not vent it)
+
+When changing the Map **cross-section**, vertical gradients, or the multi-node RC network:
+
+1. Draw interior **doors from the floor to the lintel**, not as a floating mid-height stroke. Solid wall remains above (and window sill wall below, using the typical `window_sill_m` from the API).
+2. Map categorical **high / mid / low** onto this geometry when `height_cm` is missing: high = transom midpoint, mid = mid-door, low = near floor (`height_bands_cm` from `/api/apartment`).
+3. Room air **capacity** uses floor area × ceiling. Open-**door** conductance is scaled by leaf height / storey height (calibrated at 2.0 / 2.5).

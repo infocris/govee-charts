@@ -239,7 +239,9 @@ and Compare. On first start, empty categories are inferred from friendly labels
 when possible.
 When **Height cm** is set, the **Map** view places temperatures on the vertical
 band using that height (relative to `apartment.ceiling_m`); otherwise it falls
-back to high/mid/low.
+back to high/mid/low mapped onto the door / transom geometry
+(`apartment.door_height_m` ≈ 2.0 m in a 2.5 m storey: high above the lintel,
+mid at mid-door, low near the floor).
 
 Enable in `config.toml` (`weather.enabled = true`).
 
@@ -269,7 +271,9 @@ to project rooms as a **multi-node RC network**:
 - Corridor hub linked to every room (no direct outdoor coupling)
 - Kitchen + living: southwest façades; bedroom: northeast
 - Façade comparative temperature prefers exterior sensors with **height = high** (e.g. Cuisine / Chambre Ext Haut); falls back to any exterior sensor
-- Capacities from floor area × 2.5 m ceiling; wall/door conductances by edge type
+- Capacities from floor area × ceiling (`apartment.ceiling_m`, 2.5 m);
+  wall/door conductances by edge type (open-door mixing limited to the
+  ~2.0 m leaf; transom above the lintel is a ceiling pocket)
 - Passive nodes (bathroom, WC) without sensors
 - Solar bias from Open-Meteo **shortwave radiation** and **cloud cover**,
   weighted by façade orientation and local hour (SW stronger in afternoon)
@@ -291,13 +295,16 @@ shortwave radiation / cloud cover, plus current wind and natural vs mechanical
 ventilation hints.
 
 The **Map** view shows an **open-room cross-section** (kitchen → corridor →
-bedroom) colored by live temperatures at each sensor `height_cm`, plus a
-topology graph of rooms as vertical bands with walls/doors as edges and
+bedroom) to scale with the 2.5 m ceiling and ~2.0 m door frames (transom
+above the lintel), colored by live temperatures at each sensor `height_cm`,
+plus a topology graph of rooms as vertical bands with walls/doors as edges and
 cooling-draft suggestions.
 
 Optional **Ask Cursor** (fold above Temperature / Humidity / Both) chats with the
 local Cursor Agent CLI in **ask** mode (read-only Q&A about the live apartment
-snapshot). Requires `[cursor_chat] enabled = true`, the `agent` binary on PATH
+snapshot). The prompt JSON includes the apartment layout (room areas, façades,
+ceiling / door heights) plus live sensors — the agent should not open `config.toml`.
+Requires `[cursor_chat] enabled = true`, the `agent` binary on PATH
 (or `cursor_chat.agent_bin` absolute path for systemd), and `agent login` as the
 same user that runs the UI service. Each turn is stored in a separate SQLite DB
 (`cursor_chat.db_path`, default `data/map_chat.db`) with the sensor snapshot and

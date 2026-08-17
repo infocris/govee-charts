@@ -5,6 +5,7 @@ __pycache__/
 *.log
 data/*.db
 data/*.db-*
+data/*.workers-hb
 data/weather_cache.json
 data/weather_cache.tmp
 data/ssl/
