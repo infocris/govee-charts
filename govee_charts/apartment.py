@@ -504,6 +504,344 @@ def suggest_cooling_airflow(
     }
 
 
+# --- Advice model v2 (façade air + HVAC isolate). v1 is suggest_cooling_airflow. ---
+
+ADVICE_V2_DELTA_C = 1.5
+ADVICE_V2_PLUME_MATCH_C = 0.6
+ADVICE_V2_PLUME_STATION_GAP_C = 1.5
+ADVICE_V2_DEW_MARGIN_C = 0.5
+
+
+def dew_point_c(temp_c: float, rh: float) -> float | None:
+    """Magnus dew point (°C); ``rh`` is relative humidity 0–100."""
+    try:
+        t = float(temp_c)
+        h = float(rh)
+    except (TypeError, ValueError):
+        return None
+    if h <= 0 or h > 100:
+        return None
+    a = 17.625
+    b = 243.04
+    alpha = (a * t) / (b + t) + math.log(h / 100.0)
+    denom = a - alpha
+    if abs(denom) < 1e-9:
+        return None
+    return round((b * alpha) / denom, 2)
+
+
+def room_window_air_c(
+    room: dict[str, Any],
+    outdoor_c: float | None,
+) -> tuple[float | None, str]:
+    """Temperature of air that would enter this room's window.
+
+    Prefers exterior sensors. Drops sensors that look like an exhaust plume
+    (matches indoor while the station is clearly cooler). Falls back to station.
+    """
+    indoor = _room_live_temp(room)
+    kept: list[float] = []
+    skipped_plume = False
+    for s in room.get("sensors") or []:
+        if str(s.get("zone") or "").lower() != "exterior":
+            continue
+        try:
+            t = float(s["temperature_c"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if (
+            indoor is not None
+            and outdoor_c is not None
+            and abs(t - indoor) < ADVICE_V2_PLUME_MATCH_C
+            and outdoor_c <= indoor - ADVICE_V2_PLUME_STATION_GAP_C
+        ):
+            skipped_plume = True
+            continue
+        kept.append(t)
+    if kept:
+        return round(sum(kept) / len(kept), 2), "facade"
+    if skipped_plume and outdoor_c is not None:
+        return round(float(outdoor_c), 2), "plume_fallback"
+    try:
+        ft = room.get("facade_temp_c")
+        if ft is not None and not skipped_plume:
+            return round(float(ft), 2), "facade"
+    except (TypeError, ValueError):
+        pass
+    if outdoor_c is not None:
+        return round(float(outdoor_c), 2), "station"
+    return None, "none"
+
+
+def advice_kind_v2(
+    tin: float | None,
+    twindow: float | None,
+    *,
+    station_c: float | None = None,
+    rh_out: float | None = None,
+    threshold_c: float = ADVICE_V2_DELTA_C,
+) -> str | None:
+    """open / close / humid / None (near balance), using air-at-window."""
+    if tin is None or twindow is None:
+        return None
+    d = float(tin) - float(twindow)
+    thr = float(threshold_c)
+    if d <= -thr:
+        return "close"
+    if d >= thr:
+        t_dew_src = station_c if station_c is not None else twindow
+        if rh_out is not None and float(rh_out) > 0:
+            dew = dew_point_c(t_dew_src, float(rh_out))
+            if dew is not None and dew >= float(tin) - ADVICE_V2_DEW_MARGIN_C:
+                return "humid"
+        return "open"
+    return None
+
+
+def _hvac_room_id(hvac: dict[str, Any] | None) -> str | None:
+    if not hvac or not hvac.get("active"):
+        return None
+    rid = str(hvac.get("room") or "").strip().lower()
+    return rid or None
+
+
+def _hvac_door_open(edges: list[dict[str, Any]], hvac_room: str) -> bool:
+    hid = str(hvac_room).strip().lower()
+    for edge in edges:
+        kind = str(edge.get("kind") or "door")
+        if kind == "wall":
+            continue
+        a = str(edge.get("a") or "").lower()
+        b = str(edge.get("b") or "").lower()
+        if hid not in (a, b):
+            continue
+        if str(edge.get("opening") or "") == "open":
+            return True
+    return False
+
+
+def advise_climate_v2(
+    rooms: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    outdoor_temp_c: float | None = None,
+    outdoor_humidity: float | None = None,
+    hvac: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Per-room open/close advice using façade air and HVAC isolation."""
+    outdoor = None
+    if outdoor_temp_c is not None:
+        try:
+            outdoor = float(outdoor_temp_c)
+        except (TypeError, ValueError):
+            outdoor = None
+    rh = None
+    if outdoor_humidity is not None:
+        try:
+            rh = float(outdoor_humidity)
+        except (TypeError, ValueError):
+            rh = None
+    dew = dew_point_c(outdoor, rh) if outdoor is not None and rh is not None else None
+    hvac_id = _hvac_room_id(hvac)
+    hvac_door_open = bool(hvac_id and _hvac_door_open(edges, hvac_id))
+
+    close_rooms: list[dict[str, str]] = []
+    open_rooms: list[dict[str, str]] = []
+    ok_open: list[dict[str, str]] = []
+    ok_closed: list[dict[str, str]] = []
+    humid = False
+    room_rows: list[dict[str, Any]] = []
+
+    for room in rooms:
+        if not list(room.get("exterior") or []):
+            continue
+        rid = str(room.get("id") or "")
+        label = str(room.get("label") or rid)
+        tin = _room_live_temp(room)
+        twindow, wsrc = room_window_air_c(room, outdoor)
+        kind = advice_kind_v2(tin, twindow, station_c=outdoor, rh_out=rh)
+        if hvac_id and kind == "open":
+            kind = "close"
+        win = str(room.get("window_state") or "")
+        row = {
+            "id": rid,
+            "label": label,
+            "kind": kind,
+            "indoor_c": round(tin, 2) if tin is not None else None,
+            "window_c": twindow,
+            "window_source": wsrc,
+            "window_state": win or None,
+            "facade_c": None,
+        }
+        try:
+            if room.get("facade_temp_c") is not None:
+                row["facade_c"] = round(float(room["facade_temp_c"]), 2)
+        except (TypeError, ValueError):
+            pass
+        room_rows.append(row)
+        ident = {"id": rid, "label": label}
+        any_open = win == "open"
+        if kind in ("close", "humid"):
+            if kind == "humid":
+                humid = True
+            if any_open:
+                close_rooms.append(ident)
+            else:
+                ok_closed.append(ident)
+        elif kind == "open":
+            if any_open:
+                ok_open.append(ident)
+            else:
+                open_rooms.append(ident)
+
+    actions: list[str] = []
+    if hvac_id:
+        hvac_label = next(
+            (
+                str(r.get("label") or r.get("id"))
+                for r in rooms
+                if str(r.get("id") or "").lower() == hvac_id
+            ),
+            hvac_id,
+        )
+        if hvac_door_open:
+            actions.append(
+                f"Close the {hvac_label} door — AC is on; keep that room isolated."
+            )
+        actions.append(
+            f"Keep {hvac_label} windows closed while AC is running."
+        )
+
+    if close_rooms:
+        tone = "humid" if humid else "close"
+    elif open_rooms:
+        tone = "open"
+    elif ok_open or ok_closed:
+        tone = "ok"
+    else:
+        tone = "idle"
+
+    if hvac_id:
+        mode = "hvac_isolate"
+    elif open_rooms or ok_open:
+        mode = "cooling"
+    else:
+        mode = "hold"
+
+    return {
+        "model": "v2",
+        "tone": tone,
+        "mode": mode,
+        "close_rooms": close_rooms,
+        "open_rooms": open_rooms,
+        "ok_open": ok_open,
+        "ok_closed": ok_closed,
+        "humid": humid,
+        "hvac_isolate": bool(hvac_id),
+        "hvac_close_door": hvac_door_open,
+        "hvac_room": hvac_id,
+        "station_temp_c": round(outdoor, 2) if outdoor is not None else None,
+        "station_humidity": round(rh, 0) if rh is not None else None,
+        "dew_c": dew,
+        "delta_c": ADVICE_V2_DELTA_C,
+        "rooms": room_rows,
+        "actions": actions,
+    }
+
+
+def suggest_cooling_airflow_v2(
+    rooms: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    outdoor_temp_c: float | None = None,
+    outdoor_humidity: float | None = None,
+    wind_speed_ms: float | None = None,
+    wind_direction_deg: float | None = None,
+    hvac: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Through-flow suggestion using v2 façade/HVAC rules; v1 function is unchanged."""
+    advice = advise_climate_v2(
+        rooms,
+        edges,
+        outdoor_temp_c=outdoor_temp_c,
+        outdoor_humidity=outdoor_humidity,
+        hvac=hvac,
+    )
+    by_id = {str(r.get("id")): r for r in rooms if r.get("id")}
+    indoor_temps = [
+        t for t in (_room_live_temp(r) for r in by_id.values()) if t is not None
+    ]
+    indoor_avg = (
+        round(sum(indoor_temps) / len(indoor_temps), 2) if indoor_temps else None
+    )
+    outdoor = advice.get("station_temp_c")
+    hold_base = {
+        "mode": "hold",
+        "model": "v2",
+        "outdoor_temp_c": outdoor,
+        "indoor_temp_c": indoor_avg,
+        "delta_c": (
+            round(float(outdoor) - indoor_avg, 2)
+            if outdoor is not None and indoor_avg is not None
+            else None
+        ),
+        "inlet": None,
+        "outlet": None,
+        "path": [],
+        "flows": [],
+        "advice": advice,
+    }
+
+    if advice.get("mode") != "cooling" or advice.get("hvac_isolate"):
+        actions = list(advice.get("actions") or [])
+        if not actions:
+            actions = [
+                "Outdoor air at the façades is not cooler than indoors — "
+                "keep windows closed or use mechanical cooling."
+            ]
+        return {**hold_base, "actions": actions}
+
+    cooling_ids = {
+        str(r["id"])
+        for r in (advice.get("open_rooms") or []) + (advice.get("ok_open") or [])
+        if r.get("id")
+    }
+    if not cooling_ids:
+        actions = list(advice.get("actions") or [])
+        if not actions:
+            actions = [
+                "No façade is cool enough for a through-draft — keep windows closed."
+            ]
+        return {**hold_base, "actions": actions}
+
+    patched: list[dict[str, Any]] = []
+    for r in rooms:
+        row = dict(r)
+        rid = str(row.get("id") or "")
+        if list(row.get("exterior") or []) and rid not in cooling_ids:
+            row["exterior"] = []
+        patched.append(row)
+    window_temps = [
+        room_window_air_c(by_id[rid], outdoor)[0]
+        for rid in cooling_ids
+        if rid in by_id and room_window_air_c(by_id[rid], outdoor)[0] is not None
+    ]
+    v1 = suggest_cooling_airflow(
+        patched,
+        edges,
+        outdoor_temp_c=min(window_temps) if window_temps else outdoor,
+        wind_speed_ms=wind_speed_ms,
+        wind_direction_deg=wind_direction_deg,
+    )
+    v1 = dict(v1)
+    v1["model"] = "v2"
+    v1["advice"] = advice
+    extra = list(advice.get("actions") or [])
+    if extra:
+        v1["actions"] = extra + list(v1.get("actions") or [])
+    return v1
+
+
 def _angle_diff_deg(a: float, b: float) -> float:
     """Smallest signed difference a−b in (−180, 180]."""
     return (float(a) - float(b) + 180.0) % 360.0 - 180.0

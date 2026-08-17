@@ -29,6 +29,16 @@ SYSTEM_PREAMBLE = (
     "read-only: do not edit files or run mutating commands."
 )
 
+SYSTEM_PREAMBLE_V2 = (
+    SYSTEM_PREAMBLE
+    + " Advice model v2 is active: prefer per-room façade exterior sensors "
+    "over the weather station when they disagree; ignore an exterior reading "
+    "that matches indoor air while the station is clearly cooler (exhaust plume). "
+    "If HVAC/AC is active, isolate that room (close its door and windows) "
+    "instead of opening a through-draft. Do not follow the window banner or "
+    "airflow path if façade temperatures contradict them."
+)
+
 FORECAST_CHAT_HOURS = 12.0
 
 
@@ -127,7 +137,11 @@ def _outdoor_forecast_next_hours(
     return out
 
 
-def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
+def apartment_snapshot_dict(
+    payload: dict[str, Any],
+    *,
+    advice_model: str = "v1",
+) -> dict[str, Any]:
     """Compact /api/apartment payload for prompts and chat history."""
     ceiling_m = _round_num(payload.get("ceiling_m"), 2)
     rooms_out: list[dict[str, Any]] = []
@@ -163,6 +177,10 @@ def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
             "window": room.get("window_state"),
             "sensors": sensors,
         }
+        if room.get("facade_temp_c") is not None:
+            room_row["facade_temp_c"] = _round_num(room.get("facade_temp_c"))
+            room_row["facade_temp_min"] = _round_num(room.get("facade_temp_min"))
+            room_row["facade_temp_max"] = _round_num(room.get("facade_temp_max"))
         if area_m2 is not None and ceiling_m is not None:
             room_row["volume_m3"] = _round_num(area_m2 * ceiling_m, 1)
         rooms_out.append(room_row)
@@ -183,12 +201,15 @@ def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
     outdoor = payload.get("outdoor") or {}
     solar = payload.get("solar") or {}
     hvac = payload.get("hvac") or {}
-    airflow = payload.get("airflow") or {}
+    use_v2 = str(advice_model or "v1").strip().lower() == "v2"
+    airflow = (
+        payload.get("airflow_v2") if use_v2 else payload.get("airflow")
+    ) or {}
     couple = payload.get("temp_couple") or {}
     forecast_12h = _outdoor_forecast_next_hours(payload, hours=FORECAST_CHAT_HOURS)
     loc = outdoor.get("location") or {}
 
-    return {
+    out = {
         "layout": {
             "ceiling_m": ceiling_m,
             "door_height_m": _round_num(payload.get("door_height_m"), 2),
@@ -238,12 +259,47 @@ def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
             "actions": airflow.get("actions") or airflow.get("suggestions") or [],
             "summary": airflow.get("summary") or airflow.get("hint"),
         },
+        "advice_model": "v2" if use_v2 else "v1",
     }
+    if use_v2:
+        wa = payload.get("window_advice_v2") or airflow.get("advice") or {}
+        out["window_advice"] = {
+            "tone": wa.get("tone"),
+            "mode": wa.get("mode"),
+            "hvac_isolate": wa.get("hvac_isolate"),
+            "hvac_close_door": wa.get("hvac_close_door"),
+            "station_temp_c": _round_num(wa.get("station_temp_c")),
+            "dew_c": _round_num(wa.get("dew_c")),
+            "open_rooms": [
+                r.get("label") or r.get("id") for r in (wa.get("open_rooms") or [])
+            ],
+            "close_rooms": [
+                r.get("label") or r.get("id") for r in (wa.get("close_rooms") or [])
+            ],
+            "actions": wa.get("actions") or [],
+            "rooms": [
+                {
+                    "id": r.get("id"),
+                    "kind": r.get("kind"),
+                    "indoor_c": _round_num(r.get("indoor_c")),
+                    "window_c": _round_num(r.get("window_c")),
+                    "window_source": r.get("window_source"),
+                    "facade_c": _round_num(r.get("facade_c")),
+                    "window": r.get("window_state"),
+                }
+                for r in (wa.get("rooms") or [])
+            ],
+        }
+    return out
 
 
-def compact_apartment_snapshot(payload: dict[str, Any]) -> str:
+def compact_apartment_snapshot(
+    payload: dict[str, Any],
+    *,
+    advice_model: str = "v1",
+) -> str:
     """Shrink /api/apartment payload for the agent prompt (JSON string)."""
-    snap = apartment_snapshot_dict(payload)
+    snap = apartment_snapshot_dict(payload, advice_model=advice_model)
     text = json.dumps(snap, ensure_ascii=False, separators=(",", ":"))
     if len(text) > SNAPSHOT_MAX_CHARS:
         text = text[: SNAPSHOT_MAX_CHARS - 1] + "…"
@@ -272,6 +328,7 @@ def build_prompt(
     snapshot: str,
     *,
     banner: dict[str, Any] | None = None,
+    advice_model: str = "v1",
 ) -> str:
     msg = (user_message or "").strip()
     if len(msg) > USER_MESSAGE_MAX:
@@ -289,8 +346,13 @@ def build_prompt(
                 + (f"Title: {title}\n" if title else "")
                 + (f"Detail: {detail}\n" if detail else "")
             )
+    preamble = (
+        SYSTEM_PREAMBLE_V2
+        if str(advice_model or "").strip().lower() == "v2"
+        else SYSTEM_PREAMBLE
+    )
     prompt = (
-        f"{SYSTEM_PREAMBLE}\n\n"
+        f"{preamble}\n\n"
         f"Live apartment snapshot (JSON):\n{snapshot}"
         f"{banner_block}\n"
         f"User question:\n{msg}"

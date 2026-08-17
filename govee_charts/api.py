@@ -30,6 +30,7 @@ from govee_charts.apartment import (
     save_overrides,
     solar_bias_c,
     suggest_cooling_airflow,
+    suggest_cooling_airflow_v2,
     ventilation_mode,
 )
 from govee_charts.backfill import BackfillService
@@ -609,6 +610,7 @@ class MapChatBody(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     session_id: str | None = Field(default=None, max_length=128)
     banner: dict[str, Any] | None = None
+    advice_model: str | None = Field(default=None, max_length=8)
 
     model_config = {"extra": "forbid"}
 
@@ -1102,6 +1104,9 @@ def create_app(
             raise HTTPException(status_code=400, detail="empty message")
 
         banner = normalize_banner(body.banner)
+        advice_model = (
+            "v2" if str(body.advice_model or "").strip().lower() == "v2" else "v1"
+        )
 
         # Fresh apartment snapshot (same builder as GET /api/apartment),
         # with enough future outdoor hours for the chat forecast slice.
@@ -1117,9 +1122,15 @@ def create_app(
             raise HTTPException(
                 status_code=502, detail=f"apartment snapshot failed: {exc}"
             ) from exc
-        snapshot_obj = apartment_snapshot_dict(apartment)
-        snapshot = compact_apartment_snapshot(apartment)
-        prompt = build_prompt(message, snapshot, banner=banner)
+        snapshot_obj = apartment_snapshot_dict(
+            apartment, advice_model=advice_model
+        )
+        snapshot = compact_apartment_snapshot(
+            apartment, advice_model=advice_model
+        )
+        prompt = build_prompt(
+            message, snapshot, banner=banner, advice_model=advice_model
+        )
         workspace = resolve_workspace(str(cfg.get("workspace") or ""))
         model = str(cfg.get("model") or "auto")
         mode = str(cfg.get("mode") or "ask")
@@ -2759,6 +2770,32 @@ def create_app(
             )
         else:
             payload["hvac"] = {"enabled": False, "active": False, "room": hvac_cfg.room}
+
+        outdoor_rh = outdoor.get("humidity_now")
+        if outdoor_rh is None:
+            outdoor_rh = solar.get("humidity")
+        payload["airflow_v2"] = suggest_cooling_airflow_v2(
+            payload.get("rooms") or [],
+            payload.get("edges") or [],
+            outdoor_temp_c=(
+                float(outdoor_temp) if outdoor_temp is not None else None
+            ),
+            outdoor_humidity=(
+                float(outdoor_rh) if outdoor_rh is not None else None
+            ),
+            wind_speed_ms=(
+                outdoor.get("wind_speed_ms")
+                if outdoor.get("wind_speed_ms") is not None
+                else solar.get("wind_speed_ms")
+            ),
+            wind_direction_deg=(
+                outdoor.get("wind_direction_deg")
+                if outdoor.get("wind_direction_deg") is not None
+                else solar.get("wind_direction_deg")
+            ),
+            hvac=payload.get("hvac"),
+        )
+        payload["window_advice_v2"] = payload["airflow_v2"].get("advice") or {}
 
         presence_svc: PresenceService | None = app.state.presence
         if presence_svc is not None and presence_svc.cfg.ready:

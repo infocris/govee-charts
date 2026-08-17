@@ -1322,7 +1322,7 @@
     <section id="view-settings" class="view" role="tabpanel" data-i18n-aria-label="nav.settings" aria-label="Settings" hidden>
       <div class="overview-head">
         <h2 data-i18n="settings.title">Settings</h2>
-        <p class="overview-hint" data-i18n="settings.hint">Language, voice, and weather station preferences are stored in this browser.</p>
+        <p class="overview-hint" data-i18n="settings.hint">Language, window advice, voice, and weather station preferences are stored in this browser.</p>
       </div>
       <form class="settings-form" id="settings-form" onsubmit="return false;">
         <label class="settings-field" for="settings-locale">
@@ -1332,6 +1332,16 @@
             <option value="fr" data-i18n="settings.lang.fr">Français</option>
           </select>
           <span class="settings-field-help" data-i18n="settings.languageHelp">User interface language</span>
+        </label>
+        <label class="settings-field" for="settings-advice-model">
+          <span class="settings-field-label" data-i18n="settings.adviceModel">Window advice</span>
+          <select id="settings-advice-model" data-i18n-aria-label="settings.adviceModelHelp" aria-label="Window advice model">
+            <option value="v1" data-i18n="settings.advice.v1">v1 — weather station (current)</option>
+            <option value="v2" data-i18n="settings.advice.v2">v2 — façades and AC</option>
+          </select>
+          <span class="settings-field-help" data-i18n="settings.adviceModelHelp">
+            v1 compares the weather station to indoor air. v2 uses air at each façade, ignores exhaust plumes, and keeps windows closed while AC is on.
+          </span>
         </label>
         <label class="settings-field" for="tts-voice-select">
           <span class="settings-field-label" data-i18n="settings.voice">Voice for alerts</span>

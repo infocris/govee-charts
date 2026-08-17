@@ -115,9 +115,14 @@
       "doorBeep.enable": "Enable door / window beep",
 
       "settings.title": "Settings",
-      "settings.hint": "Language, voice, and weather station preferences are stored in this browser.",
+      "settings.hint": "Language, window advice, voice, and weather station preferences are stored in this browser.",
       "settings.language": "Language",
       "settings.languageHelp": "User interface language",
+      "settings.adviceModel": "Window advice",
+      "settings.adviceModelHelp":
+        "v1 compares the weather station to indoor air (0.5 °C). v2 uses air at each façade (1.5 °C), ignores exhaust plumes, and keeps windows closed while AC is on.",
+      "settings.advice.v1": "v1 — weather station (current)",
+      "settings.advice.v2": "v2 — façades and AC",
       "settings.voice": "Voice for alerts",
       "settings.voiceHelp":
         "Only voices for the selected language. Enable voice alerts with the speaker button in the alert bar.",
@@ -369,6 +374,11 @@
       "banner.enableDoors":
         "Enable [doors] and map contacts to rooms on Overview.",
       "banner.outdoor": "Outdoor {temp} °C",
+      "banner.v2.windowAir":
+        "Window air {temp} °C (station {station} °C)",
+      "banner.v2.hvacTitle": "AC on — keep windows closed",
+      "banner.v2.hvacDetail":
+        "{climate}. Isolate the cooled room: close its door if open, and do not open windows. {open}.",
       "banner.dewRh": " · dew {dew} °C · RH {rh} %",
       "banner.openNow": "Open now: {names}",
       "banner.allClosed": "All tracked openings closed",
@@ -535,9 +545,14 @@
 
       "settings.title": "Réglages",
       "settings.hint":
-        "La langue, la voix et les stations météo sont enregistrées dans ce navigateur.",
+        "La langue, le conseil fenêtres, la voix et les stations météo sont enregistrés dans ce navigateur.",
       "settings.language": "Langue",
       "settings.languageHelp": "Langue de l’interface",
+      "settings.adviceModel": "Conseil fenêtres",
+      "settings.adviceModelHelp":
+        "v1 compare la station météo à l’air intérieur (0,5 °C). v2 utilise l’air à chaque façade (1,5 °C), ignore les panaches d’extraction, et garde les fenêtres fermées quand la clim est allumée.",
+      "settings.advice.v1": "v1 — station météo (actuel)",
+      "settings.advice.v2": "v2 — façades et clim",
       "settings.voice": "Voix des alertes",
       "settings.voiceHelp":
         "Uniquement les voix de la langue choisie. Activez les alertes vocales avec le bouton haut-parleur dans la barre d’alertes.",
@@ -791,6 +806,11 @@
       "banner.enableDoors":
         "Activez [doors] et associez les contacts aux pièces dans Vue d’ensemble.",
       "banner.outdoor": "Extérieur {temp} °C",
+      "banner.v2.windowAir":
+        "Air aux fenêtres {temp} °C (station {station} °C)",
+      "banner.v2.hvacTitle": "Clim allumée — garder les fenêtres fermées",
+      "banner.v2.hvacDetail":
+        "{climate}. Isoler la pièce climatisée : fermer sa porte si elle est ouverte, et ne pas ouvrir les fenêtres. {open}.",
       "banner.dewRh": " · rosée {dew} °C · HR {rh} %",
       "banner.openNow": "Ouvert : {names}",
       "banner.allClosed": "Toutes les ouvertures suivies sont fermées",

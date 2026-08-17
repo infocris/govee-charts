@@ -42,6 +42,7 @@
   const viewSystem = document.getElementById("view-system");
   const viewSettings = document.getElementById("view-settings");
   const settingsLocaleEl = document.getElementById("settings-locale");
+  const settingsAdviceModelEl = document.getElementById("settings-advice-model");
   const settingsStationsEl = document.getElementById("settings-stations");
   const settingsStationsEmptyEl = document.getElementById(
     "settings-stations-empty"
@@ -404,6 +405,17 @@
   const FOLD_MAP_CHAT_KEY = "govee-charts.foldMapChat";
   const MAP_CHAT_SESSION_KEY = "govee-charts.mapChatSession";
   const GEO_KEY = "govee-charts.geo";
+  const ADVICE_MODEL_KEY = "govee-charts.adviceModel";
+
+  function getAdviceModel() {
+    return localStorage.getItem(ADVICE_MODEL_KEY) === "v2" ? "v2" : "v1";
+  }
+
+  function setAdviceModel(model) {
+    const v = model === "v2" ? "v2" : "v1";
+    localStorage.setItem(ADVICE_MODEL_KEY, v);
+    return v;
+  }
   const CAT_FILTER_KEY = "govee-charts.catFilters";
   const CHART_HEIGHT_KEY = "govee-charts.chartHeight";
   const RANGE_KEY = "govee-charts.range";
@@ -5417,6 +5429,7 @@
     const res = await fetch(`/api/apartment?${params}`);
     if (!res.ok) throw new Error(`apartment HTTP ${res.status}`);
     const data = await res.json();
+    networkLastData = data;
     if (data.rooms) apartmentLastRooms = data.rooms;
     renderFacades(data);
   }
@@ -5437,6 +5450,7 @@
     networkLastData = data;
     if (data.rooms) apartmentLastRooms = data.rooms;
     renderNetwork(data);
+    updateWindowBanner(null).catch((err) => console.warn(err));
     loadMapOverviewChart().catch((err) => {
       if (mapOverviewChartsStatusEl) {
         mapOverviewChartsStatusEl.textContent = `Error: ${err.message}`;
@@ -8908,7 +8922,10 @@
       };
     }
 
-    const airflow = data.airflow || null;
+    const airflow =
+      getAdviceModel() === "v2" && data.airflow_v2
+        ? data.airflow_v2
+        : data.airflow || null;
     if (airflow && Array.isArray(airflow.flows)) {
       for (const flow of airflow.flows) {
         const from = resolveFlowPoint(flow.from);
@@ -10130,6 +10147,154 @@
     return { hidden: false, tone, title, detail };
   }
 
+  let apartmentAdviceInflight = null;
+
+  async function ensureApartmentAdvice() {
+    if (
+      networkLastData &&
+      Object.prototype.hasOwnProperty.call(networkLastData, "window_advice_v2")
+    ) {
+      return networkLastData;
+    }
+    if (apartmentAdviceInflight) return apartmentAdviceInflight;
+    apartmentAdviceInflight = (async () => {
+      try {
+        const res = await fetch("/api/apartment?hours=1");
+        if (!res.ok) return networkLastData;
+        const data = await res.json();
+        networkLastData = data;
+        if (data.rooms) apartmentLastRooms = data.rooms;
+        return data;
+      } catch (err) {
+        console.warn(err);
+        return networkLastData;
+      } finally {
+        apartmentAdviceInflight = null;
+      }
+    })();
+    return apartmentAdviceInflight;
+  }
+
+  function adviceRoomLabels(rows) {
+    return (rows || [])
+      .map((r) => r.label || r.id)
+      .filter(Boolean);
+  }
+
+  function buildWindowBannerModelV2(wa) {
+    if (!wa || typeof wa !== "object") {
+      return { tone: "idle", title: "", detail: "", hidden: true };
+    }
+    const closeNow = adviceRoomLabels(wa.close_rooms);
+    const openNow = adviceRoomLabels(wa.open_rooms);
+    const okOpen = adviceRoomLabels(wa.ok_open);
+    const okClosed = adviceRoomLabels(wa.ok_closed);
+    const roomRows = Array.isArray(wa.rooms) ? wa.rooms : [];
+    const openRoomNames = roomRows
+      .filter((r) => r.window_state === "open")
+      .map((r) => r.label || r.id)
+      .filter(Boolean);
+
+    if (
+      !wa.hvac_isolate &&
+      !closeNow.length &&
+      !openNow.length &&
+      !okOpen.length &&
+      !okClosed.length
+    ) {
+      return {
+        hidden: false,
+        tone: "idle",
+        title: t("banner.noAction"),
+        detail: t("banner.tempsClose", {
+          climate: t("banner.outdoor", {
+            temp:
+              wa.station_temp_c != null
+                ? Number(wa.station_temp_c).toFixed(1)
+                : "—",
+          }),
+          open: t("banner.allClosed"),
+        }),
+      };
+    }
+
+    const facadeTemps = roomRows
+      .filter((r) => r.window_source === "facade" && r.window_c != null)
+      .map((r) => Number(r.window_c));
+    const station =
+      wa.station_temp_c != null ? Number(wa.station_temp_c) : null;
+    let climateBit;
+    if (facadeTemps.length && station != null) {
+      const winAvg =
+        facadeTemps.reduce((s, n) => s + n, 0) / facadeTemps.length;
+      climateBit = t("banner.v2.windowAir", {
+        temp: winAvg.toFixed(1),
+        station: station.toFixed(1),
+      });
+    } else if (station != null) {
+      climateBit = t("banner.outdoor", { temp: station.toFixed(1) });
+    } else {
+      climateBit = t("banner.outdoor", { temp: "—" });
+    }
+    if (wa.dew_c != null && wa.station_humidity != null) {
+      climateBit += t("banner.dewRh", {
+        dew: Number(wa.dew_c).toFixed(1),
+        rh: Number(wa.station_humidity).toFixed(0),
+      });
+    }
+    const openBit = openRoomNames.length
+      ? t("banner.openNow", { names: openRoomNames.join(", ") })
+      : t("banner.allClosed");
+    const join = (arr) => arr.join(", ");
+
+    if (wa.hvac_isolate) {
+      return {
+        hidden: false,
+        tone: closeNow.length ? "close" : "ok",
+        title: t("banner.v2.hvacTitle"),
+        detail: t("banner.v2.hvacDetail", {
+          climate: climateBit,
+          open: openBit,
+        }),
+      };
+    }
+
+    let tone = "idle";
+    let title = t("banner.noAction");
+    let detail = t("banner.tempsClose", { climate: climateBit, open: openBit });
+
+    if (closeNow.length) {
+      tone = wa.humid ? "humid" : "close";
+      title = t("banner.closeTitle", { rooms: join(closeNow) });
+      detail = wa.humid
+        ? t("banner.closeHumid", { climate: climateBit, open: openBit })
+        : t("banner.closeWarm", { climate: climateBit, open: openBit });
+      if (openNow.length) {
+        detail = `${detail}${t("banner.alsoOpen", { rooms: join(openNow) })}`;
+      }
+    } else if (openNow.length) {
+      tone = "open";
+      title = t("banner.openTitle", { rooms: join(openNow) });
+      detail = t("banner.openDetail", { climate: climateBit, open: openBit });
+    } else if (okOpen.length) {
+      tone = "ok";
+      title = t("banner.okOpenTitle", { rooms: join(okOpen) });
+      detail = t("banner.okOpenDetail", { climate: climateBit, open: openBit });
+      if (okClosed.length) {
+        detail = `${detail}${t("banner.closedOk", { rooms: join(okClosed) })}`;
+      }
+    } else if (okClosed.length) {
+      tone = "ok";
+      title = t("banner.okClosedTitle", { rooms: join(okClosed) });
+      detail = t("banner.okClosedDetail", {
+        climate: climateBit,
+        open: openBit,
+      });
+    }
+
+    return { hidden: false, tone, title, detail };
+  }
+
   /** @type {string} Last visible alert-bar banner / notification text for TTS test. */
   let lastDisplayedAlertText = "";
 
@@ -10310,6 +10475,14 @@
         detail: "Allow location or set [weather] place in config.",
       });
       return;
+    }
+    if (getAdviceModel() === "v2") {
+      const data = await ensureApartmentAdvice();
+      const wa = data && data.window_advice_v2;
+      if (wa && Array.isArray(wa.rooms) && wa.rooms.length) {
+        renderWindowBanner(buildWindowBannerModelV2(wa));
+        return;
+      }
     }
     renderWindowBanner(buildWindowBannerModel(fc));
   }
@@ -10982,6 +11155,10 @@
     if (!("Notification" in window) || Notification.permission !== "granted") {
       return;
     }
+    if (getAdviceModel() === "v2") {
+      await evaluateWindowNotificationsV2();
+      return;
+    }
     let fc = forecast;
     if (!fc || !fc.enabled) {
       const addrs = interiorRoomDevices().map(([, d]) => d.address);
@@ -11058,6 +11235,79 @@
           t("notify.neutralBody", {
             in: tin.toFixed(1),
             out: text.toFixed(1),
+          }),
+          `govee-window-${key}`
+        );
+      }
+
+      state[key] = {
+        kind,
+        at: nowMs,
+        seeded: true,
+        lastActionable: kind || prev.lastActionable || null,
+      };
+      changed = true;
+    }
+
+    if (changed) saveWindowNotifyState(state);
+  }
+
+  async function evaluateWindowNotificationsV2() {
+    const data = await ensureApartmentAdvice();
+    const wa = data && data.window_advice_v2;
+    const rows = wa && Array.isArray(wa.rooms) ? wa.rooms : [];
+    if (!rows.length) return;
+
+    const state = loadWindowNotifyState();
+    const nowMs = Date.now();
+    let changed = false;
+
+    for (const row of rows) {
+      const key = String(row.id || row.label || "").trim().toLowerCase();
+      if (!key) continue;
+      const kind = row.kind || null;
+      const tin = row.indoor_c != null ? Number(row.indoor_c) : null;
+      const text = row.window_c != null ? Number(row.window_c) : null;
+      const prev = state[key] || {};
+      const prevKind = prev.kind || null;
+      const lastAt = Number(prev.at) || 0;
+
+      if (kind === prevKind) {
+        continue;
+      }
+      if (!prevKind && !prev.seeded) {
+        state[key] = { kind, at: nowMs, seeded: true };
+        changed = true;
+        continue;
+      }
+      if (nowMs - lastAt < 60_000) {
+        continue;
+      }
+      if (
+        kind &&
+        kind === prev.lastActionable &&
+        nowMs - lastAt < WINDOW_NOTIFY_COOLDOWN_MS
+      ) {
+        state[key] = {
+          kind,
+          at: nowMs,
+          seeded: true,
+          lastActionable: kind,
+        };
+        changed = true;
+        continue;
+      }
+
+      const label = row.label || row.id || key;
+      const msg = windowAdviceMessage(kind, label, tin, text);
+      if (msg) {
+        sendWindowNotification(msg.title, msg.body, `govee-window-${key}`);
+      } else if (prevKind === "open" || prevKind === "close" || prevKind === "humid") {
+        sendWindowNotification(
+          t("notify.neutralTitle", { label }),
+          t("notify.neutralBody", {
+            in: tin != null ? tin.toFixed(1) : "?",
+            out: text != null ? text.toFixed(1) : "?",
           }),
           `govee-window-${key}`
         );
@@ -13501,6 +13751,7 @@
           message,
           session_id: sessionId || null,
           banner,
+          advice_model: getAdviceModel(),
         }),
       });
       if (!res.ok) {
@@ -15276,8 +15527,19 @@
     });
   }
 
+  if (settingsAdviceModelEl) {
+    settingsAdviceModelEl.value = getAdviceModel();
+    settingsAdviceModelEl.addEventListener("change", () => {
+      setAdviceModel(settingsAdviceModelEl.value);
+      if (networkLastData) renderNetwork(networkLastData);
+      updateWindowBanner(null).catch((err) => console.warn(err));
+      evaluateWindowNotifications(null).catch((err) => console.warn(err));
+    });
+  }
+
   function refreshLocaleDependentUi() {
     if (settingsLocaleEl) settingsLocaleEl.value = I18n.getLocale();
+    if (settingsAdviceModelEl) settingsAdviceModelEl.value = getAdviceModel();
     applyChartHeight(chartHeight, { persist: false });
     syncTtsBtn();
     syncWindowNotifyBtn();

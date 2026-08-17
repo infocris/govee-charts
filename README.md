@@ -16,8 +16,8 @@ on `http://127.0.0.1:8080` (needs `websocket-client` in the venv).
 ### Overview
 
 Sensor list with inline zone / height / room editing, filters, and federation
-**Push meta**. The top bar shows window advice from outdoor weather vs indoor
-temps.
+**Push meta**. The top bar shows window advice (Settings → **Window advice**:
+station **v1** or façade **v2** — see [advice models](docs/advice-models.md)).
 
 ![Overview — all sensors and window advice](docs/screenshots/overview.png)
 
@@ -298,7 +298,8 @@ The **Map** view shows an **open-room cross-section** (kitchen → corridor →
 bedroom) to scale with the 2.5 m ceiling and ~2.0 m door frames (transom
 above the lintel), colored by live temperatures at each sensor `height_cm`,
 plus a topology graph of rooms as vertical bands with walls/doors as edges and
-cooling-draft suggestions.
+cooling-draft suggestions. Draft / hold uses the same v1 or v2 advice model
+as the banner ([docs/advice-models.md](docs/advice-models.md)).
 
 Optional **Ask Cursor** (fold above Temperature / Humidity / Both) chats with the
 local Cursor Agent CLI in **ask** mode (read-only Q&A about the live apartment
