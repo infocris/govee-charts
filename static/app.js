@@ -5430,6 +5430,21 @@
     return `${(age / 86400).toFixed(1)} d ago`;
   }
 
+  /** Compact age for cross-section labels (icon already signals stale). */
+  function networkSensorAgeShort(sensor) {
+    const ts = Number(sensor && (sensor.last_reading_ts || sensor.last_seen));
+    if (!Number.isFinite(ts)) return "?";
+    const age = Math.max(0, Date.now() / 1000 - ts);
+    if (age < 90) return `${Math.round(age)}s`;
+    if (age < 3600) return `${Math.round(age / 60)} min`;
+    if (age < 86400) {
+      const h = age / 3600;
+      return h < 10 ? `${h.toFixed(1)} h` : `${Math.round(h)} h`;
+    }
+    const d = age / 86400;
+    return d < 10 ? `${d.toFixed(1)} d` : `${Math.round(d)} d`;
+  }
+
   function networkShowsBothMetrics() {
     return networkMapMetric === "both";
   }
@@ -5629,12 +5644,52 @@
   /** Preferred relative positions for the default T3 layout (unit circle). */
   const NETWORK_PREF = {
     corridor: [0, 0],
-    bedroom: [0.12, -0.68],
-    bathroom: [0.68, -0.38],
-    living: [-0.5, 0.48],
-    kitchen: [-0.72, -0.02],
-    wc: [0.05, 0.72],
+    bedroom: [0.18, -0.82],
+    bathroom: [0.82, -0.42],
+    living: [-0.58, 0.62],
+    kitchen: [-0.92, -0.06],
+    wc: [0.08, 0.88],
   };
+
+  /** Minimum centre-to-centre distance in layout units (before pixel scale). */
+  const NETWORK_MIN_NODE_DIST = 0.72;
+
+  /**
+   * Push overlapping room centres apart so pills stay readable.
+   * Iterative pairwise repulsion in layout space.
+   */
+  function separateNetworkPositions(pos, minDist) {
+    const ids = Object.keys(pos);
+    if (ids.length < 2) return;
+    const min = Math.max(0.1, Number(minDist) || NETWORK_MIN_NODE_DIST);
+    for (let iter = 0; iter < 48; iter += 1) {
+      let moved = false;
+      for (let i = 0; i < ids.length; i += 1) {
+        for (let j = i + 1; j < ids.length; j += 1) {
+          const a = pos[ids[i]];
+          const b = pos[ids[j]];
+          let dx = b.x - a.x;
+          let dy = b.y - a.y;
+          let dist = Math.hypot(dx, dy);
+          if (dist < 1e-6) {
+            dx = (i + 1) * 0.01;
+            dy = (j + 1) * 0.01;
+            dist = Math.hypot(dx, dy);
+          }
+          if (dist >= min) continue;
+          const push = (min - dist) / 2;
+          const ux = dx / dist;
+          const uy = dy / dist;
+          a.x -= ux * push;
+          a.y -= uy * push;
+          b.x += ux * push;
+          b.y += uy * push;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+  }
 
   function networkLayout(rooms, edges) {
     const ids = rooms.map((r) => r.id);
@@ -5656,16 +5711,17 @@
       }
       unknown.forEach((id, i) => {
         const ang = (-Math.PI / 2) + ((i + 1) * (2 * Math.PI)) / (unknown.length + 1);
-        pos[id] = { x: Math.cos(ang) * 0.9, y: Math.sin(ang) * 0.9 };
+        pos[id] = { x: Math.cos(ang) * 1.05, y: Math.sin(ang) * 1.05 };
       });
     } else {
       if (hub) pos[hub] = { x: 0, y: 0 };
       const others = ids.filter((id) => id !== hub);
       others.forEach((id, i) => {
         const ang = (-Math.PI / 2) + (i * 2 * Math.PI) / Math.max(others.length, 1);
-        pos[id] = { x: Math.cos(ang) * 0.85, y: Math.sin(ang) * 0.85 };
+        pos[id] = { x: Math.cos(ang) * 1.0, y: Math.sin(ang) * 1.0 };
       });
     }
+    separateNetworkPositions(pos, NETWORK_MIN_NODE_DIST);
     return { pos, hub };
   }
 
@@ -5753,7 +5809,7 @@
     lab.setAttribute("x", String(cx + 10));
     lab.setAttribute("y", String(cy + 4));
     lab.setAttribute("class", "section-sensor-label section-sensor-stale-label");
-    lab.textContent = "stale";
+    lab.textContent = networkSensorAgeShort(sensor);
     parent.appendChild(lab);
   }
 
@@ -7237,12 +7293,13 @@
     const waypointSet = new Set(sectionWaypoints);
     const W = NETWORK_VB_W;
     const H = NETWORK_VB_H;
-    // Leave room for node radii (~44) + labels so top/bottom façade nodes are not clipped.
-    const pad = 78;
+    // Leave room for node radii + façade offsets so edge nodes are not clipped.
+    const pad = 72;
     const usable = Math.min(W - 2 * pad, H - 2 * pad);
     const cx = W / 2;
     const cy = H / 2;
-    const scale = usable * 0.42;
+    // Larger scale + NETWORK_MIN_NODE_DIST keep room pills from overlapping.
+    const scale = usable * 0.52;
     const toXY = (p) => ({ x: cx + p.x * scale, y: cy + p.y * scale });
 
     centerNetworkPan();
@@ -7376,31 +7433,83 @@
       if (kind === "door" || kind === "wall_partial") {
         const midX = (a.x + b.x) / 2;
         const midY = (a.y + b.y) / 2;
-        const lab = document.createElementNS(NS, "text");
-        lab.setAttribute("x", String(midX));
-        lab.setAttribute("y", String(midY - 6));
-        lab.setAttribute(
-          "class",
-          `network-edge-label${forced ? " is-locked" : ""}`
-        );
-        let text;
-        if (src === "temp_coupling" && edge.temp_delta_max_c != null) {
-          const tag =
-            opening === "open"
-              ? "coupled"
-              : opening === "closed"
-                ? "isolated"
-                : "ΔT?";
-          text = `${tag} ${edge.temp_delta_max_c}°`;
-        } else if (kind === "wall_partial") {
-          text =
-            opening === "unknown" ? "partial" : `partial · ${opening}`;
+        // Closed openings use a padlock; sticky manual overrides keep amber cue.
+        if (opening === "closed") {
+          const lockG = document.createElementNS(NS, "g");
+          lockG.setAttribute(
+            "class",
+            `network-edge-lock${forced ? " is-locked" : ""}`
+          );
+          lockG.setAttribute("pointer-events", "none");
+          const lockTip = document.createElementNS(NS, "title");
+          let tip =
+            src === "temp_coupling" && edge.temp_delta_max_c != null
+              ? `isolated ${edge.temp_delta_max_c}° (closed)`
+              : "closed";
+          if (forced) tip += " · locked";
+          lockTip.textContent = tip;
+          lockG.appendChild(lockTip);
+          const bx = midX;
+          const by = midY - 2;
+          const shackle = document.createElementNS(NS, "path");
+          shackle.setAttribute(
+            "d",
+            `M ${bx - 4} ${by - 1} V ${by - 5.5} A 4 4 0 0 1 ${bx + 4} ${by - 5.5} V ${by - 1}`
+          );
+          shackle.setAttribute("class", "network-edge-lock-shackle");
+          lockG.appendChild(shackle);
+          const body = document.createElementNS(NS, "rect");
+          body.setAttribute("x", String(bx - 5.5));
+          body.setAttribute("y", String(by - 1));
+          body.setAttribute("width", "11");
+          body.setAttribute("height", "9");
+          body.setAttribute("rx", "1.6");
+          body.setAttribute("ry", "1.6");
+          body.setAttribute("class", "network-edge-lock-body");
+          lockG.appendChild(body);
+          const keyhole = document.createElementNS(NS, "circle");
+          keyhole.setAttribute("cx", String(bx));
+          keyhole.setAttribute("cy", String(by + 2.2));
+          keyhole.setAttribute("r", "1.15");
+          keyhole.setAttribute("class", "network-edge-lock-key");
+          lockG.appendChild(keyhole);
+          gLabels.appendChild(lockG);
+          if (src === "temp_coupling" && edge.temp_delta_max_c != null) {
+            const lab = document.createElementNS(NS, "text");
+            lab.setAttribute("x", String(midX + 11));
+            lab.setAttribute("y", String(midY + 3));
+            lab.setAttribute(
+              "class",
+              `network-edge-label network-edge-lock-delta${
+                forced ? " is-locked" : ""
+              }`
+            );
+            lab.setAttribute("text-anchor", "start");
+            lab.textContent = `${edge.temp_delta_max_c}°`;
+            gLabels.appendChild(lab);
+          }
         } else {
-          text = opening;
+          const lab = document.createElementNS(NS, "text");
+          lab.setAttribute("x", String(midX));
+          lab.setAttribute("y", String(midY - 6));
+          lab.setAttribute(
+            "class",
+            `network-edge-label${forced ? " is-locked" : ""}`
+          );
+          let text;
+          if (src === "temp_coupling" && edge.temp_delta_max_c != null) {
+            const tag = opening === "open" ? "coupled" : "ΔT?";
+            text = `${tag} ${edge.temp_delta_max_c}°`;
+          } else if (kind === "wall_partial") {
+            text =
+              opening === "unknown" ? "partial" : `partial · ${opening}`;
+          } else {
+            text = opening;
+          }
+          if (forced) text = `${text} · locked`;
+          lab.textContent = text;
+          gLabels.appendChild(lab);
         }
-        if (forced) text = `${text} · locked`;
-        lab.textContent = text;
-        gLabels.appendChild(lab);
       }
     }
 
@@ -7507,17 +7616,54 @@
         if (wForced || wState) {
           const midX = (xy.x + exy.x) / 2;
           const midY = (xy.y + exy.y) / 2;
-          const lab = document.createElementNS(NS, "text");
-          lab.setAttribute("x", String(midX));
-          lab.setAttribute("y", String(midY - 6));
-          lab.setAttribute(
-            "class",
-            `network-edge-label${wForced ? " is-locked" : ""}`
-          );
-          lab.textContent = wForced
-            ? `${wState || "?"} · locked`
-            : String(wState);
-          gLabels.appendChild(lab);
+          if (wState === "closed") {
+            const lockG = document.createElementNS(NS, "g");
+            lockG.setAttribute(
+              "class",
+              `network-edge-lock${wForced ? " is-locked" : ""}`
+            );
+            lockG.setAttribute("pointer-events", "none");
+            const lockTip = document.createElementNS(NS, "title");
+            lockTip.textContent = wForced ? "closed · locked" : "closed";
+            lockG.appendChild(lockTip);
+            const bx = midX;
+            const by = midY - 2;
+            const shackle = document.createElementNS(NS, "path");
+            shackle.setAttribute(
+              "d",
+              `M ${bx - 4} ${by - 1} V ${by - 5.5} A 4 4 0 0 1 ${bx + 4} ${by - 5.5} V ${by - 1}`
+            );
+            shackle.setAttribute("class", "network-edge-lock-shackle");
+            lockG.appendChild(shackle);
+            const body = document.createElementNS(NS, "rect");
+            body.setAttribute("x", String(bx - 5.5));
+            body.setAttribute("y", String(by - 1));
+            body.setAttribute("width", "11");
+            body.setAttribute("height", "9");
+            body.setAttribute("rx", "1.6");
+            body.setAttribute("ry", "1.6");
+            body.setAttribute("class", "network-edge-lock-body");
+            lockG.appendChild(body);
+            const keyhole = document.createElementNS(NS, "circle");
+            keyhole.setAttribute("cx", String(bx));
+            keyhole.setAttribute("cy", String(by + 2.2));
+            keyhole.setAttribute("r", "1.15");
+            keyhole.setAttribute("class", "network-edge-lock-key");
+            lockG.appendChild(keyhole);
+            gLabels.appendChild(lockG);
+          } else {
+            const lab = document.createElementNS(NS, "text");
+            lab.setAttribute("x", String(midX));
+            lab.setAttribute("y", String(midY - 6));
+            lab.setAttribute(
+              "class",
+              `network-edge-label${wForced ? " is-locked" : ""}`
+            );
+            lab.textContent = wForced
+              ? `${wState || "?"} · locked`
+              : String(wState);
+            gLabels.appendChild(lab);
+          }
         }
       }
 

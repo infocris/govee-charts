@@ -4161,6 +4161,37 @@ main {
   font-weight: 700;
 }
 
+.network-edge-lock-shackle {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.network-edge-lock-body {
+  fill: var(--muted);
+  stroke: none;
+}
+
+.network-edge-lock-key {
+  fill: var(--bg, #1a1f24);
+  stroke: none;
+}
+
+.network-edge-lock.is-locked .network-edge-lock-shackle {
+  stroke: #c4782a;
+}
+
+.network-edge-lock.is-locked .network-edge-lock-body {
+  fill: #c4782a;
+}
+
+.network-edge-lock-delta {
+  text-anchor: start;
+  font-size: calc(10px * var(--map-font-scale, 1));
+}
+
 /* Map label font sizes above use calc(...* var(--map-font-scale, 1)):
    app.js measures how much the fixed-size viewBox actually got shrunk to
    fit the current screen and sets that variable so text keeps a legible
