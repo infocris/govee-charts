@@ -8,7 +8,7 @@ UNAME_S     := $(shell uname -s)
 AGENT_CHAT_ID_FILE := .cursor/agent-chat-id
 AGENT_CHAT_ID ?= $(shell test -f $(AGENT_CHAT_ID_FILE) && tr -d '[:space:]' < $(AGENT_CHAT_ID_FILE))
 
-.PHONY: help install venv deps config run serve workers discover ssl agent agent-ls agent-new \
+.PHONY: help install venv deps config stop-local run serve workers discover ssl agent agent-ls agent-new \
 	systemd-install systemd-uninstall systemd-restart systemd-status \
 	launchd-install launchd-uninstall launchd-restart launchd-status \
 	restart restart-ui restart-workers restart-all service-status
@@ -17,9 +17,10 @@ help:
 	@echo "Targets:"
 	@echo "  make install            Create venv, install deps, copy config if missing"
 	@echo "  make ssl                Generate self-signed TLS cert (data/ssl/)"
-	@echo "  make run                Run BLE collector + web UI"
-	@echo "  make serve              Run web UI only (no BLE scanner)"
-	@echo "  make workers            Run workers only (no web UI)"
+	@echo "  make run                Stop any local instance, then BLE collector + web UI"
+	@echo "  make serve              Stop any local instance, then web UI only"
+	@echo "  make workers            Stop any local instance, then workers only"
+	@echo "  make stop-local         Stop leftover local govee_charts.main processes"
 	@echo "  make discover           Scan BLE Govee devices for 30s then exit"
 	@echo "  make agent              Resume the pinned Cursor agent for this project"
 	@echo "  make agent-ls           List Cursor agent sessions"
@@ -49,13 +50,17 @@ config:
 		echo "Created config.toml from config.example.toml"; \
 	fi
 
-run: deps config
+stop-local:
+	chmod +x scripts/stop-local.sh
+	./scripts/stop-local.sh
+
+run: deps config stop-local
 	$(PY) $(MODULE) --mode all
 
-serve: deps config
+serve: deps config stop-local
 	$(PY) $(MODULE) --mode ui
 
-workers: deps config
+workers: deps config stop-local
 	$(PY) $(MODULE) --mode workers
 
 discover: deps config

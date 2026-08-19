@@ -54,8 +54,9 @@ Chat replies to the repository owner may follow their preferred language; projec
 
 ```bash
 make install                 # venv + deps + config.toml from example if missing
-make run                     # collector + web UI
-make serve                   # web UI only (no BLE scanner)
+make run                     # stop local instance if any, then collector + web UI
+make serve                   # stop local instance if any, then web UI only
+make stop-local              # stop leftover local govee_charts.main processes
 make discover                # 30s BLE discovery then exit
 sudo make systemd-install    # Linux: systemd service, starts on boot
 make launchd-install         # macOS: LaunchAgent, starts at login
