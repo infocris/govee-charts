@@ -16,8 +16,8 @@ on `http://127.0.0.1:8080` (needs `websocket-client` in the venv).
 ### Overview
 
 Sensor list with inline zone / height / room editing, filters, and federation
-**Push meta**. The top bar shows window advice from outdoor weather vs indoor
-temps.
+**Push meta**. The top bar shows window advice (Settings → **Window advice**:
+station **v1** or façade **v2** — see [advice models](docs/advice-models.md)).
 
 ![Overview — all sensors and window advice](docs/screenshots/overview.png)
 
@@ -70,8 +70,10 @@ Cursor data. Map **Ask Cursor** threads are separate (`data/map_chat.db`).
 - **H5075** / H5072 (manufacturer ID `0xEC88`)
 - **H5179** (manufacturer ID `0x8801`, or newer firmware with ID `0x0001` /
   broadcast name `GV5179_XXXX` — same packed payload as H5101/H5177)
+- **SwitchBot Meter family** (Meter, Meter Plus, Meter Pro, Meter Pro CO2,
+  Indoor/Outdoor — manufacturer ID `0x0969` + service `0xFD3D`)
 
-Auto-discovery: any Govee device advertising these payloads appears without
+Auto-discovery: any supported device advertising these payloads appears without
 manual pairing.
 
 ## Requirements
@@ -239,7 +241,9 @@ and Compare. On first start, empty categories are inferred from friendly labels
 when possible.
 When **Height cm** is set, the **Map** view places temperatures on the vertical
 band using that height (relative to `apartment.ceiling_m`); otherwise it falls
-back to high/mid/low.
+back to high/mid/low mapped onto the door / transom geometry
+(`apartment.door_height_m` ≈ 2.0 m in a 2.5 m storey: high above the lintel,
+mid at mid-door, low near the floor).
 
 Enable in `config.toml` (`weather.enabled = true`).
 
@@ -269,7 +273,9 @@ to project rooms as a **multi-node RC network**:
 - Corridor hub linked to every room (no direct outdoor coupling)
 - Kitchen + living: southwest façades; bedroom: northeast
 - Façade comparative temperature prefers exterior sensors with **height = high** (e.g. Cuisine / Chambre Ext Haut); falls back to any exterior sensor
-- Capacities from floor area × 2.5 m ceiling; wall/door conductances by edge type
+- Capacities from floor area × ceiling (`apartment.ceiling_m`, 2.5 m);
+  wall/door conductances by edge type (open-door mixing limited to the
+  ~2.0 m leaf; transom above the lintel is a ceiling pocket)
 - Passive nodes (bathroom, WC) without sensors
 - Solar bias from Open-Meteo **shortwave radiation** and **cloud cover**,
   weighted by façade orientation and local hour (SW stronger in afternoon)
@@ -291,13 +297,17 @@ shortwave radiation / cloud cover, plus current wind and natural vs mechanical
 ventilation hints.
 
 The **Map** view shows an **open-room cross-section** (kitchen → corridor →
-bedroom) colored by live temperatures at each sensor `height_cm`, plus a
-topology graph of rooms as vertical bands with walls/doors as edges and
-cooling-draft suggestions.
+bedroom) to scale with the 2.5 m ceiling and ~2.0 m door frames (transom
+above the lintel), colored by live temperatures at each sensor `height_cm`,
+plus a topology graph of rooms as vertical bands with walls/doors as edges and
+cooling-draft suggestions. Draft / hold uses the same v1 or v2 advice model
+as the banner ([docs/advice-models.md](docs/advice-models.md)).
 
 Optional **Ask Cursor** (fold above Temperature / Humidity / Both) chats with the
 local Cursor Agent CLI in **ask** mode (read-only Q&A about the live apartment
-snapshot). Requires `[cursor_chat] enabled = true`, the `agent` binary on PATH
+snapshot). The prompt JSON includes the apartment layout (room areas, façades,
+ceiling / door heights) plus live sensors — the agent should not open `config.toml`.
+Requires `[cursor_chat] enabled = true`, the `agent` binary on PATH
 (or `cursor_chat.agent_bin` absolute path for systemd), and `agent login` as the
 same user that runs the UI service. Each turn is stored in a separate SQLite DB
 (`cursor_chat.db_path`, default `data/map_chat.db`) with the sensor snapshot and

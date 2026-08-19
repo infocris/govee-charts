@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.types import Scope
 
-from govee_charts.address import register_mac, resolve_device_address
+from govee_charts.address import is_ble_mac, register_mac, resolve_device_address
 from govee_charts.apartment import (
     TEMP_COUPLE_CLOSED_C,
     TEMP_COUPLE_OPEN_C,
@@ -30,6 +30,7 @@ from govee_charts.apartment import (
     save_overrides,
     solar_bias_c,
     suggest_cooling_airflow,
+    suggest_cooling_airflow_v2,
     ventilation_mode,
 )
 from govee_charts.backfill import BackfillService
@@ -55,7 +56,12 @@ from govee_charts.cursor_chat import (
     resolve_workspace,
     stream_agent_chat,
 )
-from govee_charts.db import Database, coverage_from_minute_set, is_db_locked
+from govee_charts.db import (
+    Database,
+    WORKERS_HEARTBEAT_MAX_AGE_S,
+    coverage_from_minute_set,
+    is_db_locked,
+)
 from govee_charts.decode import Reading
 from govee_charts.federation import csv_source
 from govee_charts.energy import build_energy_summary, estimate_live_ac_watts
@@ -68,6 +74,7 @@ from govee_charts.tts import (
     synthesize,
 )
 from govee_charts.presence import PresenceConfig, PresenceService
+from govee_charts.ha_th import HaThConfig, map_stale_after_s
 from govee_charts.hvac import HvacConfig, hvac_active_bands, is_hvac_active
 from govee_charts import mail_inbox
 from govee_charts.weather import WeatherService
@@ -544,6 +551,42 @@ class CategoryPatch(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class DeviceCreateBody(BaseModel):
+    address: str = Field(min_length=1, max_length=64)
+    model: str | None = Field(default="unknown", max_length=32)
+    name: str | None = Field(default=None, max_length=80)
+    label: str | None = None
+    zone: str | None = None
+    height: str | None = None
+    height_cm: float | None = None
+    room: str | None = None
+
+    model_config = {"extra": "forbid"}
+
+
+class PlacementCreateBody(BaseModel):
+    effective_from: float | None = None
+    label: str | None = None
+    zone: str | None = None
+    height: str | None = None
+    height_cm: float | None = None
+    room: str | None = None
+
+    model_config = {"extra": "forbid"}
+
+
+class PlacementPatch(BaseModel):
+    label: str | None = None
+    zone: str | None = None
+    height: str | None = None
+    height_cm: float | None = None
+    room: str | None = None
+    valid_from: float | None = None
+    valid_until: float | None = None
+
+    model_config = {"extra": "forbid"}
+
+
 class DeviceMetaIngest(BaseModel):
     """Federation payload to sync device label / placement fields."""
 
@@ -603,6 +646,13 @@ class MapChatBody(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     session_id: str | None = Field(default=None, max_length=128)
     banner: dict[str, Any] | None = None
+    advice_model: str | None = Field(default=None, max_length=8)
+
+    model_config = {"extra": "forbid"}
+
+
+class MapChatSessionPatch(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
 
     model_config = {"extra": "forbid"}
 
@@ -661,6 +711,17 @@ def enrich_device(
     out["ble_name"] = device.get("name")
     out["name"] = device_display_name(device, labels)
     return out
+
+
+def _validate_device_address(address: str) -> str:
+    addr = address.strip().upper()
+    if is_ble_mac(addr):
+        return addr
+    if addr.startswith("HA:") and len(addr) > 3:
+        return addr
+    raise ValueError(
+        f"Invalid device address {address!r}; expected BLE MAC or HA:… id"
+    )
 
 
 async def _backfill_devices_from_db(
@@ -793,6 +854,7 @@ def create_app(
     presence: PresenceService | None = None,
     scanner_enabled: bool = True,
     ble_alert_stale_after: float = 300.0,
+    ha_th: HaThConfig | None = None,
     tts: dict[str, Any] | None = None,
     cursor_chat: dict[str, Any] | None = None,
     map_chat_store: MapChatStore | None = None,
@@ -817,6 +879,7 @@ def create_app(
     app.state.presence = presence
     app.state.scanner_enabled = bool(scanner_enabled)
     app.state.ble_alert_stale_after = max(0.0, float(ble_alert_stale_after))
+    app.state.ha_th = ha_th or HaThConfig()
     tts_cfg = dict(tts or {})
     home_url = str(tts_cfg.get("home_url") or "").strip().rstrip("/")
     return_audio = tts_cfg.get("return_audio")
@@ -858,19 +921,42 @@ def create_app(
         """Standalone embeddable chart (iframe / link share)."""
         return widget_html_response()
 
+    async def _health_heartbeat(component: str) -> float | None:
+        try:
+            return await db.get_runtime_heartbeat(component)
+        except Exception as exc:
+            if is_db_locked(exc):
+                logger.warning("Health heartbeat read blocked (%s): %s", component, exc)
+                return None
+            raise
+
     @app.get("/api/health")
     async def api_health() -> dict[str, Any]:
-        hb = await db.get_runtime_heartbeat("workers")
-        ble_hb = await db.get_runtime_heartbeat("ble")
-        pause_hb = await db.get_runtime_heartbeat("ble_pause")
+        hb_sql = await _health_heartbeat("workers")
+        hb_file = db.read_workers_heartbeat_file()
+        hb_candidates = [t for t in (hb_sql, hb_file) if t is not None]
+        hb = max(hb_candidates) if hb_candidates else None
+        ble_hb = await _health_heartbeat("ble")
+        pause_hb = await _health_heartbeat("ble_pause")
         now = time.time()
         age = (now - hb) if hb is not None else None
-        workers_available = bool(age is not None and age <= 15.0)
         stale_after = float(app.state.ble_alert_stale_after)
         scanner_enabled = bool(app.state.scanner_enabled)
         ble_age = (now - ble_hb) if ble_hb is not None else None
         pause_age = (now - pause_hb) if pause_hb is not None else None
         paused_for_gatt = bool(pause_age is not None and pause_age <= 20.0)
+        workers_available = bool(
+            age is not None and age <= WORKERS_HEARTBEAT_MAX_AGE_S
+        )
+        # BLE ads are written by the same process; a SQLite lock can stall the
+        # workers row without stopping the scanner.
+        if (
+            not workers_available
+            and scanner_enabled
+            and ble_age is not None
+            and ble_age <= WORKERS_HEARTBEAT_MAX_AGE_S
+        ):
+            workers_available = True
         if not scanner_enabled or stale_after <= 0:
             ble_ok = True
         elif paused_for_gatt:
@@ -1017,6 +1103,22 @@ def create_app(
         sessions = await store.list_sessions(limit=limit)
         return {"ok": True, "sessions": sessions}
 
+    @app.patch("/api/map-chat/sessions/{session_id}")
+    async def api_map_chat_rename_session(
+        session_id: str, body: MapChatSessionPatch
+    ) -> dict[str, Any]:
+        """Set or clear a custom title for one Map chat session."""
+        store: MapChatStore | None = app.state.map_chat_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="Map chat history unavailable")
+        sid = (session_id or "").strip()
+        if not sid:
+            raise HTTPException(status_code=400, detail="empty session_id")
+        session = await store.rename_session(sid, body.title)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        return {"ok": True, "session": session}
+
     @app.get("/api/map-chat/history")
     async def api_map_chat_history(
         session_id: str | None = Query(default=None, max_length=128),
@@ -1071,6 +1173,9 @@ def create_app(
             raise HTTPException(status_code=400, detail="empty message")
 
         banner = normalize_banner(body.banner)
+        advice_model = (
+            "v2" if str(body.advice_model or "").strip().lower() == "v2" else "v1"
+        )
 
         # Fresh apartment snapshot (same builder as GET /api/apartment),
         # with enough future outdoor hours for the chat forecast slice.
@@ -1086,9 +1191,15 @@ def create_app(
             raise HTTPException(
                 status_code=502, detail=f"apartment snapshot failed: {exc}"
             ) from exc
-        snapshot_obj = apartment_snapshot_dict(apartment)
-        snapshot = compact_apartment_snapshot(apartment)
-        prompt = build_prompt(message, snapshot, banner=banner)
+        snapshot_obj = apartment_snapshot_dict(
+            apartment, advice_model=advice_model
+        )
+        snapshot = compact_apartment_snapshot(
+            apartment, advice_model=advice_model
+        )
+        prompt = build_prompt(
+            message, snapshot, banner=banner, advice_model=advice_model
+        )
         workspace = resolve_workspace(str(cfg.get("workspace") or ""))
         model = str(cfg.get("model") or "auto")
         mode = str(cfg.get("mode") or "ask")
@@ -1113,7 +1224,10 @@ def create_app(
                     if ev.get("session_id"):
                         out_session = str(ev["session_id"])
                     if ev.get("type") == "delta" and ev.get("text"):
-                        assistant_text += str(ev["text"])
+                        if ev.get("replace"):
+                            assistant_text = str(ev["text"])
+                        else:
+                            assistant_text += str(ev["text"])
                     elif ev.get("type") == "done" and ev.get("text"):
                         assistant_text = str(ev["text"]) or assistant_text
                     elif ev.get("type") == "error":
@@ -1961,11 +2075,231 @@ def create_app(
         }
 
     @app.get("/api/devices")
-    async def api_devices() -> list[dict[str, Any]]:
+    async def api_devices(
+        include_archived: bool = Query(default=False),
+    ) -> list[dict[str, Any]]:
         labels: dict[str, str] = app.state.labels
-        return [
-            enrich_device(d, labels) for d in await db.list_devices()
-        ]
+        rows = await db.list_devices(include_archived=include_archived)
+        devices = [enrich_device(d, labels) for d in rows]
+        trends = await db.temperature_trends(
+            [str(d.get("address") or "") for d in devices]
+        )
+        for d in devices:
+            trend = trends.get(str(d.get("address") or "").upper())
+            if trend:
+                d["temp_trend"] = trend.get("dir")
+                d["temp_delta_c"] = trend.get("delta_c")
+                d["temp_rate_c_h"] = trend.get("rate_c_h")
+        return devices
+
+    @app.post("/api/devices")
+    async def api_create_device(body: DeviceCreateBody) -> dict[str, Any]:
+        try:
+            addr = _validate_device_address(body.address)
+            patch = normalize_patch(
+                zone=body.zone,
+                height=body.height,
+                height_cm=body.height_cm,
+                room=body.room,
+                label=body.label,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        model = (body.model or "unknown").strip() or "unknown"
+        device = await db.create_device(
+            addr,
+            model=model,
+            name=body.name,
+            label=patch.get("label"),
+            zone=patch.get("zone"),
+            height=patch.get("height"),
+            height_cm=patch.get("height_cm"),
+            room=patch.get("room"),
+        )
+        if is_ble_mac(addr):
+            register_mac(app.state.suffix_map, addr)
+        return enrich_device(device, app.state.labels)
+
+    @app.get("/api/devices/discover")
+    async def api_discover_devices(
+        seconds: float = Query(default=120.0, gt=0, le=900),
+        include_known: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        """List recently heard Govee BLE sensors; unknown = not registered (or archived)."""
+        since = time.time() - float(seconds)
+        candidates = await db.list_ble_discover_candidates(
+            since_ts=since, include_known=include_known
+        )
+        labels: dict[str, str] = app.state.labels
+        sensors: list[dict[str, Any]] = []
+        for row in candidates:
+            display = str(row.get("name") or row.get("address") or "")
+            addr = str(row.get("address") or "").upper()
+            if labels.get(addr):
+                display = labels[addr]
+            sensors.append(
+                {
+                    "address": addr,
+                    "name": display,
+                    "model": row.get("model"),
+                    "temperature_c": row.get("temperature_c"),
+                    "humidity": row.get("humidity"),
+                    "battery": row.get("battery"),
+                    "rssi": row.get("rssi"),
+                    "last_seen": row.get("last_seen"),
+                    "unknown": bool(row.get("unknown")),
+                    "archived": bool(row.get("archived")),
+                }
+            )
+        scanning = await db.ble_discover_scan_pending()
+        return {
+            "scanner_enabled": bool(app.state.scanner_enabled),
+            "scanning": scanning,
+            "seconds": float(seconds),
+            "sensors": sensors,
+            "unknown_count": sum(1 for s in sensors if s.get("unknown")),
+        }
+
+    @app.post("/api/devices/discover/scan")
+    async def api_discover_devices_scan() -> dict[str, Any]:
+        """Ask the BLE worker to run a ~15s discovery pass."""
+        if not app.state.scanner_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="Local BLE scanner is disabled",
+            )
+        await db.request_ble_discover()
+        return {"ok": True, "scanning": True, "duration_s": 15.0}
+
+    @app.delete("/api/devices/{address}")
+    async def api_delete_device(
+        address: str,
+        purge: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        try:
+            addr = _validate_device_address(address)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if purge:
+            ok = await db.purge_device(addr)
+            if not ok:
+                raise HTTPException(status_code=404, detail="Unknown device")
+            return {"ok": True, "address": addr, "purged": True}
+
+        archived = await db.archive_device(addr)
+        if archived is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        return {
+            "ok": True,
+            "address": addr,
+            "purged": False,
+            "device": enrich_device(archived, app.state.labels),
+        }
+
+    @app.get("/api/devices/{address}/placements")
+    async def api_list_placements(address: str) -> dict[str, Any]:
+        try:
+            addr = _validate_device_address(address)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        device = await db.get_device(addr, include_archived=True)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        placements = await db.list_placements(addr)
+        return {
+            "address": addr,
+            "placements": placements,
+        }
+
+    @app.post("/api/devices/{address}/placements")
+    async def api_create_placement(
+        address: str, body: PlacementCreateBody
+    ) -> dict[str, Any]:
+        try:
+            addr = _validate_device_address(address)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        device = await db.get_device(addr)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+
+        provided = body.model_dump(exclude_unset=True)
+        patch: dict[str, Any] = {}
+        if any(k in provided for k in ("zone", "height", "height_cm", "room", "label")):
+            try:
+                patch = normalize_patch(
+                    zone=provided["zone"] if "zone" in provided else ...,
+                    height=provided["height"] if "height" in provided else ...,
+                    height_cm=provided["height_cm"] if "height_cm" in provided else ...,
+                    room=provided["room"] if "room" in provided else ...,
+                    label=provided["label"] if "label" in provided else ...,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            placement = await db.add_placement(
+                addr,
+                effective_from=body.effective_from,
+                label=patch["label"] if "label" in patch else ...,
+                zone=patch["zone"] if "zone" in patch else ...,
+                height=patch["height"] if "height" in patch else ...,
+                height_cm=patch["height_cm"] if "height_cm" in patch else ...,
+                room=patch["room"] if "room" in patch else ...,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "placement": placement}
+
+    @app.patch("/api/devices/{address}/placements/{placement_id}")
+    async def api_patch_placement(
+        address: str, placement_id: int, body: PlacementPatch
+    ) -> dict[str, Any]:
+        try:
+            addr = _validate_device_address(address)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        device = await db.get_device(addr, include_archived=True)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+
+        provided = body.model_dump(exclude_unset=True)
+        if not provided:
+            raise HTTPException(status_code=400, detail="Empty patch body")
+        try:
+            patch = normalize_patch(
+                zone=provided["zone"] if "zone" in provided else ...,
+                height=provided["height"] if "height" in provided else ...,
+                height_cm=provided["height_cm"] if "height_cm" in provided else ...,
+                room=provided["room"] if "room" in provided else ...,
+                label=provided["label"] if "label" in provided else ...,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        placements = await db.list_placements(addr)
+        owned = next((p for p in placements if p["id"] == placement_id), None)
+        if owned is None:
+            raise HTTPException(status_code=404, detail="Placement not found")
+
+        try:
+            updated = await db.update_placement(
+                placement_id,
+                label=patch["label"] if "label" in patch else ...,
+                zone=patch["zone"] if "zone" in patch else ...,
+                height=patch["height"] if "height" in patch else ...,
+                height_cm=patch["height_cm"] if "height_cm" in patch else ...,
+                room=patch["room"] if "room" in patch else ...,
+                valid_from=provided["valid_from"] if "valid_from" in provided else ...,
+                valid_until=provided["valid_until"] if "valid_until" in provided else ...,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Placement not found")
+        return {"ok": True, "placement": updated}
 
     @app.get("/api/coverage")
     async def api_coverage(
@@ -2123,7 +2457,9 @@ def create_app(
             r["id"]: [] for r in payload["rooms"]
         }
         # Live map / cross-section: ignore readings older than this (seconds).
-        sensor_stale_after_s = 900.0
+        # BLE Govee ~15 min; Tuya HA T&H uses ha_th.stale_after (default 2 h).
+        ha_th_cfg: HaThConfig | None = getattr(app.state, "ha_th", None)
+        sensor_stale_after_s = map_stale_after_s(cfg=ha_th_cfg)
         now_ts = time.time()
         for d in devices:
             room = (d.get("room") or "").strip().lower()
@@ -2136,7 +2472,12 @@ def create_app(
                 last_f = float(last_ts) if last_ts is not None else None
             except (TypeError, ValueError):
                 last_f = None
-            stale = last_f is None or (now_ts - last_f) > sensor_stale_after_s
+            after_s = map_stale_after_s(
+                address=str(d.get("address") or ""),
+                model=str(d.get("model") or ""),
+                cfg=ha_th_cfg,
+            )
+            stale = last_f is None or (now_ts - last_f) > after_s
             by_room[room].append(
                 {
                     "address": d.get("address"),
@@ -2148,9 +2489,20 @@ def create_app(
                     "humidity": d.get("humidity"),
                     "last_reading_ts": last_f,
                     "stale": stale,
-                    "stale_after_s": sensor_stale_after_s,
+                    "stale_after_s": after_s,
                 }
             )
+        trends = await db.temperature_trends(
+            [str(s.get("address") or "") for sensors in by_room.values() for s in sensors]
+        )
+        for sensors in by_room.values():
+            for s in sensors:
+                trend = trends.get(str(s.get("address") or "").upper())
+                if not trend:
+                    continue
+                s["temp_trend"] = trend.get("dir")
+                s["temp_delta_c"] = trend.get("delta_c")
+                s["temp_rate_c_h"] = trend.get("rate_c_h")
         for room in payload["rooms"]:
             room["sensors"] = by_room.get(room["id"], [])
         payload["sensor_stale_after_s"] = sensor_stale_after_s
@@ -2160,14 +2512,13 @@ def create_app(
         ) -> list[dict[str, Any]]:
             """Exterior sensors for façade comparison — prefer height=high.
 
-            Stale sensors are ignored so a fresh low sensor can replace a
-            dead high one on the plan temperature bands.
+            Keep a stale high sensor (show last reading + warning on the map)
+            rather than substituting a fresh low sensor.
             """
             exterior = [
                 s
                 for s in sensors
                 if str(s.get("zone") or "").lower() == "exterior"
-                and not s.get("stale")
             ]
             high = [
                 s
@@ -2515,8 +2866,6 @@ def create_app(
             exterior = _exterior_comparative(sensors)
             live_temps: list[float] = []
             for s in interior:
-                if s.get("stale"):
-                    continue
                 try:
                     if s.get("temperature_c") is not None:
                         live_temps.append(float(s["temperature_c"]))
@@ -2532,8 +2881,6 @@ def create_app(
                 room["temp_c"] = None
             facade_temps: list[float] = []
             for s in exterior:
-                if s.get("stale"):
-                    continue
                 try:
                     if s.get("temperature_c") is not None:
                         facade_temps.append(float(s["temperature_c"]))
@@ -2548,7 +2895,7 @@ def create_app(
                 room["facade_sensor_names"] = [
                     str(s.get("name") or s.get("address") or "")
                     for s in exterior
-                    if not s.get("stale") and s.get("temperature_c") is not None
+                    if s.get("temperature_c") is not None
                 ]
             else:
                 room["facade_sensor_names"] = []
@@ -2568,8 +2915,6 @@ def create_app(
                     room["facade_temp_c"] = None
             hums: list[float] = []
             for s in interior:
-                if s.get("stale"):
-                    continue
                 try:
                     if s.get("humidity") is not None:
                         hums.append(float(s["humidity"]))
@@ -2710,6 +3055,32 @@ def create_app(
         else:
             payload["hvac"] = {"enabled": False, "active": False, "room": hvac_cfg.room}
 
+        outdoor_rh = outdoor.get("humidity_now")
+        if outdoor_rh is None:
+            outdoor_rh = solar.get("humidity")
+        payload["airflow_v2"] = suggest_cooling_airflow_v2(
+            payload.get("rooms") or [],
+            payload.get("edges") or [],
+            outdoor_temp_c=(
+                float(outdoor_temp) if outdoor_temp is not None else None
+            ),
+            outdoor_humidity=(
+                float(outdoor_rh) if outdoor_rh is not None else None
+            ),
+            wind_speed_ms=(
+                outdoor.get("wind_speed_ms")
+                if outdoor.get("wind_speed_ms") is not None
+                else solar.get("wind_speed_ms")
+            ),
+            wind_direction_deg=(
+                outdoor.get("wind_direction_deg")
+                if outdoor.get("wind_direction_deg") is not None
+                else solar.get("wind_direction_deg")
+            ),
+            hvac=payload.get("hvac"),
+        )
+        payload["window_advice_v2"] = payload["airflow_v2"].get("advice") or {}
+
         presence_svc: PresenceService | None = app.state.presence
         if presence_svc is not None and presence_svc.cfg.ready:
             try:
@@ -2778,7 +3149,10 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        updated = await db.update_device_categories(address, **patch)
+        try:
+            updated = await db.update_device_categories(address, **patch)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         return enrich_device(updated, app.state.labels)
@@ -2836,7 +3210,7 @@ def create_app(
         request: Request,
         x_govee_token: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        """Apply label/placement fields pushed by a federation peer."""
+        """Apply label/placement fields pushed by a federation peer (current open placement only)."""
         _check_federation_token(request, x_govee_token)
         if payload.node_id == app.state.node_id:
             raise HTTPException(status_code=400, detail="Refusing meta from self")

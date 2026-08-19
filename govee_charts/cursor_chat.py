@@ -20,10 +20,23 @@ USER_MESSAGE_MAX = 4_000
 
 SYSTEM_PREAMBLE = (
     "You are advising on apartment climate for the Govee Charts Map view. "
-    "Use the live snapshot below (rooms, sensors, doors/windows, outdoor now, "
-    "next-12h outdoor forecast, HVAC, thermal coupling). Answer clearly in the "
-    "user's language. Ask mode is read-only: do not edit files or run mutating "
-    "commands."
+    "The JSON snapshot includes the apartment layout (room areas, façade "
+    "orientations, ceiling and door-frame heights) plus live sensors, "
+    "doors/windows, outdoor now, next-12h forecast, HVAC, and thermal "
+    "coupling — use that JSON; do not open config.toml. Ceiling is about "
+    "2.5 m and interior door frames about 2.0 m: air above the lintel is a "
+    "weakly mixed pocket. Answer clearly in the user's language. Ask mode is "
+    "read-only: do not edit files or run mutating commands."
+)
+
+SYSTEM_PREAMBLE_V2 = (
+    SYSTEM_PREAMBLE
+    + " Advice model v2 is active: prefer per-room façade exterior sensors "
+    "over the weather station when they disagree; ignore an exterior reading "
+    "that matches indoor air while the station is clearly cooler (exhaust plume). "
+    "If HVAC/AC is active, isolate that room (close its door and windows) "
+    "instead of opening a through-draft. Do not follow the window banner or "
+    "airflow path if façade temperatures contradict them."
 )
 
 FORECAST_CHAT_HOURS = 12.0
@@ -124,33 +137,53 @@ def _outdoor_forecast_next_hours(
     return out
 
 
-def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
+def apartment_snapshot_dict(
+    payload: dict[str, Any],
+    *,
+    advice_model: str = "v1",
+) -> dict[str, Any]:
     """Compact /api/apartment payload for prompts and chat history."""
+    ceiling_m = _round_num(payload.get("ceiling_m"), 2)
     rooms_out: list[dict[str, Any]] = []
     for room in payload.get("rooms") or []:
         sensors = []
         for s in room.get("sensors") or []:
             if s.get("stale"):
                 continue
-            sensors.append(
-                {
-                    "name": s.get("name"),
-                    "zone": s.get("zone"),
-                    "height_cm": s.get("height_cm"),
-                    "temp_c": _round_num(s.get("temperature_c")),
-                    "humidity": _round_num(s.get("humidity"), 0),
-                }
-            )
-        rooms_out.append(
-            {
-                "id": room.get("id"),
-                "label": room.get("label"),
-                "temp_c": _round_num(room.get("temp_avg") or room.get("temp_now") or room.get("temp_c")),
-                "humidity": _round_num(room.get("humidity"), 0),
-                "window": room.get("window_state"),
-                "sensors": sensors,
+            item: dict[str, Any] = {
+                "name": s.get("name"),
+                "zone": s.get("zone"),
+                "temp_c": _round_num(s.get("temperature_c")),
+                "humidity": _round_num(s.get("humidity"), 0),
             }
-        )
+            if s.get("height"):
+                item["height"] = s.get("height")
+            if s.get("height_cm") is not None:
+                item["height_cm"] = _round_num(s.get("height_cm"), 0)
+            sensors.append(item)
+        area_m2 = _round_num(room.get("area_m2"), 1)
+        exterior = [
+            str(o).strip().lower()
+            for o in (room.get("exterior") or [])
+            if str(o).strip()
+        ]
+        room_row: dict[str, Any] = {
+            "id": room.get("id"),
+            "label": room.get("label"),
+            "area_m2": area_m2,
+            "exterior": exterior,
+            "temp_c": _round_num(room.get("temp_avg") or room.get("temp_now") or room.get("temp_c")),
+            "humidity": _round_num(room.get("humidity"), 0),
+            "window": room.get("window_state"),
+            "sensors": sensors,
+        }
+        if room.get("facade_temp_c") is not None:
+            room_row["facade_temp_c"] = _round_num(room.get("facade_temp_c"))
+            room_row["facade_temp_min"] = _round_num(room.get("facade_temp_min"))
+            room_row["facade_temp_max"] = _round_num(room.get("facade_temp_max"))
+        if area_m2 is not None and ceiling_m is not None:
+            room_row["volume_m3"] = _round_num(area_m2 * ceiling_m, 1)
+        rooms_out.append(room_row)
 
     edges_out: list[dict[str, Any]] = []
     for edge in payload.get("edges") or []:
@@ -168,12 +201,24 @@ def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
     outdoor = payload.get("outdoor") or {}
     solar = payload.get("solar") or {}
     hvac = payload.get("hvac") or {}
-    airflow = payload.get("airflow") or {}
+    use_v2 = str(advice_model or "v1").strip().lower() == "v2"
+    airflow = (
+        payload.get("airflow_v2") if use_v2 else payload.get("airflow")
+    ) or {}
     couple = payload.get("temp_couple") or {}
     forecast_12h = _outdoor_forecast_next_hours(payload, hours=FORECAST_CHAT_HOURS)
     loc = outdoor.get("location") or {}
 
-    return {
+    out = {
+        "layout": {
+            "ceiling_m": ceiling_m,
+            "door_height_m": _round_num(payload.get("door_height_m"), 2),
+            "window_sill_m": _round_num(payload.get("window_sill_m"), 2),
+            "height_bands_cm": payload.get("height_bands_cm"),
+            "area_m2": _round_num(payload.get("area_m2"), 1),
+            "floor": payload.get("floor"),
+            "floors_total": payload.get("floors_total"),
+        },
         "rooms": rooms_out,
         "edges": edges_out,
         "outdoor_temp_c": _round_num(
@@ -214,12 +259,47 @@ def apartment_snapshot_dict(payload: dict[str, Any]) -> dict[str, Any]:
             "actions": airflow.get("actions") or airflow.get("suggestions") or [],
             "summary": airflow.get("summary") or airflow.get("hint"),
         },
+        "advice_model": "v2" if use_v2 else "v1",
     }
+    if use_v2:
+        wa = payload.get("window_advice_v2") or airflow.get("advice") or {}
+        out["window_advice"] = {
+            "tone": wa.get("tone"),
+            "mode": wa.get("mode"),
+            "hvac_isolate": wa.get("hvac_isolate"),
+            "hvac_close_door": wa.get("hvac_close_door"),
+            "station_temp_c": _round_num(wa.get("station_temp_c")),
+            "dew_c": _round_num(wa.get("dew_c")),
+            "open_rooms": [
+                r.get("label") or r.get("id") for r in (wa.get("open_rooms") or [])
+            ],
+            "close_rooms": [
+                r.get("label") or r.get("id") for r in (wa.get("close_rooms") or [])
+            ],
+            "actions": wa.get("actions") or [],
+            "rooms": [
+                {
+                    "id": r.get("id"),
+                    "kind": r.get("kind"),
+                    "indoor_c": _round_num(r.get("indoor_c")),
+                    "window_c": _round_num(r.get("window_c")),
+                    "window_source": r.get("window_source"),
+                    "facade_c": _round_num(r.get("facade_c")),
+                    "window": r.get("window_state"),
+                }
+                for r in (wa.get("rooms") or [])
+            ],
+        }
+    return out
 
 
-def compact_apartment_snapshot(payload: dict[str, Any]) -> str:
+def compact_apartment_snapshot(
+    payload: dict[str, Any],
+    *,
+    advice_model: str = "v1",
+) -> str:
     """Shrink /api/apartment payload for the agent prompt (JSON string)."""
-    snap = apartment_snapshot_dict(payload)
+    snap = apartment_snapshot_dict(payload, advice_model=advice_model)
     text = json.dumps(snap, ensure_ascii=False, separators=(",", ":"))
     if len(text) > SNAPSHOT_MAX_CHARS:
         text = text[: SNAPSHOT_MAX_CHARS - 1] + "…"
@@ -248,6 +328,7 @@ def build_prompt(
     snapshot: str,
     *,
     banner: dict[str, Any] | None = None,
+    advice_model: str = "v1",
 ) -> str:
     msg = (user_message or "").strip()
     if len(msg) > USER_MESSAGE_MAX:
@@ -265,8 +346,13 @@ def build_prompt(
                 + (f"Title: {title}\n" if title else "")
                 + (f"Detail: {detail}\n" if detail else "")
             )
+    preamble = (
+        SYSTEM_PREAMBLE_V2
+        if str(advice_model or "").strip().lower() == "v2"
+        else SYSTEM_PREAMBLE
+    )
     prompt = (
-        f"{SYSTEM_PREAMBLE}\n\n"
+        f"{preamble}\n\n"
         f"Live apartment snapshot (JSON):\n{snapshot}"
         f"{banner_block}\n"
         f"User question:\n{msg}"
@@ -292,19 +378,43 @@ def _assistant_text(event: dict[str, Any]) -> str:
     return ""
 
 
-def _delta_from_assistant(pieces: list[str], text: str) -> str | None:
-    """Map stream-partial assistant events to new text only."""
+def _delta_from_assistant(pieces: list[str], text: str) -> tuple[str | None, bool]:
+    """Map stream-partial assistant events to new text only.
+
+    Returns ``(delta, replace)``. ``replace`` is true when the model started
+    a new message (typical after tool calls) so the UI must not concatenate
+    the thinking line with the final answer.
+    """
     if not text:
-        return None
+        return None, False
     joined = "".join(pieces)
     if joined and text == joined:
-        return None
+        return None, False
     if joined and text.startswith(joined):
         pieces.clear()
         pieces.append(text)
-        return text[len(joined) :]
+        return text[len(joined) :], False
+    if joined and joined.startswith(text):
+        # Shorter snapshot of the same message; keep the longer text.
+        return None, False
+    pieces.clear()
     pieces.append(text)
-    return text
+    return text, bool(joined)
+
+
+def _prefer_last_message(last: str, result_text: str) -> str:
+    """Keep the last assistant message when ``result`` concatenates turns."""
+    last = last or ""
+    result_text = result_text or ""
+    if not last:
+        return result_text
+    if not result_text or result_text == last:
+        return last
+    if result_text.startswith(last):
+        return result_text
+    if last in result_text:
+        return last
+    return last
 
 
 async def probe_agent_status(
@@ -436,14 +546,17 @@ async def stream_agent_chat(
                 out_session = str(event["session_id"])
             if etype == "assistant":
                 text = _assistant_text(event)
-                delta = _delta_from_assistant(pieces, text)
+                delta, replace = _delta_from_assistant(pieces, text)
                 if delta:
                     final_text = "".join(pieces)
-                    yield {
+                    ev_out: dict[str, Any] = {
                         "type": "delta",
                         "text": delta,
                         "session_id": out_session,
                     }
+                    if replace:
+                        ev_out["replace"] = True
+                    yield ev_out
             elif etype == "result":
                 if event.get("session_id"):
                     out_session = str(event["session_id"])
@@ -459,24 +572,28 @@ async def stream_agent_chat(
                         "session_id": out_session,
                     }
                     return
-                result_text = str(event.get("result") or final_text or "")
-                if result_text and result_text != final_text:
-                    # Emit only the missing suffix if partials were incomplete.
-                    if final_text and result_text.startswith(final_text):
-                        extra = result_text[len(final_text) :]
+                last = "".join(pieces)
+                result_text = str(event.get("result") or "")
+                picked = _prefer_last_message(last, result_text)
+                if picked and picked != last:
+                    if last and picked.startswith(last):
+                        extra = picked[len(last) :]
                         if extra:
                             yield {
                                 "type": "delta",
                                 "text": extra,
                                 "session_id": out_session,
                             }
-                    elif not final_text:
+                    else:
                         yield {
                             "type": "delta",
-                            "text": result_text,
+                            "text": picked,
+                            "replace": True,
                             "session_id": out_session,
                         }
-                    final_text = result_text
+                    pieces.clear()
+                    pieces.append(picked)
+                final_text = picked or last
                 yield {
                     "type": "done",
                     "text": final_text,

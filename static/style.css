@@ -2013,6 +2013,7 @@ main {
 }
 
 .overview-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
@@ -2020,6 +2021,152 @@ main {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
+}
+
+.overview-card.is-archived {
+  opacity: 0.72;
+  border-style: dashed;
+}
+
+.overview-device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  margin: 0 0 0.75rem;
+}
+
+.overview-show-archived {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.overview-discover-panel {
+  margin: 0 0 0.85rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elev);
+}
+
+.overview-discover-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0.35rem 0 0.5rem;
+}
+
+.overview-discover-window {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.overview-discover-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.overview-discover-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.75rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 0.88rem;
+}
+
+.overview-discover-item.is-known {
+  opacity: 0.65;
+}
+
+.overview-discover-meta {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.overview-card-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--line);
+  color: var(--muted);
+}
+
+.overview-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+
+.overview-placements {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.45rem;
+}
+
+.overview-placements summary {
+  cursor: pointer;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.overview-placements-list {
+  margin: 0.45rem 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.overview-placement-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.15rem;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 0.82rem;
+}
+
+.overview-placement-move {
+  margin-top: 0.5rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.overview-placement-move label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+}
+
+.overview-placement-move input,
+.overview-placement-move select {
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-elev);
+  color: var(--ink);
+  font: inherit;
 }
 
 .overview-card-top {
@@ -3165,6 +3312,22 @@ main {
   opacity: 0.55;
 }
 
+.map-chat-session-row-title input {
+  flex: 1 1 16rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-elev);
+  color: var(--ink);
+  font: inherit;
+}
+
+.map-chat-session-row-title input:disabled {
+  opacity: 0.55;
+}
+
 .map-chat-log {
   display: flex;
   flex-direction: column;
@@ -3531,7 +3694,7 @@ main {
   gap: 0.55rem 0.85rem;
 }
 
-.section-small-rooms {
+.section-toggle {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
@@ -3542,7 +3705,7 @@ main {
   user-select: none;
 }
 
-.section-small-rooms input {
+.section-toggle input {
   width: 1rem;
   height: 1rem;
   accent-color: var(--accent);
@@ -3585,14 +3748,18 @@ main {
 .section-canvas-wrap {
   width: 100%;
   overflow-x: auto;
+  display: flex;
+  justify-content: center;
 }
 
 .section-svg {
   display: block;
-  width: 100%;
+  width: min(100%, calc(480px * 960 / 420));
   height: auto;
   min-height: 300px;
   max-height: 480px;
+  flex: 0 0 auto;
+  margin: 0 auto;
 }
 
 .section-room-hit .section-room {
@@ -3659,11 +3826,17 @@ main {
   border-color: rgba(255, 255, 255, 0.55);
 }
 
-.section-room-chart-host canvas,
-.section-room-temp-chart {
-  display: block;
+.section-room-chart-canvas-wrap {
   flex: 1 1 auto;
   min-height: 0;
+  position: relative;
+}
+
+.section-room-chart-canvas-wrap canvas,
+.section-room-temp-chart {
+  position: absolute;
+  inset: 0;
+  display: block;
   width: 100% !important;
   height: 100% !important;
 }
@@ -3698,15 +3871,34 @@ main {
   pointer-events: none;
 }
 
-.section-sensor-stale-mark {
-  fill: #fff;
-  font-size: 10px;
+.temp-trend {
   font-weight: 800;
-  pointer-events: none;
+  stroke: none;
+  paint-order: fill;
 }
 
-.section-sensor-stale-label {
+.temp-trend.is-up {
+  fill: #c45c4a;
+  color: #c45c4a;
+}
+
+.temp-trend.is-down {
+  fill: #2b7bbf;
+  color: #2b7bbf;
+}
+
+.temp-stale-warn {
   fill: #c4782a;
+  color: #c4782a;
+  font-weight: 800;
+  stroke: none;
+  paint-order: fill;
+}
+
+.network-sublabel.is-stale,
+.section-sensor-label.is-stale {
+  fill: #c4782a;
+  font-style: italic;
 }
 
 .section-facade-label {
@@ -3724,6 +3916,22 @@ main {
   stroke-width: 3;
   fill: none;
   stroke-linecap: round;
+}
+
+.section-transom {
+  stroke: #8a908c;
+  stroke-width: 4.5;
+  fill: none;
+  stroke-linecap: square;
+  opacity: 0.72;
+}
+
+.section-lintel-guide {
+  stroke: var(--line);
+  stroke-width: 1;
+  stroke-dasharray: 4 5;
+  opacity: 0.4;
+  pointer-events: none;
 }
 
 .section-door.open {
@@ -3822,6 +4030,51 @@ main {
   user-select: none;
 }
 
+.map-overview-charts {
+  margin: 0.35rem 0 1rem;
+  padding: 0.75rem 1rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-elev) 55%, transparent);
+}
+
+.map-overview-charts-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 1rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.25rem;
+}
+
+.map-overview-charts-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.map-overview-charts-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.85rem;
+  align-items: center;
+}
+
+.map-overview-charts-meta {
+  margin: 0 0 0.45rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.chart-block.map-overview-chart-block {
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.chart-block.map-overview-chart-block canvas {
+  height: 240px !important;
+}
+
 .map-room-charts {
   margin-top: 0.85rem;
   padding: 0.85rem 1rem 0.75rem;
@@ -3878,6 +4131,16 @@ main {
 
 .map-room-chart-block {
   margin: 0;
+}
+
+.chart-block.map-room-chart-block-panel {
+  padding-top: 0.35rem;
+  border-top: none;
+  overflow: visible;
+}
+
+.chart-block.map-room-chart-block-panel canvas {
+  height: 280px !important;
 }
 
 .map-room-chart-block figcaption {

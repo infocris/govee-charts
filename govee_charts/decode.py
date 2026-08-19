@@ -1,4 +1,4 @@
-"""Decode Govee BLE manufacturer payloads (H5075 / H5179)."""
+"""Decode Govee and SwitchBot BLE temperature/humidity advertisements."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
 from govee_charts.address import resolve_device_address
+from govee_charts.switchbot_decode import decode_switchbot_advertisement
 
 # Govee manufacturer company IDs (as exposed by bleak)
 GOVEE_H5075_MFG_ID = 0xEC88  # H5075 / H5072
@@ -154,39 +155,58 @@ def decode_advertisement(
     device: BLEDevice | None = None,
     suffix_map: dict[str, str] | None = None,
 ) -> Reading | None:
-    """Decode a BLE advertisement into a Reading, or None if not a known Govee sensor."""
+    """Decode a BLE advertisement into a Reading, or None if unsupported."""
     model = detect_model(adv, name)
-    if model is None:
+    if model is not None:
+        mfg = adv.manufacturer_data or {}
+        if model == "h5179":
+            values = decode_h5179(bytes(mfg[GOVEE_H5179_MFG_ID]))
+            store_model = "h5179"
+        elif model == "h5179_new":
+            values = decode_h5179_new(bytes(mfg[GOVEE_H5179_NEW_MFG_ID]))
+            store_model = "h5179"
+        else:
+            values = decode_h5075(bytes(mfg[GOVEE_H5075_MFG_ID]))
+            store_model = "h5075"
+
+        if values is None:
+            return None
+
+        temp, humidity, battery = values
+        if device is not None:
+            rssi = advertisement_rssi(device, adv)
+        else:
+            rssi = getattr(adv, "rssi", None)
+            rssi = int(rssi) if rssi is not None else None
+        ble_name = name or address.upper()
+        canonical = resolve_device_address(address, ble_name, suffix_map=suffix_map)
+        return Reading(
+            temperature_c=temp,
+            humidity=humidity,
+            battery=battery,
+            address=canonical,
+            name=ble_name,
+            model=store_model,
+            rssi=rssi,
+        )
+
+    sb = decode_switchbot_advertisement(address, name, adv)
+    if sb is None:
         return None
 
-    mfg = adv.manufacturer_data or {}
-    if model == "h5179":
-        values = decode_h5179(bytes(mfg[GOVEE_H5179_MFG_ID]))
-        store_model = "h5179"
-    elif model == "h5179_new":
-        values = decode_h5179_new(bytes(mfg[GOVEE_H5179_NEW_MFG_ID]))
-        store_model = "h5179"
-    else:
-        values = decode_h5075(bytes(mfg[GOVEE_H5075_MFG_ID]))
-        store_model = "h5075"
-
-    if values is None:
-        return None
-
-    temp, humidity, battery = values
     if device is not None:
         rssi = advertisement_rssi(device, adv)
     else:
         rssi = getattr(adv, "rssi", None)
         rssi = int(rssi) if rssi is not None else None
-    ble_name = name or address.upper()
+    ble_name = str(sb.get("name") or name or address.upper())
     canonical = resolve_device_address(address, ble_name, suffix_map=suffix_map)
     return Reading(
-        temperature_c=temp,
-        humidity=humidity,
-        battery=battery,
+        temperature_c=float(sb["temperature_c"]),
+        humidity=float(sb["humidity"]),
+        battery=int(sb["battery"]),
         address=canonical,
         name=ble_name,
-        model=store_model,
+        model=str(sb["model"]),
         rssi=rssi,
     )

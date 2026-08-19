@@ -147,6 +147,34 @@
         <p class="overview-hint" data-i18n="overview.hint">Edit name / zone / height / height cm / room inline — use Charts to open compare graphs</p>
       </div>
 
+      <div class="overview-device-actions">
+        <button
+          type="button"
+          id="overview-discover-toggle"
+          class="backfill-btn"
+          data-i18n="overview.discoverToggle"
+        >
+          Discover sensors
+        </button>
+        <label class="overview-show-archived">
+          <input type="checkbox" id="overview-show-archived" />
+          <span data-i18n="overview.showArchived">Show archived</span>
+        </label>
+      </div>
+      <div id="overview-discover-panel" class="overview-discover-panel" hidden>
+        <p class="overview-hint" data-i18n="overview.discoverHint">
+          Nearby Govee sensors heard by the local BLE worker. Unknown devices can be registered here.
+        </p>
+        <div class="overview-discover-actions">
+          <button type="button" id="overview-discover-scan" class="backfill-btn" data-i18n="overview.discoverScan">
+            Scan now
+          </button>
+          <span class="overview-discover-window" id="overview-discover-window"></span>
+        </div>
+        <ul class="overview-discover-list" id="overview-discover-list" aria-live="polite"></ul>
+        <p class="status" id="overview-discover-status" aria-live="polite"></p>
+      </div>
+
       <label class="overview-text-filter" for="overview-device-filter">
         <span class="overview-text-filter-label" data-i18n="overview.filter">Filter</span>
         <input
@@ -612,6 +640,10 @@
             — include bathroom / WC in the cross-section (off by default)
           </li>
           <li>
+            <span class="map-click-keys"><kbd>Heights</kbd></span>
+            — show the cm axis and sensor heights on the cross-section
+          </li>
+          <li>
             <span class="map-click-keys"><kbd>+</kbd> · <kbd>−</kbd> · <kbd>100%</kbd></span>
             — zoom the topology map
           </li>
@@ -631,6 +663,28 @@
             <select id="map-chat-session" disabled>
               <option value="" data-i18n="map.chat.sessionNew">New chat…</option>
             </select>
+          </div>
+          <div class="map-chat-session-row map-chat-session-row-title">
+            <label class="map-chat-session-label" for="map-chat-session-title">
+              <span data-i18n="map.chat.sessionTitle">Title</span>
+            </label>
+            <input
+              type="text"
+              id="map-chat-session-title"
+              maxlength="120"
+              data-i18n-placeholder="map.chat.sessionTitlePlaceholder"
+              placeholder="Optional title…"
+              disabled
+            />
+            <button
+              type="button"
+              id="map-chat-session-save"
+              class="backfill-btn"
+              disabled
+              data-i18n="map.chat.sessionSave"
+            >
+              Save
+            </button>
           </div>
           <div class="map-chat-log" id="map-chat-log" role="log" aria-relevant="additions"></div>
           <form class="map-chat-form" id="map-chat-form">
@@ -659,13 +713,44 @@
       </div>
       <p class="network-meta" id="network-meta" aria-live="polite">Loading…</p>
 
+      <div class="map-overview-charts" id="map-overview-charts">
+        <div class="map-overview-charts-head">
+          <h3 id="map-overview-charts-title">Indoor average</h3>
+          <div class="map-overview-charts-actions">
+            <div class="ranges map-overview-ranges" role="group" aria-label="Overview chart range">
+              <button type="button" data-map-overview-hours="6">6 h</button>
+              <button type="button" data-map-overview-hours="24" class="active">24 h</button>
+              <button type="button" data-map-overview-hours="168">7 d</button>
+            </div>
+            <div class="ranges forecast-future-ranges" role="group" aria-label="Forecast horizon">
+              <span class="forecast-future-label">Future</span>
+              <button type="button" data-forecast-future="1">+1 h</button>
+              <button type="button" data-forecast-future="6">+6 h</button>
+              <button type="button" data-forecast-future="12">+12 h</button>
+              <button type="button" data-forecast-future="24" class="active">+24 h</button>
+              <button type="button" data-forecast-future="72">+3 d</button>
+              <button type="button" data-forecast-future="168">+7 d</button>
+            </div>
+          </div>
+        </div>
+        <p class="map-overview-charts-meta" id="map-overview-charts-meta"></p>
+        <figure class="chart-block map-overview-chart-block">
+          <canvas id="map-overview-temp-chart" height="200"></canvas>
+        </figure>
+        <p class="status" id="map-overview-charts-status" aria-live="polite"></p>
+      </div>
+
       <div class="section-panel">
         <div class="section-head">
           <h3>Open-room cross-section</h3>
           <div class="section-head-right">
-            <label class="section-small-rooms" title="Bathroom, WC, and other rooms under 3.5 m²">
+            <label class="section-toggle" title="Bathroom, WC, and other rooms under 3.5 m²">
               <input type="checkbox" id="section-show-small" />
               Small rooms
+            </label>
+            <label class="section-toggle" title="Show the cm axis and sensor height on labels">
+              <input type="checkbox" id="section-show-heights" checked />
+              Heights
             </label>
             <button type="button" id="section-path-clear" class="section-path-clear" title="Clear clicked rooms">Clear</button>
             <span class="net-temp-scale" id="section-temp-scale" hidden>
@@ -1287,7 +1372,7 @@
     <section id="view-settings" class="view" role="tabpanel" data-i18n-aria-label="nav.settings" aria-label="Settings" hidden>
       <div class="overview-head">
         <h2 data-i18n="settings.title">Settings</h2>
-        <p class="overview-hint" data-i18n="settings.hint">Language, voice, and weather station preferences are stored in this browser.</p>
+        <p class="overview-hint" data-i18n="settings.hint">Language, window advice, voice, and weather station preferences are stored in this browser.</p>
       </div>
       <form class="settings-form" id="settings-form" onsubmit="return false;">
         <label class="settings-field" for="settings-locale">
@@ -1297,6 +1382,16 @@
             <option value="fr" data-i18n="settings.lang.fr">Français</option>
           </select>
           <span class="settings-field-help" data-i18n="settings.languageHelp">User interface language</span>
+        </label>
+        <label class="settings-field" for="settings-advice-model">
+          <span class="settings-field-label" data-i18n="settings.adviceModel">Window advice</span>
+          <select id="settings-advice-model" data-i18n-aria-label="settings.adviceModelHelp" aria-label="Window advice model">
+            <option value="v1" data-i18n="settings.advice.v1">v1 — weather station (current)</option>
+            <option value="v2" data-i18n="settings.advice.v2">v2 — façades and AC</option>
+          </select>
+          <span class="settings-field-help" data-i18n="settings.adviceModelHelp">
+            v1 compares the weather station to indoor air. v2 uses air at each façade, ignores exhaust plumes, and keeps windows closed while AC is on.
+          </span>
         </label>
         <label class="settings-field" for="tts-voice-select">
           <span class="settings-field-label" data-i18n="settings.voice">Voice for alerts</span>
@@ -1346,7 +1441,7 @@
             No weather stations configured on this node.
           </p>
           <span class="settings-field-help" data-i18n="settings.stationsHelp">
-            Choose which stations appear on Compare charts and projection cards. Stored in this browser.
+            Choose which stations appear on the Map overview, Compare charts, and projection cards. Stored in this browser.
           </span>
         </fieldset>
         <fieldset class="settings-field settings-service-field">

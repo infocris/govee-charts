@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OVERRIDES_PATH = ROOT / "data" / "apartment_overrides.json"
 
+# Storey geometry (T3): ~2.5 m ceiling, interior door frames ~2.0 m.
+# The ~0.5 m transom above the lintel is a weakly mixed ceiling pocket.
+DEFAULT_CEILING_M = 2.5
+DEFAULT_DOOR_HEIGHT_M = 2.0
+# Typical window sill (not surveyed). Window heads align with door frames.
+DEFAULT_WINDOW_SILL_M = 0.9
+# K_door is calibrated for a 2.0 m leaf in a 2.5 m storey.
+_DOOR_K_REF_OPENING_FRAC = DEFAULT_DOOR_HEIGHT_M / DEFAULT_CEILING_M
+
 # Relative conductances (W/K scale factors); absolute scale set by K_SCALE.
 K_BY_EDGE = {
     "door": 25.0,
@@ -59,6 +68,25 @@ WIND_MIN_MS = 1.5
 # Close daily maxima ⇒ rooms likely share air (door open / large opening).
 TEMP_COUPLE_OPEN_C = 0.8
 TEMP_COUPLE_CLOSED_C = 2.0
+
+
+def height_bands_cm(
+    ceiling_m: float = DEFAULT_CEILING_M,
+    door_height_m: float = DEFAULT_DOOR_HEIGHT_M,
+) -> dict[str, int]:
+    """Map high/mid/low categories onto the door / transom geometry.
+
+    high — midpoint of the transom (above the lintel)
+    mid  — midpoint of the door opening
+    low  — near the floor (~15 % of the door leaf)
+    """
+    ceil_cm = max(50.0, float(ceiling_m) * 100.0)
+    door_cm = min(ceil_cm - 5.0, max(50.0, float(door_height_m) * 100.0))
+    return {
+        "high": int(round((door_cm + ceil_cm) / 2.0)),
+        "mid": int(round(door_cm / 2.0)),
+        "low": int(round(max(20.0, door_cm * 0.15))),
+    }
 
 
 def infer_temp_coupling(
@@ -476,6 +504,344 @@ def suggest_cooling_airflow(
     }
 
 
+# --- Advice model v2 (façade air + HVAC isolate). v1 is suggest_cooling_airflow. ---
+
+ADVICE_V2_DELTA_C = 1.5
+ADVICE_V2_PLUME_MATCH_C = 0.6
+ADVICE_V2_PLUME_STATION_GAP_C = 1.5
+ADVICE_V2_DEW_MARGIN_C = 0.5
+
+
+def dew_point_c(temp_c: float, rh: float) -> float | None:
+    """Magnus dew point (°C); ``rh`` is relative humidity 0–100."""
+    try:
+        t = float(temp_c)
+        h = float(rh)
+    except (TypeError, ValueError):
+        return None
+    if h <= 0 or h > 100:
+        return None
+    a = 17.625
+    b = 243.04
+    alpha = (a * t) / (b + t) + math.log(h / 100.0)
+    denom = a - alpha
+    if abs(denom) < 1e-9:
+        return None
+    return round((b * alpha) / denom, 2)
+
+
+def room_window_air_c(
+    room: dict[str, Any],
+    outdoor_c: float | None,
+) -> tuple[float | None, str]:
+    """Temperature of air that would enter this room's window.
+
+    Prefers exterior sensors. Drops sensors that look like an exhaust plume
+    (matches indoor while the station is clearly cooler). Falls back to station.
+    """
+    indoor = _room_live_temp(room)
+    kept: list[float] = []
+    skipped_plume = False
+    for s in room.get("sensors") or []:
+        if str(s.get("zone") or "").lower() != "exterior":
+            continue
+        try:
+            t = float(s["temperature_c"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if (
+            indoor is not None
+            and outdoor_c is not None
+            and abs(t - indoor) < ADVICE_V2_PLUME_MATCH_C
+            and outdoor_c <= indoor - ADVICE_V2_PLUME_STATION_GAP_C
+        ):
+            skipped_plume = True
+            continue
+        kept.append(t)
+    if kept:
+        return round(sum(kept) / len(kept), 2), "facade"
+    if skipped_plume and outdoor_c is not None:
+        return round(float(outdoor_c), 2), "plume_fallback"
+    try:
+        ft = room.get("facade_temp_c")
+        if ft is not None and not skipped_plume:
+            return round(float(ft), 2), "facade"
+    except (TypeError, ValueError):
+        pass
+    if outdoor_c is not None:
+        return round(float(outdoor_c), 2), "station"
+    return None, "none"
+
+
+def advice_kind_v2(
+    tin: float | None,
+    twindow: float | None,
+    *,
+    station_c: float | None = None,
+    rh_out: float | None = None,
+    threshold_c: float = ADVICE_V2_DELTA_C,
+) -> str | None:
+    """open / close / humid / None (near balance), using air-at-window."""
+    if tin is None or twindow is None:
+        return None
+    d = float(tin) - float(twindow)
+    thr = float(threshold_c)
+    if d <= -thr:
+        return "close"
+    if d >= thr:
+        t_dew_src = station_c if station_c is not None else twindow
+        if rh_out is not None and float(rh_out) > 0:
+            dew = dew_point_c(t_dew_src, float(rh_out))
+            if dew is not None and dew >= float(tin) - ADVICE_V2_DEW_MARGIN_C:
+                return "humid"
+        return "open"
+    return None
+
+
+def _hvac_room_id(hvac: dict[str, Any] | None) -> str | None:
+    if not hvac or not hvac.get("active"):
+        return None
+    rid = str(hvac.get("room") or "").strip().lower()
+    return rid or None
+
+
+def _hvac_door_open(edges: list[dict[str, Any]], hvac_room: str) -> bool:
+    hid = str(hvac_room).strip().lower()
+    for edge in edges:
+        kind = str(edge.get("kind") or "door")
+        if kind == "wall":
+            continue
+        a = str(edge.get("a") or "").lower()
+        b = str(edge.get("b") or "").lower()
+        if hid not in (a, b):
+            continue
+        if str(edge.get("opening") or "") == "open":
+            return True
+    return False
+
+
+def advise_climate_v2(
+    rooms: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    outdoor_temp_c: float | None = None,
+    outdoor_humidity: float | None = None,
+    hvac: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Per-room open/close advice using façade air and HVAC isolation."""
+    outdoor = None
+    if outdoor_temp_c is not None:
+        try:
+            outdoor = float(outdoor_temp_c)
+        except (TypeError, ValueError):
+            outdoor = None
+    rh = None
+    if outdoor_humidity is not None:
+        try:
+            rh = float(outdoor_humidity)
+        except (TypeError, ValueError):
+            rh = None
+    dew = dew_point_c(outdoor, rh) if outdoor is not None and rh is not None else None
+    hvac_id = _hvac_room_id(hvac)
+    hvac_door_open = bool(hvac_id and _hvac_door_open(edges, hvac_id))
+
+    close_rooms: list[dict[str, str]] = []
+    open_rooms: list[dict[str, str]] = []
+    ok_open: list[dict[str, str]] = []
+    ok_closed: list[dict[str, str]] = []
+    humid = False
+    room_rows: list[dict[str, Any]] = []
+
+    for room in rooms:
+        if not list(room.get("exterior") or []):
+            continue
+        rid = str(room.get("id") or "")
+        label = str(room.get("label") or rid)
+        tin = _room_live_temp(room)
+        twindow, wsrc = room_window_air_c(room, outdoor)
+        kind = advice_kind_v2(tin, twindow, station_c=outdoor, rh_out=rh)
+        if hvac_id and kind == "open":
+            kind = "close"
+        win = str(room.get("window_state") or "")
+        row = {
+            "id": rid,
+            "label": label,
+            "kind": kind,
+            "indoor_c": round(tin, 2) if tin is not None else None,
+            "window_c": twindow,
+            "window_source": wsrc,
+            "window_state": win or None,
+            "facade_c": None,
+        }
+        try:
+            if room.get("facade_temp_c") is not None:
+                row["facade_c"] = round(float(room["facade_temp_c"]), 2)
+        except (TypeError, ValueError):
+            pass
+        room_rows.append(row)
+        ident = {"id": rid, "label": label}
+        any_open = win == "open"
+        if kind in ("close", "humid"):
+            if kind == "humid":
+                humid = True
+            if any_open:
+                close_rooms.append(ident)
+            else:
+                ok_closed.append(ident)
+        elif kind == "open":
+            if any_open:
+                ok_open.append(ident)
+            else:
+                open_rooms.append(ident)
+
+    actions: list[str] = []
+    if hvac_id:
+        hvac_label = next(
+            (
+                str(r.get("label") or r.get("id"))
+                for r in rooms
+                if str(r.get("id") or "").lower() == hvac_id
+            ),
+            hvac_id,
+        )
+        if hvac_door_open:
+            actions.append(
+                f"Close the {hvac_label} door — AC is on; keep that room isolated."
+            )
+        actions.append(
+            f"Keep {hvac_label} windows closed while AC is running."
+        )
+
+    if close_rooms:
+        tone = "humid" if humid else "close"
+    elif open_rooms:
+        tone = "open"
+    elif ok_open or ok_closed:
+        tone = "ok"
+    else:
+        tone = "idle"
+
+    if hvac_id:
+        mode = "hvac_isolate"
+    elif open_rooms or ok_open:
+        mode = "cooling"
+    else:
+        mode = "hold"
+
+    return {
+        "model": "v2",
+        "tone": tone,
+        "mode": mode,
+        "close_rooms": close_rooms,
+        "open_rooms": open_rooms,
+        "ok_open": ok_open,
+        "ok_closed": ok_closed,
+        "humid": humid,
+        "hvac_isolate": bool(hvac_id),
+        "hvac_close_door": hvac_door_open,
+        "hvac_room": hvac_id,
+        "station_temp_c": round(outdoor, 2) if outdoor is not None else None,
+        "station_humidity": round(rh, 0) if rh is not None else None,
+        "dew_c": dew,
+        "delta_c": ADVICE_V2_DELTA_C,
+        "rooms": room_rows,
+        "actions": actions,
+    }
+
+
+def suggest_cooling_airflow_v2(
+    rooms: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    *,
+    outdoor_temp_c: float | None = None,
+    outdoor_humidity: float | None = None,
+    wind_speed_ms: float | None = None,
+    wind_direction_deg: float | None = None,
+    hvac: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Through-flow suggestion using v2 façade/HVAC rules; v1 function is unchanged."""
+    advice = advise_climate_v2(
+        rooms,
+        edges,
+        outdoor_temp_c=outdoor_temp_c,
+        outdoor_humidity=outdoor_humidity,
+        hvac=hvac,
+    )
+    by_id = {str(r.get("id")): r for r in rooms if r.get("id")}
+    indoor_temps = [
+        t for t in (_room_live_temp(r) for r in by_id.values()) if t is not None
+    ]
+    indoor_avg = (
+        round(sum(indoor_temps) / len(indoor_temps), 2) if indoor_temps else None
+    )
+    outdoor = advice.get("station_temp_c")
+    hold_base = {
+        "mode": "hold",
+        "model": "v2",
+        "outdoor_temp_c": outdoor,
+        "indoor_temp_c": indoor_avg,
+        "delta_c": (
+            round(float(outdoor) - indoor_avg, 2)
+            if outdoor is not None and indoor_avg is not None
+            else None
+        ),
+        "inlet": None,
+        "outlet": None,
+        "path": [],
+        "flows": [],
+        "advice": advice,
+    }
+
+    if advice.get("mode") != "cooling" or advice.get("hvac_isolate"):
+        actions = list(advice.get("actions") or [])
+        if not actions:
+            actions = [
+                "Outdoor air at the façades is not cooler than indoors — "
+                "keep windows closed or use mechanical cooling."
+            ]
+        return {**hold_base, "actions": actions}
+
+    cooling_ids = {
+        str(r["id"])
+        for r in (advice.get("open_rooms") or []) + (advice.get("ok_open") or [])
+        if r.get("id")
+    }
+    if not cooling_ids:
+        actions = list(advice.get("actions") or [])
+        if not actions:
+            actions = [
+                "No façade is cool enough for a through-draft — keep windows closed."
+            ]
+        return {**hold_base, "actions": actions}
+
+    patched: list[dict[str, Any]] = []
+    for r in rooms:
+        row = dict(r)
+        rid = str(row.get("id") or "")
+        if list(row.get("exterior") or []) and rid not in cooling_ids:
+            row["exterior"] = []
+        patched.append(row)
+    window_temps = [
+        room_window_air_c(by_id[rid], outdoor)[0]
+        for rid in cooling_ids
+        if rid in by_id and room_window_air_c(by_id[rid], outdoor)[0] is not None
+    ]
+    v1 = suggest_cooling_airflow(
+        patched,
+        edges,
+        outdoor_temp_c=min(window_temps) if window_temps else outdoor,
+        wind_speed_ms=wind_speed_ms,
+        wind_direction_deg=wind_direction_deg,
+    )
+    v1 = dict(v1)
+    v1["model"] = "v2"
+    v1["advice"] = advice
+    extra = list(advice.get("actions") or [])
+    if extra:
+        v1["actions"] = extra + list(v1.get("actions") or [])
+    return v1
+
+
 def _angle_diff_deg(a: float, b: float) -> float:
     """Smallest signed difference a−b in (−180, 180]."""
     return (float(a) - float(b) + 180.0) % 360.0 - 180.0
@@ -637,7 +1003,8 @@ class EdgeSpec:
 @dataclass
 class ApartmentLayout:
     enabled: bool = False
-    ceiling_m: float = 2.5
+    ceiling_m: float = DEFAULT_CEILING_M
+    door_height_m: float = DEFAULT_DOOR_HEIGHT_M
     area_m2: float = 35.0
     floor: int = 3
     floors_total: int = 7
@@ -653,7 +1020,14 @@ class ApartmentLayout:
     def from_dict(cls, raw: dict[str, Any] | None) -> ApartmentLayout:
         raw = raw or {}
         enabled = bool(raw.get("enabled", False))
-        ceiling_m = float(raw.get("ceiling_m") or 2.5)
+        ceiling_m = float(raw.get("ceiling_m") or DEFAULT_CEILING_M)
+        if ceiling_m < 1.5:
+            ceiling_m = 1.5
+        door_height_m = float(raw.get("door_height_m") or DEFAULT_DOOR_HEIGHT_M)
+        if door_height_m < 0.8:
+            door_height_m = 0.8
+        if door_height_m >= ceiling_m:
+            door_height_m = ceiling_m * _DOOR_K_REF_OPENING_FRAC
         area_m2 = float(raw.get("area_m2") or 35.0)
         floor = int(raw.get("floor") or 3)
         floors_total = int(raw.get("floors_total") or 7)
@@ -703,6 +1077,7 @@ class ApartmentLayout:
         layout = cls(
             enabled=enabled,
             ceiling_m=ceiling_m,
+            door_height_m=door_height_m,
             area_m2=area_m2,
             floor=floor,
             floors_total=floors_total,
@@ -724,8 +1099,14 @@ class ApartmentLayout:
                 self.k_ext[rid] = K_EXT_PER_M2 * room.area_m2 * K_SCALE
             else:
                 self.k_ext[rid] = 0.0
+        door_scale = min(1.0, max(0.25, self.door_height_m / self.ceiling_m)) / (
+            _DOOR_K_REF_OPENING_FRAC or 1.0
+        )
         for edge in self.edges:
             k = K_BY_EDGE.get(edge.kind, K_BY_EDGE["door"]) * K_SCALE
+            if edge.kind == "door":
+                # Open-door mixing cannot vent the transom above the lintel.
+                k *= door_scale
             key = (edge.a, edge.b) if edge.a < edge.b else (edge.b, edge.a)
             self.k_pair[key] = self.k_pair.get(key, 0.0) + k
 
@@ -733,6 +1114,11 @@ class ApartmentLayout:
         return {
             "enabled": self.enabled,
             "ceiling_m": self.ceiling_m,
+            "door_height_m": self.door_height_m,
+            "window_sill_m": DEFAULT_WINDOW_SILL_M,
+            "height_bands_cm": height_bands_cm(
+                self.ceiling_m, self.door_height_m
+            ),
             "area_m2": self.area_m2,
             "floor": self.floor,
             "floors_total": self.floors_total,
@@ -1071,7 +1457,8 @@ def default_apartment_dict() -> dict[str, Any]:
     """Canonical layout for the user's T3 (config.example defaults)."""
     return {
         "enabled": False,
-        "ceiling_m": 2.5,
+        "ceiling_m": DEFAULT_CEILING_M,
+        "door_height_m": DEFAULT_DOOR_HEIGHT_M,
         "area_m2": 35.0,
         "floor": 3,
         "floors_total": 7,

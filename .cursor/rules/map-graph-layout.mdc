@@ -1,0 +1,14 @@
+---
+description: Map topology graph spacing — min node gap and edge padding
+globs: static/app.js
+alwaysApply: false
+---
+
+# Map topology graph layout
+
+When changing the apartment **Map** (plan) force layout in `static/app.js`:
+
+1. **Minimum node gap** — room pills (and façade nodes) must stay far enough apart that **edges, padlocks, and ΔT labels remain readable**. `networkPlaceGraph` sets scale from `NETWORK_MIN_NODE_GAP_PX` / min layout distance (after `NETWORK_MIN_NODE_DIST` repulsion). Façades use a **pixel** offset (`NETWORK_FACADE_GAP_PX`), not a layout-unit offset that would force a tiny scale. Do not shrink the graph until connections disappear under the pills.
+2. **Keep off the viewBox edges** — `NETWORK_PAD_PX` plus pill/façade boxes; grow `networkLayoutVb` if needed rather than crushing gaps. Default desktop zoom is **1.0** so `centerNetworkPan` does not crop the top. Never increase scale or reduce pad in a way that clips nodes, locks, or temperature labels.
+
+The open-room cross-section SVG is a separate diagram; this rule is for the topology graph only.
