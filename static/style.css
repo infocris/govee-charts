@@ -3165,6 +3165,22 @@ main {
   opacity: 0.55;
 }
 
+.map-chat-session-row-title input {
+  flex: 1 1 16rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-elev);
+  color: var(--ink);
+  font: inherit;
+}
+
+.map-chat-session-row-title input:disabled {
+  opacity: 0.55;
+}
+
 .map-chat-log {
   display: flex;
   flex-direction: column;

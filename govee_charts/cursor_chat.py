@@ -378,19 +378,43 @@ def _assistant_text(event: dict[str, Any]) -> str:
     return ""
 
 
-def _delta_from_assistant(pieces: list[str], text: str) -> str | None:
-    """Map stream-partial assistant events to new text only."""
+def _delta_from_assistant(pieces: list[str], text: str) -> tuple[str | None, bool]:
+    """Map stream-partial assistant events to new text only.
+
+    Returns ``(delta, replace)``. ``replace`` is true when the model started
+    a new message (typical after tool calls) so the UI must not concatenate
+    the thinking line with the final answer.
+    """
     if not text:
-        return None
+        return None, False
     joined = "".join(pieces)
     if joined and text == joined:
-        return None
+        return None, False
     if joined and text.startswith(joined):
         pieces.clear()
         pieces.append(text)
-        return text[len(joined) :]
+        return text[len(joined) :], False
+    if joined and joined.startswith(text):
+        # Shorter snapshot of the same message; keep the longer text.
+        return None, False
+    pieces.clear()
     pieces.append(text)
-    return text
+    return text, bool(joined)
+
+
+def _prefer_last_message(last: str, result_text: str) -> str:
+    """Keep the last assistant message when ``result`` concatenates turns."""
+    last = last or ""
+    result_text = result_text or ""
+    if not last:
+        return result_text
+    if not result_text or result_text == last:
+        return last
+    if result_text.startswith(last):
+        return result_text
+    if last in result_text:
+        return last
+    return last
 
 
 async def probe_agent_status(
@@ -522,14 +546,17 @@ async def stream_agent_chat(
                 out_session = str(event["session_id"])
             if etype == "assistant":
                 text = _assistant_text(event)
-                delta = _delta_from_assistant(pieces, text)
+                delta, replace = _delta_from_assistant(pieces, text)
                 if delta:
                     final_text = "".join(pieces)
-                    yield {
+                    ev_out: dict[str, Any] = {
                         "type": "delta",
                         "text": delta,
                         "session_id": out_session,
                     }
+                    if replace:
+                        ev_out["replace"] = True
+                    yield ev_out
             elif etype == "result":
                 if event.get("session_id"):
                     out_session = str(event["session_id"])
@@ -545,24 +572,28 @@ async def stream_agent_chat(
                         "session_id": out_session,
                     }
                     return
-                result_text = str(event.get("result") or final_text or "")
-                if result_text and result_text != final_text:
-                    # Emit only the missing suffix if partials were incomplete.
-                    if final_text and result_text.startswith(final_text):
-                        extra = result_text[len(final_text) :]
+                last = "".join(pieces)
+                result_text = str(event.get("result") or "")
+                picked = _prefer_last_message(last, result_text)
+                if picked and picked != last:
+                    if last and picked.startswith(last):
+                        extra = picked[len(last) :]
                         if extra:
                             yield {
                                 "type": "delta",
                                 "text": extra,
                                 "session_id": out_session,
                             }
-                    elif not final_text:
+                    else:
                         yield {
                             "type": "delta",
-                            "text": result_text,
+                            "text": picked,
+                            "replace": True,
                             "session_id": out_session,
                         }
-                    final_text = result_text
+                    pieces.clear()
+                    pieces.append(picked)
+                final_text = picked or last
                 yield {
                     "type": "done",
                     "text": final_text,

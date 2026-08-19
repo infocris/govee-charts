@@ -615,6 +615,12 @@ class MapChatBody(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class MapChatSessionPatch(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+
+    model_config = {"extra": "forbid"}
+
+
 class FacadePatch(BaseModel):
     exterior: list[str] = Field(default_factory=list)
 
@@ -1050,6 +1056,22 @@ def create_app(
         sessions = await store.list_sessions(limit=limit)
         return {"ok": True, "sessions": sessions}
 
+    @app.patch("/api/map-chat/sessions/{session_id}")
+    async def api_map_chat_rename_session(
+        session_id: str, body: MapChatSessionPatch
+    ) -> dict[str, Any]:
+        """Set or clear a custom title for one Map chat session."""
+        store: MapChatStore | None = app.state.map_chat_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="Map chat history unavailable")
+        sid = (session_id or "").strip()
+        if not sid:
+            raise HTTPException(status_code=400, detail="empty session_id")
+        session = await store.rename_session(sid, body.title)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        return {"ok": True, "session": session}
+
     @app.get("/api/map-chat/history")
     async def api_map_chat_history(
         session_id: str | None = Query(default=None, max_length=128),
@@ -1155,7 +1177,10 @@ def create_app(
                     if ev.get("session_id"):
                         out_session = str(ev["session_id"])
                     if ev.get("type") == "delta" and ev.get("text"):
-                        assistant_text += str(ev["text"])
+                        if ev.get("replace"):
+                            assistant_text = str(ev["text"])
+                        else:
+                            assistant_text += str(ev["text"])
                     elif ev.get("type") == "done" and ev.get("text"):
                         assistant_text = str(ev["text"]) or assistant_text
                     elif ev.get("type") == "error":

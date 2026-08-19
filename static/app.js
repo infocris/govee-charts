@@ -154,11 +154,14 @@
   const mapChatSendBtn = document.getElementById("map-chat-send");
   const mapChatClearBtn = document.getElementById("map-chat-clear");
   const mapChatSessionEl = document.getElementById("map-chat-session");
+  const mapChatSessionTitleEl = document.getElementById("map-chat-session-title");
+  const mapChatSessionSaveBtn = document.getElementById("map-chat-session-save");
   let mapChatReady = false;
   let mapChatBusy = false;
   let mapChatStatusLoaded = false;
   let mapChatModel = "auto";
   let mapChatSessionsLoaded = false;
+  let mapChatSessions = [];
   const sectionShowSmallEl = document.getElementById("section-show-small");
   const sectionShowHeightsEl = document.getElementById("section-show-heights");
   const sectionPathClearBtn = document.getElementById("section-path-clear");
@@ -13473,6 +13476,7 @@
       const hasLog = Boolean(mapChatLogEl && mapChatLogEl.children.length);
       mapChatClearBtn.disabled = mapChatBusy || (!hasSession && !hasLog);
     }
+    syncMapChatSessionTitleUi();
   }
 
   function currentWindowBannerPayload() {
@@ -13594,6 +13598,77 @@
     }
   }
 
+  function getMapChatSelectedSession() {
+    const sid = getMapChatSessionId();
+    if (!sid) return null;
+    return mapChatSessions.find((s) => s && s.session_id === sid) || null;
+  }
+
+  function mapChatSessionDisplayName(session) {
+    if (!session) return "";
+    const title = String(session.title || "").trim();
+    if (title) return title;
+    const preview = String(session.preview || "").trim();
+    return preview || String(session.session_id || "").slice(0, 8);
+  }
+
+  function syncMapChatSessionTitleUi() {
+    const sid = getMapChatSessionId();
+    const session = getMapChatSelectedSession();
+    const enabled = Boolean(mapChatReady && !mapChatBusy && sid);
+    if (mapChatSessionTitleEl) {
+      mapChatSessionTitleEl.disabled = !enabled;
+      const desired = session && session.title ? String(session.title) : "";
+      if (document.activeElement !== mapChatSessionTitleEl) {
+        mapChatSessionTitleEl.value = desired;
+      }
+    }
+    if (mapChatSessionSaveBtn) {
+      const current = mapChatSessionTitleEl ? mapChatSessionTitleEl.value.trim() : "";
+      const saved = session && session.title ? String(session.title).trim() : "";
+      mapChatSessionSaveBtn.disabled = !enabled || current === saved;
+    }
+  }
+
+  async function saveMapChatSessionTitle() {
+    const sid = String(getMapChatSessionId() || "").trim();
+    if (!sid || !mapChatSessionTitleEl || !mapChatSessionSaveBtn) return;
+    const title = mapChatSessionTitleEl.value.trim();
+    mapChatSessionSaveBtn.disabled = true;
+    try {
+      const res = await fetch(`/api/map-chat/sessions/${encodeURIComponent(sid)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: title || null }),
+      });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try {
+          const body = await res.json();
+          detail = body.detail || detail;
+        } catch (_) {
+          /* ignore */
+        }
+        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      }
+      const data = await res.json();
+      const session = data.session || null;
+      if (session && session.session_id) {
+        const next = mapChatSessions.filter((s) => s.session_id !== session.session_id);
+        next.unshift(session);
+        mapChatSessions = next;
+      }
+      await refreshMapChatSessions({ selectId: sid });
+      setMapChatStatus(t("map.chat.sessionSaved"));
+    } catch (err) {
+      setMapChatStatus(t("map.chat.sessionSaveFailed", {
+        error: err.message || String(err),
+      }), { error: true });
+    } finally {
+      syncMapChatSessionTitleUi();
+    }
+  }
+
   async function refreshMapChatSessions({ selectId } = {}) {
     if (!mapChatSessionEl) return;
     const current = selectId != null ? String(selectId) : getMapChatSessionId();
@@ -13602,18 +13677,19 @@
       if (!res.ok) return;
       const data = await res.json();
       const sessions = data.sessions || [];
+      mapChatSessions = Array.isArray(sessions) ? sessions : [];
       mapChatSessionEl.innerHTML = "";
       const blank = document.createElement("option");
       blank.value = "";
       blank.textContent = t("map.chat.sessionNew");
       mapChatSessionEl.appendChild(blank);
-      for (const s of sessions) {
+      for (const s of mapChatSessions) {
         const opt = document.createElement("option");
         opt.value = s.session_id;
         opt.textContent = t("map.chat.sessionLabel", {
           when: formatMapChatSessionWhen(s.updated_at),
           n: String(s.turn_count || 0),
-          preview: s.preview || s.session_id.slice(0, 8),
+          preview: mapChatSessionDisplayName(s),
         });
         mapChatSessionEl.appendChild(opt);
       }
@@ -13623,6 +13699,7 @@
         mapChatSessionEl.value = "";
       }
       mapChatSessionsLoaded = true;
+      syncMapChatSessionTitleUi();
     } catch (err) {
       console.warn("map chat sessions load failed", err);
     }
@@ -13662,10 +13739,12 @@
     if (!sid) {
       if (mapChatLogEl) mapChatLogEl.innerHTML = "";
       setMapChatControlsEnabled(mapChatReady);
+      syncMapChatSessionTitleUi();
       return;
     }
     await loadMapChatHistory(sid);
     setMapChatControlsEnabled(mapChatReady);
+    syncMapChatSessionTitleUi();
   }
 
   function setMapChatStatus(text, { error = false } = {}) {
@@ -13743,6 +13822,7 @@
     setMapChatStatus(t("map.chat.busy"));
     const sessionId = getMapChatSessionId();
     let gotText = false;
+    let rawText = "";
     try {
       const res = await fetch("/api/map-chat", {
         method: "POST",
@@ -13792,12 +13872,12 @@
             setMapChatSessionId(ev.session_id);
           }
           if (ev.type === "delta" && ev.text) {
-            if (assistantEl.classList.contains("pending")) {
-              assistantEl.classList.remove("pending");
-              assistantEl.dataset.raw = "";
-            }
-            assistantEl.dataset.raw = (assistantEl.dataset.raw || "") + ev.text;
-            setMapChatMessageBody(assistantEl, "assistant", assistantEl.dataset.raw);
+            rawText = ev.replace ? String(ev.text) : rawText + ev.text;
+            // Keep plain text while streaming so a mid-token apostrophe
+            // cannot be eaten by a data-* attribute or incomplete markdown.
+            setMapChatMessageBody(assistantEl, "assistant", rawText, {
+              pending: true,
+            });
             gotText = true;
             if (mapChatLogEl) mapChatLogEl.scrollTop = mapChatLogEl.scrollHeight;
           } else if (ev.type === "done") {
@@ -13805,13 +13885,11 @@
               outSession = ev.session_id;
               setMapChatSessionId(ev.session_id);
             }
-            if (!gotText && ev.text) {
-              assistantEl.classList.remove("pending");
-              assistantEl.dataset.raw = ev.text;
-              setMapChatMessageBody(assistantEl, "assistant", ev.text);
+            if (ev.text) rawText = String(ev.text);
+            assistantEl.classList.remove("pending");
+            if (rawText) {
+              setMapChatMessageBody(assistantEl, "assistant", rawText);
               gotText = true;
-            } else if (gotText && assistantEl.dataset.raw) {
-              setMapChatMessageBody(assistantEl, "assistant", assistantEl.dataset.raw);
             }
           } else if (ev.type === "saved") {
             if (ev.session_id) {
@@ -13834,6 +13912,9 @@
           bodyEl.classList.remove("map-chat-md");
           bodyEl.textContent = "…";
         }
+      } else if (rawText) {
+        assistantEl.classList.remove("pending");
+        setMapChatMessageBody(assistantEl, "assistant", rawText);
       }
       setMapChatStatus(t("map.chat.ready", { model: mapChatModel }));
       await refreshMapChatSessions({ selectId: outSession });
@@ -13877,6 +13958,22 @@
       selectMapChatSession(mapChatSessionEl.value).catch((err) =>
         console.warn(err)
       );
+    });
+  }
+  if (mapChatSessionTitleEl) {
+    mapChatSessionTitleEl.addEventListener("input", () => {
+      syncMapChatSessionTitleUi();
+    });
+    mapChatSessionTitleEl.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        saveMapChatSessionTitle().catch((err) => console.warn(err));
+      }
+    });
+  }
+  if (mapChatSessionSaveBtn) {
+    mapChatSessionSaveBtn.addEventListener("click", () => {
+      saveMapChatSessionTitle().catch((err) => console.warn(err));
     });
   }
   if (mapChatClearBtn) {
@@ -15566,6 +15663,11 @@
       loadHistory().catch((err) => {
         statusEl.textContent = t("compare.error", { error: err.message });
       });
+    }
+    if (foldMapChatEl && foldMapChatEl.open && mapChatSessionsLoaded) {
+      refreshMapChatSessions().catch((err) => console.warn(err));
+    } else {
+      syncMapChatSessionTitleUi();
     }
   }
 

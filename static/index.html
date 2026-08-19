@@ -636,6 +636,28 @@
               <option value="" data-i18n="map.chat.sessionNew">New chat…</option>
             </select>
           </div>
+          <div class="map-chat-session-row map-chat-session-row-title">
+            <label class="map-chat-session-label" for="map-chat-session-title">
+              <span data-i18n="map.chat.sessionTitle">Title</span>
+            </label>
+            <input
+              type="text"
+              id="map-chat-session-title"
+              maxlength="120"
+              data-i18n-placeholder="map.chat.sessionTitlePlaceholder"
+              placeholder="Optional title…"
+              disabled
+            />
+            <button
+              type="button"
+              id="map-chat-session-save"
+              class="backfill-btn"
+              disabled
+              data-i18n="map.chat.sessionSave"
+            >
+              Save
+            </button>
+          </div>
           <div class="map-chat-log" id="map-chat-log" role="log" aria-relevant="additions"></div>
           <form class="map-chat-form" id="map-chat-form">
             <label class="visually-hidden" for="map-chat-input" data-i18n="map.chat.inputLabel">Message</label>
