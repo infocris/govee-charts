@@ -70,8 +70,10 @@ Cursor data. Map **Ask Cursor** threads are separate (`data/map_chat.db`).
 - **H5075** / H5072 (manufacturer ID `0xEC88`)
 - **H5179** (manufacturer ID `0x8801`, or newer firmware with ID `0x0001` /
   broadcast name `GV5179_XXXX` — same packed payload as H5101/H5177)
+- **SwitchBot Meter family** (Meter, Meter Plus, Meter Pro, Meter Pro CO2,
+  Indoor/Outdoor — manufacturer ID `0x0969` + service `0xFD3D`)
 
-Auto-discovery: any Govee device advertising these payloads appears without
+Auto-discovery: any supported device advertising these payloads appears without
 manual pairing.
 
 ## Requirements
