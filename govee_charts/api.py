@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.types import Scope
 
-from govee_charts.address import register_mac, resolve_device_address
+from govee_charts.address import is_ble_mac, register_mac, resolve_device_address
 from govee_charts.apartment import (
     TEMP_COUPLE_CLOSED_C,
     TEMP_COUPLE_OPEN_C,
@@ -551,6 +551,42 @@ class CategoryPatch(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class DeviceCreateBody(BaseModel):
+    address: str = Field(min_length=1, max_length=64)
+    model: str | None = Field(default="unknown", max_length=32)
+    name: str | None = Field(default=None, max_length=80)
+    label: str | None = None
+    zone: str | None = None
+    height: str | None = None
+    height_cm: float | None = None
+    room: str | None = None
+
+    model_config = {"extra": "forbid"}
+
+
+class PlacementCreateBody(BaseModel):
+    effective_from: float | None = None
+    label: str | None = None
+    zone: str | None = None
+    height: str | None = None
+    height_cm: float | None = None
+    room: str | None = None
+
+    model_config = {"extra": "forbid"}
+
+
+class PlacementPatch(BaseModel):
+    label: str | None = None
+    zone: str | None = None
+    height: str | None = None
+    height_cm: float | None = None
+    room: str | None = None
+    valid_from: float | None = None
+    valid_until: float | None = None
+
+    model_config = {"extra": "forbid"}
+
+
 class DeviceMetaIngest(BaseModel):
     """Federation payload to sync device label / placement fields."""
 
@@ -675,6 +711,17 @@ def enrich_device(
     out["ble_name"] = device.get("name")
     out["name"] = device_display_name(device, labels)
     return out
+
+
+def _validate_device_address(address: str) -> str:
+    addr = address.strip().upper()
+    if is_ble_mac(addr):
+        return addr
+    if addr.startswith("HA:") and len(addr) > 3:
+        return addr
+    raise ValueError(
+        f"Invalid device address {address!r}; expected BLE MAC or HA:… id"
+    )
 
 
 async def _backfill_devices_from_db(
@@ -2028,9 +2075,12 @@ def create_app(
         }
 
     @app.get("/api/devices")
-    async def api_devices() -> list[dict[str, Any]]:
+    async def api_devices(
+        include_archived: bool = Query(default=False),
+    ) -> list[dict[str, Any]]:
         labels: dict[str, str] = app.state.labels
-        devices = [enrich_device(d, labels) for d in await db.list_devices()]
+        rows = await db.list_devices(include_archived=include_archived)
+        devices = [enrich_device(d, labels) for d in rows]
         trends = await db.temperature_trends(
             [str(d.get("address") or "") for d in devices]
         )
@@ -2041,6 +2091,215 @@ def create_app(
                 d["temp_delta_c"] = trend.get("delta_c")
                 d["temp_rate_c_h"] = trend.get("rate_c_h")
         return devices
+
+    @app.post("/api/devices")
+    async def api_create_device(body: DeviceCreateBody) -> dict[str, Any]:
+        try:
+            addr = _validate_device_address(body.address)
+            patch = normalize_patch(
+                zone=body.zone,
+                height=body.height,
+                height_cm=body.height_cm,
+                room=body.room,
+                label=body.label,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        model = (body.model or "unknown").strip() or "unknown"
+        device = await db.create_device(
+            addr,
+            model=model,
+            name=body.name,
+            label=patch.get("label"),
+            zone=patch.get("zone"),
+            height=patch.get("height"),
+            height_cm=patch.get("height_cm"),
+            room=patch.get("room"),
+        )
+        if is_ble_mac(addr):
+            register_mac(app.state.suffix_map, addr)
+        return enrich_device(device, app.state.labels)
+
+    @app.get("/api/devices/discover")
+    async def api_discover_devices(
+        seconds: float = Query(default=120.0, gt=0, le=900),
+        include_known: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        """List recently heard Govee BLE sensors; unknown = not registered (or archived)."""
+        since = time.time() - float(seconds)
+        candidates = await db.list_ble_discover_candidates(
+            since_ts=since, include_known=include_known
+        )
+        labels: dict[str, str] = app.state.labels
+        sensors: list[dict[str, Any]] = []
+        for row in candidates:
+            display = str(row.get("name") or row.get("address") or "")
+            addr = str(row.get("address") or "").upper()
+            if labels.get(addr):
+                display = labels[addr]
+            sensors.append(
+                {
+                    "address": addr,
+                    "name": display,
+                    "model": row.get("model"),
+                    "temperature_c": row.get("temperature_c"),
+                    "humidity": row.get("humidity"),
+                    "battery": row.get("battery"),
+                    "rssi": row.get("rssi"),
+                    "last_seen": row.get("last_seen"),
+                    "unknown": bool(row.get("unknown")),
+                    "archived": bool(row.get("archived")),
+                }
+            )
+        scanning = await db.ble_discover_scan_pending()
+        return {
+            "scanner_enabled": bool(app.state.scanner_enabled),
+            "scanning": scanning,
+            "seconds": float(seconds),
+            "sensors": sensors,
+            "unknown_count": sum(1 for s in sensors if s.get("unknown")),
+        }
+
+    @app.post("/api/devices/discover/scan")
+    async def api_discover_devices_scan() -> dict[str, Any]:
+        """Ask the BLE worker to run a ~15s discovery pass."""
+        if not app.state.scanner_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="Local BLE scanner is disabled",
+            )
+        await db.request_ble_discover()
+        return {"ok": True, "scanning": True, "duration_s": 15.0}
+
+    @app.delete("/api/devices/{address}")
+    async def api_delete_device(
+        address: str,
+        purge: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        try:
+            addr = _validate_device_address(address)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if purge:
+            ok = await db.purge_device(addr)
+            if not ok:
+                raise HTTPException(status_code=404, detail="Unknown device")
+            return {"ok": True, "address": addr, "purged": True}
+
+        archived = await db.archive_device(addr)
+        if archived is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        return {
+            "ok": True,
+            "address": addr,
+            "purged": False,
+            "device": enrich_device(archived, app.state.labels),
+        }
+
+    @app.get("/api/devices/{address}/placements")
+    async def api_list_placements(address: str) -> dict[str, Any]:
+        try:
+            addr = _validate_device_address(address)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        device = await db.get_device(addr, include_archived=True)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+        placements = await db.list_placements(addr)
+        return {
+            "address": addr,
+            "placements": placements,
+        }
+
+    @app.post("/api/devices/{address}/placements")
+    async def api_create_placement(
+        address: str, body: PlacementCreateBody
+    ) -> dict[str, Any]:
+        try:
+            addr = _validate_device_address(address)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        device = await db.get_device(addr)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+
+        provided = body.model_dump(exclude_unset=True)
+        patch: dict[str, Any] = {}
+        if any(k in provided for k in ("zone", "height", "height_cm", "room", "label")):
+            try:
+                patch = normalize_patch(
+                    zone=provided["zone"] if "zone" in provided else ...,
+                    height=provided["height"] if "height" in provided else ...,
+                    height_cm=provided["height_cm"] if "height_cm" in provided else ...,
+                    room=provided["room"] if "room" in provided else ...,
+                    label=provided["label"] if "label" in provided else ...,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            placement = await db.add_placement(
+                addr,
+                effective_from=body.effective_from,
+                label=patch["label"] if "label" in patch else ...,
+                zone=patch["zone"] if "zone" in patch else ...,
+                height=patch["height"] if "height" in patch else ...,
+                height_cm=patch["height_cm"] if "height_cm" in patch else ...,
+                room=patch["room"] if "room" in patch else ...,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "placement": placement}
+
+    @app.patch("/api/devices/{address}/placements/{placement_id}")
+    async def api_patch_placement(
+        address: str, placement_id: int, body: PlacementPatch
+    ) -> dict[str, Any]:
+        try:
+            addr = _validate_device_address(address)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        device = await db.get_device(addr, include_archived=True)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Unknown device")
+
+        provided = body.model_dump(exclude_unset=True)
+        if not provided:
+            raise HTTPException(status_code=400, detail="Empty patch body")
+        try:
+            patch = normalize_patch(
+                zone=provided["zone"] if "zone" in provided else ...,
+                height=provided["height"] if "height" in provided else ...,
+                height_cm=provided["height_cm"] if "height_cm" in provided else ...,
+                room=provided["room"] if "room" in provided else ...,
+                label=provided["label"] if "label" in provided else ...,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        placements = await db.list_placements(addr)
+        owned = next((p for p in placements if p["id"] == placement_id), None)
+        if owned is None:
+            raise HTTPException(status_code=404, detail="Placement not found")
+
+        try:
+            updated = await db.update_placement(
+                placement_id,
+                label=patch["label"] if "label" in patch else ...,
+                zone=patch["zone"] if "zone" in patch else ...,
+                height=patch["height"] if "height" in patch else ...,
+                height_cm=patch["height_cm"] if "height_cm" in patch else ...,
+                room=patch["room"] if "room" in patch else ...,
+                valid_from=provided["valid_from"] if "valid_from" in provided else ...,
+                valid_until=provided["valid_until"] if "valid_until" in provided else ...,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Placement not found")
+        return {"ok": True, "placement": updated}
 
     @app.get("/api/coverage")
     async def api_coverage(
@@ -2890,7 +3149,10 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        updated = await db.update_device_categories(address, **patch)
+        try:
+            updated = await db.update_device_categories(address, **patch)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if updated is None:
             raise HTTPException(status_code=404, detail="Unknown device")
         return enrich_device(updated, app.state.labels)
@@ -2948,7 +3210,7 @@ def create_app(
         request: Request,
         x_govee_token: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        """Apply label/placement fields pushed by a federation peer."""
+        """Apply label/placement fields pushed by a federation peer (current open placement only)."""
         _check_federation_token(request, x_govee_token)
         if payload.node_id == app.state.node_id:
             raise HTTPException(status_code=400, detail="Refusing meta from self")

@@ -15,6 +15,22 @@
   const statusEl = document.getElementById("status");
   const overviewBody = document.getElementById("overview-body");
   const overviewStatus = document.getElementById("overview-status");
+  const overviewDiscoverToggleEl = document.getElementById("overview-discover-toggle");
+  const overviewDiscoverPanelEl = document.getElementById("overview-discover-panel");
+  const overviewDiscoverScanEl = document.getElementById("overview-discover-scan");
+  const overviewDiscoverListEl = document.getElementById("overview-discover-list");
+  const overviewDiscoverStatusEl = document.getElementById("overview-discover-status");
+  const overviewDiscoverWindowEl = document.getElementById("overview-discover-window");
+  const overviewShowArchivedEl = document.getElementById("overview-show-archived");
+  const OVERVIEW_SHOW_ARCHIVED_KEY = "govee-charts.overviewShowArchived";
+  let overviewShowArchived =
+    localStorage.getItem(OVERVIEW_SHOW_ARCHIVED_KEY) === "1";
+  let discoverPollTimer = null;
+  const DISCOVER_SECONDS = 120;
+  if (overviewShowArchivedEl) {
+    overviewShowArchivedEl.checked = overviewShowArchived;
+  }
+  let overviewRenderKey = "";
   const overviewDeviceFilterEl = document.getElementById("overview-device-filter");
   const OVERVIEW_TEXT_FILTER_KEY = "govee-charts.overviewTextFilter";
   let overviewTextFilter = localStorage.getItem(OVERVIEW_TEXT_FILTER_KEY) || "";
@@ -5262,6 +5278,7 @@
       select.appendChild(option);
     }
     select.value = device[field] || "";
+    if (device.archived_at) select.disabled = true;
     suppressScrollValueChange(select);
     select.addEventListener("click", (ev) => ev.stopPropagation());
     select.addEventListener("mousedown", (ev) => ev.stopPropagation());
@@ -11976,6 +11993,385 @@
     return String(v);
   }
 
+  function roomLabel(roomId) {
+    const id = String(roomId || "").trim();
+    if (!id) return "—";
+    const match = (taxonomyData.rooms || []).find((r) => r.id === id);
+    return match?.label || id;
+  }
+
+  function overviewDeviceSnapshot(list) {
+    return list
+      .map((d) =>
+        [
+          d.address,
+          d.name,
+          d.label,
+          d.zone,
+          d.height,
+          d.height_cm,
+          d.room,
+          d.archived_at,
+          d.temperature_c,
+          d.humidity,
+          d.last_reading_ts,
+        ].join("|")
+      )
+      .join("\n");
+  }
+
+  function stopDiscoverPoll() {
+    if (discoverPollTimer != null) {
+      clearInterval(discoverPollTimer);
+      discoverPollTimer = null;
+    }
+  }
+
+  function renderDiscoverList(payload) {
+    if (!overviewDiscoverListEl) return;
+    overviewDiscoverListEl.innerHTML = "";
+    const sensors = Array.isArray(payload?.sensors) ? payload.sensors : [];
+    const unknown = sensors.filter((s) => s.unknown);
+    if (overviewDiscoverWindowEl) {
+      overviewDiscoverWindowEl.textContent = `${Math.round(
+        Number(payload?.seconds) || DISCOVER_SECONDS
+      )} s · ${unknown.length} unknown`;
+    }
+    if (!sensors.length) {
+      const empty = document.createElement("li");
+      empty.className = "overview-empty";
+      empty.textContent = t("overview.discoverEmpty", {
+        seconds: String(Math.round(Number(payload?.seconds) || DISCOVER_SECONDS)),
+      });
+      overviewDiscoverListEl.appendChild(empty);
+      return;
+    }
+    for (const sensor of sensors) {
+      const li = document.createElement("li");
+      li.className = "overview-discover-item";
+      if (!sensor.unknown) li.classList.add("is-known");
+      const left = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = sensor.name || sensor.address;
+      const meta = document.createElement("div");
+      meta.className = "overview-discover-meta";
+      meta.textContent = [
+        sensor.model,
+        sensor.address,
+        sensor.temperature_c != null ? `${Number(sensor.temperature_c).toFixed(1)} °C` : null,
+        sensor.rssi != null ? `${sensor.rssi} dBm` : null,
+        fmtTime(sensor.last_seen),
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      left.append(title, meta);
+      li.appendChild(left);
+      if (sensor.unknown) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "backfill-btn";
+        btn.textContent = t("overview.discoverAdd");
+        btn.addEventListener("click", () => {
+          registerDiscoveredSensor(sensor, btn).catch((err) =>
+            console.warn(err)
+          );
+        });
+        li.appendChild(btn);
+      } else {
+        const tag = document.createElement("span");
+        tag.className = "overview-discover-meta";
+        tag.textContent = t("overview.discoverKnown");
+        li.appendChild(tag);
+      }
+      overviewDiscoverListEl.appendChild(li);
+    }
+  }
+
+  async function fetchDiscoverList() {
+    const res = await fetch(
+      `/api/devices/discover?seconds=${encodeURIComponent(String(DISCOVER_SECONDS))}`
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(
+        typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`
+      );
+    }
+    return data;
+  }
+
+  async function refreshDiscoverList({ quiet = false } = {}) {
+    if (!overviewDiscoverPanelEl || overviewDiscoverPanelEl.hidden) return;
+    try {
+      const data = await fetchDiscoverList();
+      renderDiscoverList(data);
+      if (overviewDiscoverScanEl) {
+        overviewDiscoverScanEl.disabled = Boolean(data.scanning);
+        overviewDiscoverScanEl.textContent = data.scanning
+          ? t("overview.discoverScanning")
+          : t("overview.discoverScan");
+      }
+      if (!data.scanner_enabled && overviewDiscoverStatusEl) {
+        overviewDiscoverStatusEl.textContent = t("overview.discoverDisabled");
+      } else if (!quiet && overviewDiscoverStatusEl) {
+        overviewDiscoverStatusEl.textContent = "";
+      }
+      if (!data.scanning) stopDiscoverPoll();
+    } catch (err) {
+      if (overviewDiscoverStatusEl) {
+        overviewDiscoverStatusEl.textContent = t("overview.discoverFailed", {
+          error: err.message,
+        });
+      }
+      stopDiscoverPoll();
+    }
+  }
+
+  async function registerDiscoveredSensor(sensor, btn) {
+    if (!sensor?.address) return;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch("/api/devices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          address: sensor.address,
+          model: sensor.model || "unknown",
+          label: sensor.name || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`
+        );
+      }
+      const name = data.name || sensor.name || sensor.address;
+      if (overviewDiscoverStatusEl) {
+        overviewDiscoverStatusEl.textContent = t("overview.discoverAdded", {
+          name,
+        });
+      }
+      overviewStatus.textContent = t("overview.discoverAdded", { name });
+      await loadDevices();
+      await refreshDiscoverList({ quiet: true });
+    } catch (err) {
+      if (overviewDiscoverStatusEl) {
+        overviewDiscoverStatusEl.textContent = t("overview.addFailed", {
+          error: err.message,
+        });
+      }
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function startDiscoverScan() {
+    if (!overviewDiscoverScanEl) return;
+    overviewDiscoverScanEl.disabled = true;
+    overviewDiscoverScanEl.textContent = t("overview.discoverScanning");
+    if (overviewDiscoverStatusEl) overviewDiscoverStatusEl.textContent = "";
+    stopDiscoverPoll();
+    try {
+      const res = await fetch("/api/devices/discover/scan", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`
+        );
+      }
+      discoverPollTimer = setInterval(() => {
+        refreshDiscoverList({ quiet: true }).catch((err) => console.warn(err));
+      }, 2000);
+      await refreshDiscoverList({ quiet: true });
+    } catch (err) {
+      if (overviewDiscoverStatusEl) {
+        overviewDiscoverStatusEl.textContent = t("overview.discoverFailed", {
+          error: err.message,
+        });
+      }
+      if (overviewDiscoverScanEl) {
+        overviewDiscoverScanEl.disabled = false;
+        overviewDiscoverScanEl.textContent = t("overview.discoverScan");
+      }
+    }
+  }
+
+  function makeArchiveDeviceBtn(device) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "restart-btn overview-archive-btn";
+    btn.textContent = t("overview.archive");
+    btn.title = t("overview.archiveTitle");
+    btn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      const ok = window.confirm(
+        t("overview.archiveConfirm", { name: deviceLabel(device) })
+      );
+      if (!ok) return;
+      const purgeHistory = window.confirm(`${t("overview.archivePurge")}?`);
+      btn.disabled = true;
+      try {
+        const url = `/api/devices/${encodeURIComponent(device.address)}${
+          purgeHistory ? "?purge=1" : ""
+        }`;
+        const res = await fetch(url, { method: "DELETE" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(
+            typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`
+          );
+        }
+        overviewStatus.textContent = purgeHistory
+          ? t("overview.purgeOk", { name: deviceLabel(device) })
+          : t("overview.archiveOk", { name: deviceLabel(device) });
+        await loadDevices();
+      } catch (err) {
+        overviewStatus.textContent = t("overview.archiveFailed", {
+          error: err.message,
+        });
+        btn.disabled = false;
+      }
+    });
+    return btn;
+  }
+
+  function renderPlacementRow(placement) {
+    const li = document.createElement("li");
+    li.className = "overview-placement-row";
+    const from = fmtTime(placement.valid_from);
+    const until =
+      placement.valid_until != null
+        ? fmtTime(placement.valid_until)
+        : t("overview.placementOpen");
+    const bits = [
+      placement.label,
+      placement.zone,
+      placement.height,
+      placement.height_cm != null ? `${placement.height_cm} cm` : null,
+      placement.room ? roomLabel(placement.room) : null,
+    ].filter(Boolean);
+    li.innerHTML =
+      `<strong>${escapeHtml(from)} → ${escapeHtml(until)}</strong>` +
+      `<span>${escapeHtml(bits.join(" · ") || "—")}</span>`;
+    return li;
+  }
+
+  function makePlacementsPanel(device) {
+    const details = document.createElement("details");
+    details.className = "overview-placements";
+    const summary = document.createElement("summary");
+    summary.textContent = t("overview.placements");
+    details.appendChild(summary);
+
+    const hint = document.createElement("p");
+    hint.className = "overview-hint";
+    hint.textContent = t("overview.placementsHint");
+    details.appendChild(hint);
+
+    const list = document.createElement("ul");
+    list.className = "overview-placements-list";
+    details.appendChild(list);
+
+    const move = document.createElement("div");
+    move.className = "overview-placement-move";
+    move.hidden = Boolean(device.archived_at);
+    move.innerHTML =
+      `<strong>${escapeHtml(t("overview.placementMove"))}</strong>`;
+
+    const fromLabel = document.createElement("label");
+    fromLabel.innerHTML = `<span>${escapeHtml(
+      t("overview.placementEffectiveFrom")
+    )}</span>`;
+    const fromInput = document.createElement("input");
+    fromInput.type = "datetime-local";
+    fromInput.step = "60";
+    fromLabel.appendChild(fromInput);
+
+    const roomLabelEl = document.createElement("label");
+    roomLabelEl.innerHTML = `<span>${escapeHtml(t("overview.room"))}</span>`;
+    const roomSelect = document.createElement("select");
+    roomSelect.appendChild(new Option("—", ""));
+    for (const opt of taxonomyData.rooms || []) {
+      roomSelect.appendChild(new Option(opt.label, opt.id));
+    }
+    if (device.room) roomSelect.value = device.room;
+    roomLabelEl.appendChild(roomSelect);
+
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "backfill-btn";
+    saveBtn.textContent = t("overview.placementSave");
+    saveBtn.addEventListener("click", async () => {
+      saveBtn.disabled = true;
+      try {
+        const body = { room: roomSelect.value || null };
+        if (fromInput.value) {
+          body.effective_from = new Date(fromInput.value).getTime() / 1000;
+        }
+        const res = await fetch(
+          `/api/devices/${encodeURIComponent(device.address)}/placements`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(
+            typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`
+          );
+        }
+        overviewStatus.textContent = t("overview.placementCreated");
+        await loadDevices();
+      } catch (err) {
+        overviewStatus.textContent = t("overview.placementCreateFailed", {
+          error: err.message,
+        });
+        saveBtn.disabled = false;
+      }
+    });
+
+    move.append(fromLabel, roomLabelEl, saveBtn);
+    details.appendChild(move);
+
+    let loaded = false;
+    details.addEventListener("toggle", () => {
+      if (!details.open || loaded) return;
+      loaded = true;
+      list.innerHTML = `<li class="overview-empty">${escapeHtml(
+        t("overview.loading")
+      )}</li>`;
+      fetch(`/api/devices/${encodeURIComponent(device.address)}/placements`)
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then((data) => {
+          list.innerHTML = "";
+          const rows = data.placements || [];
+          if (!rows.length) {
+            list.innerHTML = `<li class="overview-empty">—</li>`;
+            return;
+          }
+          for (const row of rows) {
+            list.appendChild(renderPlacementRow(row));
+          }
+        })
+        .catch((err) => {
+          list.innerHTML = "";
+          const msg = document.createElement("li");
+          msg.className = "overview-empty";
+          msg.textContent = t("overview.placementLoadFailed", {
+            error: err.message,
+          });
+          list.appendChild(msg);
+        });
+    });
+
+    return details;
+  }
+
   function makeFedPushMetaBtn(device) {
     if (!federationPeers.length) return null;
     const btn = document.createElement("button");
@@ -12056,6 +12452,7 @@
     input.title = t("overview.nameTitle");
     input.value = deviceLabel(device);
     input.dataset.address = device.address;
+    if (device.archived_at) input.disabled = true;
     input.addEventListener("click", (ev) => ev.stopPropagation());
     input.addEventListener("mousedown", (ev) => ev.stopPropagation());
     input.addEventListener("keydown", (ev) => {
@@ -12125,6 +12522,7 @@
     input.title = t("overview.heightCmTitle");
     input.dataset.address = device.address;
     input.dataset.field = "height_cm";
+    if (device.archived_at) input.disabled = true;
     if (device.height_cm != null && Number.isFinite(Number(device.height_cm))) {
       input.value = String(Math.round(Number(device.height_cm)));
     } else {
@@ -12188,9 +12586,18 @@
   }
 
   function updateOverview() {
+    const visible = overviewVisibleDevices();
+    const nextKey = overviewDeviceSnapshot(visible);
+    const focusInside =
+      overviewBody &&
+      document.activeElement &&
+      overviewBody.contains(document.activeElement);
+    if (nextKey === overviewRenderKey && focusInside) {
+      return;
+    }
+    overviewRenderKey = nextKey;
     overviewBody.innerHTML = "";
     updateSortButtons();
-    const visible = overviewVisibleDevices();
     if (!devices.length) {
       overviewBody.innerHTML = `<p class="overview-empty">${escapeHtml(
         t("overview.noDevices")
@@ -12213,6 +12620,7 @@
     for (const device of ranked) {
       const card = document.createElement("article");
       card.className = "overview-card";
+      if (device.archived_at) card.classList.add("is-archived");
       card.style.setProperty("--device-color", colorFor(device.address));
       const source = device.last_source || "—";
 
@@ -12227,6 +12635,12 @@
       swatch.className = "device-swatch";
       swatch.setAttribute("aria-hidden", "true");
       nameRow.append(swatch, labeledDeviceNameInput(device));
+      if (device.archived_at) {
+        const badge = document.createElement("span");
+        badge.className = "overview-card-badge";
+        badge.textContent = t("overview.archivedBadge");
+        nameRow.appendChild(badge);
+      }
       const meta = document.createElement("span");
       meta.className = "overview-meta";
       meta.textContent = `${device.model || "—"} · ${device.address}`;
@@ -12303,6 +12717,14 @@
         pushWrap.append(caption, fedPush);
         place.appendChild(pushWrap);
       }
+
+      const actions = document.createElement("div");
+      actions.className = "overview-card-actions";
+      if (!device.archived_at) {
+        actions.appendChild(makeArchiveDeviceBtn(device));
+      }
+      place.appendChild(actions);
+      place.appendChild(makePlacementsPanel(device));
 
       const foot = document.createElement("div");
       foot.className = "overview-card-foot";
@@ -12714,12 +13136,18 @@
   }
 
   async function loadDevices() {
+    const params = new URLSearchParams();
+    if (overviewShowArchived) params.set("include_archived", "1");
+    const devicesUrl = params.toString()
+      ? `/api/devices?${params}`
+      : "/api/devices";
     const [devicesRes, taxRes] = await Promise.all([
-      fetch("/api/devices"),
+      fetch(devicesUrl),
       fetch("/api/categories"),
     ]);
     if (!devicesRes.ok) throw new Error(`devices HTTP ${devicesRes.status}`);
     devices = await devicesRes.json();
+    overviewRenderKey = "";
     if (taxRes.ok) {
       taxonomyData = await taxRes.json();
     }
@@ -14096,6 +14524,35 @@
       overviewTextFilter = overviewDeviceFilterEl.value || "";
       localStorage.setItem(OVERVIEW_TEXT_FILTER_KEY, overviewTextFilter);
       updateOverview();
+    });
+  }
+
+  if (overviewShowArchivedEl) {
+    overviewShowArchivedEl.addEventListener("change", () => {
+      overviewShowArchived = overviewShowArchivedEl.checked;
+      localStorage.setItem(
+        OVERVIEW_SHOW_ARCHIVED_KEY,
+        overviewShowArchived ? "1" : "0"
+      );
+      loadDevices().catch((err) => {
+        overviewStatus.textContent = t("common.error", { error: err.message });
+      });
+    });
+  }
+
+  if (overviewDiscoverToggleEl && overviewDiscoverPanelEl) {
+    overviewDiscoverToggleEl.addEventListener("click", () => {
+      overviewDiscoverPanelEl.hidden = !overviewDiscoverPanelEl.hidden;
+      if (!overviewDiscoverPanelEl.hidden) {
+        refreshDiscoverList().catch((err) => console.warn(err));
+      } else {
+        stopDiscoverPoll();
+      }
+    });
+  }
+  if (overviewDiscoverScanEl) {
+    overviewDiscoverScanEl.addEventListener("click", () => {
+      startDiscoverScan().catch((err) => console.warn(err));
     });
   }
 

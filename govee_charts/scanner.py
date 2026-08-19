@@ -223,6 +223,14 @@ class GoveeScanner:
         register_mac(self.suffix_map, reading.address)
         self.remember_ble_device(reading.address, device)
         self._latest[reading.address] = reading
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                self.db.upsert_ble_nearby(reading),
+                name=f"ble-nearby-{reading.address[-8:]}",
+            )
+        except RuntimeError:
+            pass
         now = time.time()
         last = self._last_sample.get(reading.address, 0.0)
         if now - last < self.sample_interval:

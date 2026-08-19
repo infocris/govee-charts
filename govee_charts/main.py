@@ -26,6 +26,7 @@ from govee_charts.backfill import BackfillConfig, BackfillService
 from govee_charts.compaction import CompactionConfig, CompactionService
 from govee_charts.cursor_chat import normalize_cursor_chat_config
 from govee_charts.db import Database, is_db_locked
+from govee_charts.decode import Reading
 from govee_charts.doors import DoorHaPoller, DoorMqttListener, DoorsConfig, import_ha_door_history
 from govee_charts.federation import PeerPublisher
 from govee_charts.ha_th import HaThConfig, HaThPoller
@@ -316,6 +317,40 @@ async def _init_runtime_db(
     return db, suffix_map
 
 
+async def _run_ble_discover_scan(
+    db: Database,
+    scanner: GoveeScanner,
+    cfg: dict[str, Any],
+    suffix_map: dict[str, str],
+) -> None:
+    """Pause the live scanner briefly and run a focused discovery pass."""
+    logging.info("BLE discovery scan requested from UI")
+    await scanner.pause_for_gatt()
+    try:
+        loop = asyncio.get_running_loop()
+
+        def on_found(reading: Reading) -> None:
+            loop.create_task(
+                db.upsert_ble_nearby(reading),
+                name=f"ble-discover-{reading.address[-8:]}",
+            )
+
+        try:
+            await discover_once(
+                duration=15.0,
+                active=bool(cfg["scanner"].get("active", True)),
+                adapters=cfg["scanner"].get("adapters") or [],
+                on_found=on_found,
+                suffix_map=suffix_map,
+            )
+        except SystemExit as exc:
+            logging.warning("BLE discovery scan aborted: %s", exc)
+    finally:
+        await scanner.resume_after_gatt()
+        await db.mark_ble_discover_done()
+        logging.info("BLE discovery scan finished")
+
+
 async def _start_workers(
     cfg: dict[str, Any],
     db: Database,
@@ -495,6 +530,12 @@ async def _start_workers(
             try:
                 await db.touch_runtime_heartbeat("workers")
                 consecutive_fail_s = 0.0
+                if scanner is not None and await db.take_ble_discover_request():
+                    try:
+                        await _run_ble_discover_scan(db, scanner, cfg, suffix_map)
+                    except Exception:
+                        logging.exception("BLE discovery scan failed")
+                        await db.mark_ble_discover_done()
             except Exception as exc:
                 consecutive_fail_s += _HEARTBEAT_INTERVAL_S
                 if is_db_locked(exc):
@@ -560,6 +601,7 @@ async def _start_workers(
     return {
         "stop_event": stop_event,
         "publisher": publisher,
+        "scanner": scanner,
         "scanner_task": scan_task,
         "door_task": door_task,
         "door_ha_task": door_ha_task,

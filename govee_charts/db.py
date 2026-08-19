@@ -260,6 +260,54 @@ class Database:
             await self.db.execute(
                 "ALTER TABLE devices ADD COLUMN label TEXT"
             )
+        if "archived_at" not in device_cols:
+            await self.db.execute(
+                "ALTER TABLE devices ADD COLUMN archived_at REAL"
+            )
+
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS device_placements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                valid_from REAL NOT NULL,
+                valid_until REAL,
+                label TEXT,
+                zone TEXT,
+                height TEXT,
+                height_cm REAL,
+                room TEXT,
+                FOREIGN KEY (address) REFERENCES devices(address)
+            )
+            """
+        )
+        await self.db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_device_placements_address_from
+                ON device_placements(address, valid_from)
+            """
+        )
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ble_nearby (
+                address TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                model TEXT NOT NULL,
+                temperature_c REAL NOT NULL,
+                humidity REAL NOT NULL,
+                battery INTEGER NOT NULL,
+                rssi INTEGER,
+                last_seen REAL NOT NULL
+            )
+            """
+        )
+        await self.db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ble_nearby_last_seen
+                ON ble_nearby(last_seen DESC)
+            """
+        )
+        await self._migrate_placements_from_devices()
 
         # One-shot: only dedupe when the unique index is not present yet.
         # Re-running this DELETE on a large readings table makes every startup slow.
@@ -406,7 +454,561 @@ class Database:
         await self.db.execute(
             "DELETE FROM compaction_state WHERE address = ?", (old_address,)
         )
+        await self.db.execute(
+            "UPDATE device_placements SET address = ? WHERE address = ?",
+            (new_address, old_address),
+        )
         await self.db.execute("DELETE FROM devices WHERE address = ?", (old_address,))
+
+    async def _migrate_placements_from_devices(self) -> None:
+        """One-shot copy of legacy device metadata into device_placements."""
+        cursor = await self.db.execute(
+            "SELECT 1 FROM runtime_state WHERE component = 'placements_migrated' LIMIT 1"
+        )
+        if await cursor.fetchone():
+            return
+
+        device_cur = await self.db.execute(
+            """
+            SELECT address, first_seen, label, zone, height, height_cm, room
+            FROM devices
+            """
+        )
+        for row in await device_cur.fetchall():
+            addr = str(row[0])
+            exists = await self.db.execute(
+                "SELECT 1 FROM device_placements WHERE address = ? LIMIT 1",
+                (addr,),
+            )
+            if await exists.fetchone():
+                continue
+            oldest_cur = await self.db.execute(
+                "SELECT MIN(ts) FROM readings WHERE address = ?",
+                (addr,),
+            )
+            oldest_row = await oldest_cur.fetchone()
+            oldest_ts = oldest_row[0] if oldest_row else None
+            valid_from = float(
+                oldest_ts if oldest_ts is not None else row[1] or time.time()
+            )
+            await self.db.execute(
+                """
+                INSERT INTO device_placements (
+                    address, valid_from, valid_until,
+                    label, zone, height, height_cm, room
+                )
+                VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
+                """,
+                (addr, valid_from, row[2], row[3], row[4], row[5], row[6]),
+            )
+
+        await self.db.execute(
+            """
+            INSERT INTO runtime_state (component, heartbeat_ts)
+            VALUES ('placements_migrated', ?)
+            ON CONFLICT(component) DO UPDATE SET
+                heartbeat_ts = excluded.heartbeat_ts
+            """,
+            (time.time(),),
+        )
+
+    @staticmethod
+    def _placement_row(row: aiosqlite.Row | dict[str, Any]) -> dict[str, Any]:
+        data = dict(row)
+        return {
+            "id": int(data["id"]),
+            "address": str(data["address"]),
+            "valid_from": float(data["valid_from"]),
+            "valid_until": (
+                float(data["valid_until"])
+                if data.get("valid_until") is not None
+                else None
+            ),
+            "label": data.get("label"),
+            "zone": data.get("zone"),
+            "height": data.get("height"),
+            "height_cm": data.get("height_cm"),
+            "room": data.get("room"),
+        }
+
+    def _merge_placement_into_device(
+        self, device: dict[str, Any], placement: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        out = dict(device)
+        if placement:
+            for key in ("label", "zone", "height", "height_cm", "room"):
+                if placement.get(key) is not None:
+                    out[key] = placement[key]
+                elif key in placement:
+                    out[key] = placement[key]
+        return out
+
+    async def resolve_placement(
+        self, address: str, ts: float
+    ) -> dict[str, Any] | None:
+        """Return the placement valid at ``ts`` (valid_from <= ts < valid_until)."""
+        addr = address.strip().upper()
+        when = float(ts)
+        cursor = await self.db.execute(
+            """
+            SELECT id, address, valid_from, valid_until,
+                   label, zone, height, height_cm, room
+            FROM device_placements
+            WHERE address = ?
+              AND valid_from <= ?
+              AND (valid_until IS NULL OR valid_until > ?)
+            ORDER BY valid_from DESC
+            LIMIT 1
+            """,
+            (addr, when, when),
+        )
+        row = await cursor.fetchone()
+        return self._placement_row(row) if row else None
+
+    async def get_current_placement(
+        self, address: str
+    ) -> dict[str, Any] | None:
+        addr = address.strip().upper()
+        cursor = await self.db.execute(
+            """
+            SELECT id, address, valid_from, valid_until,
+                   label, zone, height, height_cm, room
+            FROM device_placements
+            WHERE address = ? AND valid_until IS NULL
+            ORDER BY valid_from DESC
+            LIMIT 1
+            """,
+            (addr,),
+        )
+        row = await cursor.fetchone()
+        return self._placement_row(row) if row else None
+
+    async def list_placements(self, address: str) -> list[dict[str, Any]]:
+        addr = address.strip().upper()
+        cursor = await self.db.execute(
+            """
+            SELECT id, address, valid_from, valid_until,
+                   label, zone, height, height_cm, room
+            FROM device_placements
+            WHERE address = ?
+            ORDER BY valid_from DESC, id DESC
+            """,
+            (addr,),
+        )
+        return [self._placement_row(row) for row in await cursor.fetchall()]
+
+    async def _ensure_open_placement(
+        self, address: str, *, valid_from: float | None = None
+    ) -> None:
+        addr = address.strip().upper()
+        cursor = await self.db.execute(
+            """
+            SELECT 1 FROM device_placements
+            WHERE address = ? AND valid_until IS NULL
+            LIMIT 1
+            """,
+            (addr,),
+        )
+        if await cursor.fetchone():
+            return
+        when = float(valid_from if valid_from is not None else time.time())
+        oldest_cur = await self.db.execute(
+            "SELECT MIN(ts) FROM readings WHERE address = ?",
+            (addr,),
+        )
+        oldest_row = await oldest_cur.fetchone()
+        if oldest_row and oldest_row[0] is not None:
+            when = min(when, float(oldest_row[0]))
+        await self.db.execute(
+            """
+            INSERT INTO device_placements (
+                address, valid_from, valid_until,
+                label, zone, height, height_cm, room
+            )
+            VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL)
+            """,
+            (addr, when),
+        )
+
+    async def _update_placement_by_id(
+        self,
+        placement_id: int,
+        *,
+        label: str | None | object = ...,
+        zone: str | None | object = ...,
+        height: str | None | object = ...,
+        height_cm: float | None | object = ...,
+        room: str | None | object = ...,
+        valid_from: float | None | object = ...,
+        valid_until: float | None | object = ...,
+    ) -> dict[str, Any] | None:
+        cursor = await self.db.execute(
+            """
+            SELECT id, address, valid_from, valid_until,
+                   label, zone, height, height_cm, room
+            FROM device_placements
+            WHERE id = ?
+            """,
+            (int(placement_id),),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        current = self._placement_row(row)
+        addr = current["address"]
+
+        fields: list[str] = []
+        values: list[Any] = []
+        if label is not ...:
+            fields.append("label = ?")
+            values.append(label)
+        if zone is not ...:
+            fields.append("zone = ?")
+            values.append(zone)
+        if height is not ...:
+            fields.append("height = ?")
+            values.append(height)
+        if height_cm is not ...:
+            fields.append("height_cm = ?")
+            values.append(height_cm)
+        if room is not ...:
+            fields.append("room = ?")
+            values.append(room)
+        new_from = current["valid_from"]
+        new_until = current["valid_until"]
+        if valid_from is not ...:
+            new_from = float(valid_from)  # type: ignore[arg-type]
+            fields.append("valid_from = ?")
+            values.append(new_from)
+        if valid_until is not ...:
+            new_until = None if valid_until is None else float(valid_until)  # type: ignore[arg-type]
+            fields.append("valid_until = ?")
+            values.append(new_until)
+        if not fields:
+            return current
+
+        if new_until is not None and new_until <= new_from:
+            raise ValueError("valid_until must be after valid_from")
+
+        overlap_cur = await self.db.execute(
+            """
+            SELECT 1 FROM device_placements
+            WHERE address = ?
+              AND id != ?
+              AND valid_from < COALESCE(?, 1e18)
+              AND (valid_until IS NULL OR valid_until > ?)
+            LIMIT 1
+            """,
+            (addr, int(placement_id), new_until, new_from),
+        )
+        if await overlap_cur.fetchone():
+            raise ValueError("Placement interval overlaps an existing one")
+
+        values.append(int(placement_id))
+        await self.db.execute(
+            f"UPDATE device_placements SET {', '.join(fields)} WHERE id = ?",
+            values,
+        )
+        await self.db.commit()
+        return await self._get_placement_by_id(int(placement_id))
+
+    async def update_placement(
+        self,
+        placement_id: int,
+        *,
+        label: str | None | object = ...,
+        zone: str | None | object = ...,
+        height: str | None | object = ...,
+        height_cm: float | None | object = ...,
+        room: str | None | object = ...,
+        valid_from: float | None | object = ...,
+        valid_until: float | None | object = ...,
+    ) -> dict[str, Any] | None:
+        """Update one placement interval."""
+        result = await self._update_placement_by_id(
+            placement_id,
+            label=label,
+            zone=zone,
+            height=height,
+            height_cm=height_cm,
+            room=room,
+            valid_from=valid_from,
+            valid_until=valid_until,
+        )
+        return result
+
+    async def _get_placement_by_id(self, placement_id: int) -> dict[str, Any] | None:
+        cursor = await self.db.execute(
+            """
+            SELECT id, address, valid_from, valid_until,
+                   label, zone, height, height_cm, room
+            FROM device_placements
+            WHERE id = ?
+            """,
+            (int(placement_id),),
+        )
+        row = await cursor.fetchone()
+        return self._placement_row(row) if row else None
+
+    async def add_placement(
+        self,
+        address: str,
+        *,
+        effective_from: float | None = None,
+        label: str | None | object = ...,
+        zone: str | None | object = ...,
+        height: str | None | object = ...,
+        height_cm: float | None | object = ...,
+        room: str | None | object = ...,
+    ) -> dict[str, Any]:
+        """Close the timeline at ``effective_from`` and start a new open placement."""
+        device = await self.get_device(address, include_archived=True)
+        if device is None:
+            raise ValueError("Unknown device")
+
+        ef = float(effective_from if effective_from is not None else time.time())
+        addr = str(device["address"])
+
+        await self.db.execute(
+            """
+            UPDATE device_placements
+            SET valid_until = ?
+            WHERE address = ?
+              AND valid_until IS NULL
+              AND valid_from < ?
+            """,
+            (ef, addr, ef),
+        )
+        await self.db.execute(
+            """
+            UPDATE device_placements
+            SET valid_until = ?
+            WHERE address = ?
+              AND valid_from < ?
+              AND valid_until IS NOT NULL
+              AND valid_until > ?
+            """,
+            (ef, addr, ef, ef),
+        )
+        await self.db.execute(
+            """
+            DELETE FROM device_placements
+            WHERE address = ? AND valid_from >= ?
+            """,
+            (addr, ef),
+        )
+
+        current = await self.get_current_placement(addr)
+        base = current or {}
+        row_label = label if label is not ... else base.get("label")
+        row_zone = zone if zone is not ... else base.get("zone")
+        row_height = height if height is not ... else base.get("height")
+        row_height_cm = height_cm if height_cm is not ... else base.get("height_cm")
+        row_room = room if room is not ... else base.get("room")
+
+        cursor = await self.db.execute(
+            """
+            INSERT INTO device_placements (
+                address, valid_from, valid_until,
+                label, zone, height, height_cm, room
+            )
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
+            """,
+            (addr, ef, row_label, row_zone, row_height, row_height_cm, row_room),
+        )
+        await self.db.commit()
+        placement = await self._get_placement_by_id(int(cursor.lastrowid or 0))
+        if placement is None:
+            raise RuntimeError("Failed to create placement")
+        return placement
+
+    async def create_device(
+        self,
+        address: str,
+        *,
+        model: str = "unknown",
+        name: str | None = None,
+        label: str | None = None,
+        zone: str | None = None,
+        height: str | None = None,
+        height_cm: float | None = None,
+        room: str | None = None,
+    ) -> dict[str, Any]:
+        """Register a device manually and seed its first open placement."""
+        addr = address.strip().upper()
+        now = time.time()
+        display = (name or label or addr).strip() or addr
+        await self.db.execute(
+            """
+            INSERT INTO devices (address, name, model, first_seen, last_seen, archived_at)
+            VALUES (?, ?, ?, ?, ?, NULL)
+            ON CONFLICT(address) DO UPDATE SET
+                archived_at = NULL,
+                name = excluded.name,
+                model = CASE
+                    WHEN excluded.model = 'unknown' THEN devices.model
+                    ELSE excluded.model
+                END,
+                last_seen = MAX(devices.last_seen, excluded.last_seen)
+            """,
+            (addr, display, model, now, now),
+        )
+        await self._ensure_open_placement(addr, valid_from=now)
+        if any(v is not None for v in (label, zone, height, height_cm, room)):
+            placement = await self.get_current_placement(addr)
+            if placement is not None:
+                await self._update_placement_by_id(
+                    placement["id"],
+                    label=label,
+                    zone=zone,
+                    height=height,
+                    height_cm=height_cm,
+                    room=room,
+                )
+        await self.db.commit()
+        device = await self.get_device(addr)
+        if device is None:
+            raise RuntimeError("Failed to create device")
+        return device
+
+    async def archive_device(self, address: str) -> dict[str, Any] | None:
+        addr = address.strip().upper()
+        device = await self.get_device(addr, include_archived=True)
+        if device is None:
+            return None
+        now = time.time()
+        await self.db.execute(
+            "UPDATE devices SET archived_at = ? WHERE address = ?",
+            (now, addr),
+        )
+        await self.db.execute(
+            """
+            UPDATE device_placements
+            SET valid_until = COALESCE(valid_until, ?)
+            WHERE address = ? AND valid_until IS NULL
+            """,
+            (now, addr),
+        )
+        await self.db.commit()
+        return await self.get_device(addr, include_archived=True)
+
+    async def purge_device(self, address: str) -> bool:
+        addr = address.strip().upper()
+        device = await self.get_device(addr, include_archived=True)
+        if device is None:
+            return False
+        await self.db.execute("DELETE FROM readings WHERE address = ?", (addr,))
+        await self.db.execute(
+            "DELETE FROM readings_rollup WHERE address = ?", (addr,)
+        )
+        await self.db.execute(
+            "DELETE FROM compaction_state WHERE address = ?", (addr,)
+        )
+        await self.db.execute(
+            "DELETE FROM backfill_state WHERE address = ?", (addr,)
+        )
+        await self.db.execute(
+            "DELETE FROM device_placements WHERE address = ?", (addr,)
+        )
+        await self.db.execute("DELETE FROM devices WHERE address = ?", (addr,))
+        await self.db.commit()
+        return True
+
+    async def upsert_ble_nearby(self, reading: Any) -> None:
+        """Remember the latest BLE advertisement for discovery UI."""
+        addr = str(reading.address).strip().upper()
+        now = time.time()
+        await self.db.execute(
+            """
+            INSERT INTO ble_nearby (
+                address, name, model, temperature_c, humidity, battery, rssi, last_seen
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                name = excluded.name,
+                model = excluded.model,
+                temperature_c = excluded.temperature_c,
+                humidity = excluded.humidity,
+                battery = excluded.battery,
+                rssi = excluded.rssi,
+                last_seen = excluded.last_seen
+            """,
+            (
+                addr,
+                str(reading.name or addr),
+                str(reading.model or "unknown"),
+                float(reading.temperature_c),
+                float(reading.humidity),
+                int(reading.battery),
+                reading.rssi,
+                now,
+            ),
+        )
+
+    async def list_ble_discover_candidates(
+        self, *, since_ts: float, include_known: bool = False
+    ) -> list[dict[str, Any]]:
+        """Govee sensors heard recently; flag whether already registered."""
+        cursor = await self.db.execute(
+            """
+            SELECT
+                b.address,
+                b.name,
+                b.model,
+                b.temperature_c,
+                b.humidity,
+                b.battery,
+                b.rssi,
+                b.last_seen,
+                d.address IS NOT NULL AS registered,
+                d.archived_at
+            FROM ble_nearby AS b
+            LEFT JOIN devices AS d ON d.address = b.address
+            WHERE b.last_seen >= ?
+            ORDER BY b.last_seen DESC, b.address
+            """,
+            (float(since_ts),),
+        )
+        out: list[dict[str, Any]] = []
+        for row in await cursor.fetchall():
+            item = dict(row)
+            registered = bool(item.pop("registered"))
+            archived_at = item.pop("archived_at")
+            unknown = not registered or archived_at is not None
+            item["unknown"] = unknown
+            item["archived"] = archived_at is not None
+            if not include_known and not unknown:
+                continue
+            out.append(item)
+        return out
+
+    async def request_ble_discover(self) -> float:
+        """Ask the BLE worker to run a short discovery pass."""
+        ts = time.time()
+        await self._touch_runtime_heartbeat_sql("ble_discover_request", ts)
+        return ts
+
+    async def ble_discover_scan_pending(self, *, max_age: float = 120.0) -> bool:
+        """True when a discovery request is still waiting for the worker."""
+        req = await self.get_runtime_heartbeat("ble_discover_request")
+        if req is None or time.time() - float(req) > max_age:
+            return False
+        done = await self.get_runtime_heartbeat("ble_discover_done")
+        return done is None or float(done) < float(req)
+
+    async def mark_ble_discover_done(self) -> None:
+        await self._touch_runtime_heartbeat_sql("ble_discover_done", time.time())
+
+    async def take_ble_discover_request(self, *, max_age: float = 120.0) -> bool:
+        """Workers: claim a pending discovery request once."""
+        req = await self.get_runtime_heartbeat("ble_discover_request")
+        if req is None or time.time() - float(req) > max_age:
+            return False
+        ack = await self.get_runtime_heartbeat("ble_discover_ack")
+        if ack is not None and float(ack) >= float(req):
+            return False
+        await self._touch_runtime_heartbeat_sql("ble_discover_ack", float(req))
+        return True
 
     async def suffix_map_from_devices(self) -> dict[str, str]:
         """Build suffix → MAC map from devices already stored with real MACs."""
@@ -1756,10 +2358,12 @@ class Database:
             ON CONFLICT(address) DO UPDATE SET
                 name = excluded.name,
                 model = excluded.model,
-                last_seen = MAX(devices.last_seen, excluded.last_seen)
+                last_seen = MAX(devices.last_seen, excluded.last_seen),
+                archived_at = NULL
             """,
             (reading.address, display_name, reading.model, sample_ts, sample_ts),
         )
+        await self._ensure_open_placement(reading.address, valid_from=sample_ts)
         cursor = await self.db.execute(
             """
             INSERT OR IGNORE INTO readings
@@ -1818,23 +2422,40 @@ class Database:
         await self.db.commit()
         return deleted
 
-    async def list_devices(self, *, include_stats: bool = True) -> list[dict[str, Any]]:
+    async def list_devices(
+        self, *, include_stats: bool = True, include_archived: bool = False
+    ) -> list[dict[str, Any]]:
         # ~120 B/row incl. indexes — rough SQLite footprint for one readings row.
         bytes_per_reading = 120
+        archive_clause = "" if include_archived else "WHERE d.archived_at IS NULL"
+        placement_join = """
+            LEFT JOIN device_placements p ON p.id = (
+                SELECT id FROM device_placements
+                WHERE address = d.address AND valid_until IS NULL
+                ORDER BY valid_from DESC
+                LIMIT 1
+            )
+        """
+        meta_cols = """
+            COALESCE(p.label, d.label) AS label,
+            COALESCE(p.zone, d.zone) AS zone,
+            COALESCE(p.height, d.height) AS height,
+            COALESCE(p.height_cm, d.height_cm) AS height_cm,
+            COALESCE(p.room, d.room) AS room,
+            d.archived_at AS archived_at,
+            p.id AS placement_id,
+            p.valid_from AS placement_valid_from
+        """
         if include_stats:
             cursor = await self.db.execute(
-                """
+                f"""
                 SELECT
                     d.address,
                     d.name,
                     d.model,
                     d.first_seen,
                     d.last_seen,
-                    d.zone,
-                    d.height,
-                    d.height_cm,
-                    d.label,
-                    d.room,
+                    {meta_cols},
                     r.temperature_c,
                     r.humidity,
                     r.battery,
@@ -1845,6 +2466,7 @@ class Database:
                     s.oldest_ts,
                     s.newest_ts
                 FROM devices d
+                {placement_join}
                 LEFT JOIN readings r ON r.id = (
                     SELECT id FROM readings
                     WHERE address = d.address
@@ -1860,24 +2482,21 @@ class Database:
                     FROM readings
                     GROUP BY address
                 ) s ON s.address = d.address
+                {archive_clause}
                 ORDER BY d.name COLLATE NOCASE, d.address
                 """
             )
         else:
             # Fast path for frequent polls (backfill UI): skip full-table aggregates.
             cursor = await self.db.execute(
-                """
+                f"""
                 SELECT
                     d.address,
                     d.name,
                     d.model,
                     d.first_seen,
                     d.last_seen,
-                    d.zone,
-                    d.height,
-                    d.height_cm,
-                    d.label,
-                    d.room,
+                    {meta_cols},
                     r.temperature_c,
                     r.humidity,
                     r.battery,
@@ -1888,12 +2507,14 @@ class Database:
                     NULL AS oldest_ts,
                     NULL AS newest_ts
                 FROM devices d
+                {placement_join}
                 LEFT JOIN readings r ON r.id = (
                     SELECT id FROM readings
                     WHERE address = d.address
                     ORDER BY ts DESC
                     LIMIT 1
                 )
+                {archive_clause}
                 ORDER BY d.name COLLATE NOCASE, d.address
                 """
             )
@@ -1907,20 +2528,27 @@ class Database:
             out.append(item)
         return out
 
-    async def get_device(self, address: str) -> dict[str, Any] | None:
+    async def get_device(
+        self, address: str, *, include_archived: bool = False
+    ) -> dict[str, Any] | None:
+        addr = address.strip().upper()
+        archive_clause = "" if include_archived else "AND d.archived_at IS NULL"
         cursor = await self.db.execute(
-            """
+            f"""
             SELECT
                 d.address,
                 d.name,
                 d.model,
                 d.first_seen,
                 d.last_seen,
-                d.zone,
-                d.height,
-                d.height_cm,
-                d.label,
-                d.room,
+                COALESCE(p.label, d.label) AS label,
+                COALESCE(p.zone, d.zone) AS zone,
+                COALESCE(p.height, d.height) AS height,
+                COALESCE(p.height_cm, d.height_cm) AS height_cm,
+                COALESCE(p.room, d.room) AS room,
+                d.archived_at AS archived_at,
+                p.id AS placement_id,
+                p.valid_from AS placement_valid_from,
                 r.temperature_c,
                 r.humidity,
                 r.battery,
@@ -1928,15 +2556,21 @@ class Database:
                 r.ts AS last_reading_ts,
                 r.source AS last_source
             FROM devices d
+            LEFT JOIN device_placements p ON p.id = (
+                SELECT id FROM device_placements
+                WHERE address = d.address AND valid_until IS NULL
+                ORDER BY valid_from DESC
+                LIMIT 1
+            )
             LEFT JOIN readings r ON r.id = (
                 SELECT id FROM readings
                 WHERE address = d.address
                 ORDER BY ts DESC
                 LIMIT 1
             )
-            WHERE d.address = ?
+            WHERE d.address = ? {archive_clause}
             """,
-            (address.upper(),),
+            (addr,),
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
@@ -1951,36 +2585,38 @@ class Database:
         room: str | None | object = ...,
         label: str | None | object = ...,
     ) -> dict[str, Any] | None:
-        """Update category fields. Ellipsis means leave unchanged."""
-        device = await self.get_device(address)
+        """Update the current open placement (creates one when missing)."""
+        device = await self.get_device(address, include_archived=True)
         if device is None:
             return None
 
-        fields: list[str] = []
-        values: list[Any] = []
-        if zone is not ...:
-            fields.append("zone = ?")
-            values.append(zone)
-        if height is not ...:
-            fields.append("height = ?")
-            values.append(height)
-        if height_cm is not ...:
-            fields.append("height_cm = ?")
-            values.append(height_cm)
-        if room is not ...:
-            fields.append("room = ?")
-            values.append(room)
-        if label is not ...:
-            fields.append("label = ?")
-            values.append(label)
-        if not fields:
+        if device.get("archived_at") is not None:
+            return None
+
+        placement = await self.get_current_placement(address)
+        if placement is None:
+            await self._ensure_open_placement(
+                address, valid_from=float(device.get("first_seen") or time.time())
+            )
+            placement = await self.get_current_placement(address)
+
+        if placement is None:
+            return None
+
+        if not any(x is not ... for x in (zone, height, height_cm, room, label)):
             return device
 
-        values.append(address.upper())
-        await self.db.execute(
-            f"UPDATE devices SET {', '.join(fields)} WHERE address = ?",
-            values,
-        )
+        try:
+            await self._update_placement_by_id(
+                placement["id"],
+                zone=zone,
+                height=height,
+                height_cm=height_cm,
+                room=room,
+                label=label,
+            )
+        except ValueError:
+            raise
         await self.db.commit()
         return await self.get_device(address)
 
