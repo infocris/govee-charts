@@ -8,6 +8,10 @@
   const SNAP = 8;
   const MIN_SIZE = 16;
   const HANDLE = 7;
+  const HISTORY_MAX = 60;
+  const VIEW_PAD = 40;
+  const ZOOM_MIN = 0.5;
+  const ZOOM_MAX = 8;
 
   /** @type {ReturnType<typeof createState> | null} */
   let state = null;
@@ -26,7 +30,218 @@
       drag: null,
       dirty: false,
       status: "",
+      undoStack: [],
+      redoStack: [],
+      historySuspended: false,
+      /** @type {{ x: number, y: number, w: number, h: number } | null} */
+      viewBox: null,
+      snapEnabled: true,
     };
+  }
+
+  function fitViewBox() {
+    const env = state.plan && state.plan.envelope;
+    if (!env) return { x: 0, y: 0, w: 100, h: 100 };
+    return {
+      x: env.x - VIEW_PAD,
+      y: env.y - VIEW_PAD,
+      w: env.w + VIEW_PAD * 2,
+      h: env.h + VIEW_PAD * 2,
+    };
+  }
+
+  function currentViewBox() {
+    return state.viewBox ? { ...state.viewBox } : fitViewBox();
+  }
+
+  function zoomLevel() {
+    if (!state.plan) return 1;
+    const fit = fitViewBox();
+    const vb = currentViewBox();
+    return fit.w / vb.w;
+  }
+
+  function applyViewBox() {
+    const svg = $("plan-editor-svg");
+    if (!svg || !state.plan) return;
+    const vb = currentViewBox();
+    svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    const label = $("plan-zoom-label");
+    if (label) label.textContent = `${Math.round(zoomLevel() * 100)}%`;
+  }
+
+  function resetView() {
+    state.viewBox = null;
+    applyViewBox();
+  }
+
+  /** Zoom by factor (>1 zoom out). Anchor stays under client point when provided. */
+  function zoomBy(factor, clientX, clientY) {
+    if (!state.plan) return;
+    const svg = $("plan-editor-svg");
+    if (!svg) return;
+    const fit = fitViewBox();
+    const vb = currentViewBox();
+    const aspect = fit.w / fit.h;
+    let newW = vb.w * factor;
+    let newH = newW / aspect;
+    let z = fit.w / newW;
+    if (z < ZOOM_MIN) {
+      newW = fit.w / ZOOM_MIN;
+      newH = fit.h / ZOOM_MIN;
+    } else if (z > ZOOM_MAX) {
+      newW = fit.w / ZOOM_MAX;
+      newH = fit.h / ZOOM_MAX;
+    }
+    let anchor;
+    if (clientX != null && clientY != null) {
+      anchor = svgPoint(svg, { clientX, clientY });
+    } else {
+      const r = svg.getBoundingClientRect();
+      anchor = svgPoint(svg, {
+        clientX: r.left + r.width / 2,
+        clientY: r.top + r.height / 2,
+      });
+    }
+    const newX = anchor.x - (anchor.x - vb.x) * (newW / vb.w);
+    const newY = anchor.y - (anchor.y - vb.y) * (newH / vb.h);
+    state.viewBox = { x: newX, y: newY, w: newW, h: newH };
+    applyViewBox();
+  }
+
+  function onWheelZoom(evt) {
+    if (!state.plan) return;
+    evt.preventDefault();
+    const factor = evt.deltaY > 0 ? 1.12 : 1 / 1.12;
+    zoomBy(factor, evt.clientX, evt.clientY);
+  }
+
+  function clonePlanSnapshot(plan) {
+    if (!plan) return null;
+    return JSON.parse(
+      JSON.stringify({
+        name: plan.name,
+        north_deg: plan.north_deg,
+        meters_per_unit: plan.meters_per_unit,
+        envelope: plan.envelope,
+        shapes: plan.shapes || [],
+        walls: plan.walls || [],
+        faces: plan.faces || [],
+        openings: plan.openings || [],
+      })
+    );
+  }
+
+  function applyPlanSnapshot(plan, snap) {
+    if (!plan || !snap) return;
+    plan.name = snap.name;
+    plan.north_deg = snap.north_deg;
+    plan.meters_per_unit = snap.meters_per_unit;
+    plan.envelope = snap.envelope;
+    plan.shapes = snap.shapes || [];
+    plan.walls = snap.walls || [];
+    plan.faces = snap.faces || [];
+    plan.openings = snap.openings || [];
+  }
+
+  function clearHistory() {
+    if (!state) return;
+    state.undoStack = [];
+    state.redoStack = [];
+  }
+
+  /** Snapshot current plan before a mutating edit (no-op if identical to last). */
+  function captureBeforeEdit() {
+    if (!state || !state.plan || state.historySuspended) return;
+    const snap = {
+      plan: clonePlanSnapshot(state.plan),
+      selectedId: state.selectedId,
+      selectedKind: state.selectedKind,
+      dirty: state.dirty,
+    };
+    const last = state.undoStack[state.undoStack.length - 1];
+    if (last && JSON.stringify(last.plan) === JSON.stringify(snap.plan)) {
+      return;
+    }
+    state.undoStack.push(snap);
+    if (state.undoStack.length > HISTORY_MAX) state.undoStack.shift();
+    state.redoStack = [];
+  }
+
+  function restoreHistoryEntry(entry) {
+    if (!state || !state.plan || !entry) return;
+    state.historySuspended = true;
+    applyPlanSnapshot(state.plan, entry.plan);
+    if (state.plan.mode === "partition") refreshPartitionFaces();
+    constrainContentsToEnvelope();
+    state.selectedId = entry.selectedId;
+    state.selectedKind = entry.selectedKind;
+    state.dirty = !!entry.dirty;
+    state.historySuspended = false;
+    renderToolbar();
+    renderSvg();
+    renderPlanSelect();
+    updateActionButtons();
+  }
+
+  function undoEdit() {
+    if (!state || !state.plan) return;
+    if (!state.undoStack.length) {
+      setStatus("Nothing to undo");
+      return;
+    }
+    const current = {
+      plan: clonePlanSnapshot(state.plan),
+      selectedId: state.selectedId,
+      selectedKind: state.selectedKind,
+      dirty: state.dirty,
+    };
+    const prev = state.undoStack.pop();
+    state.redoStack.push(current);
+    restoreHistoryEntry(prev);
+    setStatus("Undo");
+  }
+
+  function redoEdit() {
+    if (!state || !state.plan) return;
+    if (!state.redoStack.length) {
+      setStatus("Nothing to redo");
+      return;
+    }
+    const current = {
+      plan: clonePlanSnapshot(state.plan),
+      selectedId: state.selectedId,
+      selectedKind: state.selectedKind,
+      dirty: state.dirty,
+    };
+    const next = state.redoStack.pop();
+    state.undoStack.push(current);
+    restoreHistoryEntry(next);
+    setStatus("Redo");
+  }
+
+  function onEditorKeyDown(evt) {
+    if (!state || !state.plan) return;
+    const mod = evt.metaKey || evt.ctrlKey;
+    if (!mod) return;
+    const t = evt.target;
+    if (
+      t &&
+      (t.tagName === "INPUT" ||
+        t.tagName === "TEXTAREA" ||
+        t.tagName === "SELECT" ||
+        t.isContentEditable)
+    ) {
+      return;
+    }
+    const key = String(evt.key || "").toLowerCase();
+    if (key === "z" && !evt.shiftKey) {
+      evt.preventDefault();
+      undoEdit();
+    } else if ((key === "z" && evt.shiftKey) || key === "y") {
+      evt.preventDefault();
+      redoEdit();
+    }
   }
 
   function $(id) {
@@ -42,6 +257,7 @@
   }
 
   function snap(v, guides) {
+    if (!state || !state.snapEnabled) return v;
     let best = v;
     let bestD = SNAP;
     for (const g of guides) {
@@ -78,6 +294,251 @@
       h = -h;
     }
     return { x, y, w: Math.max(MIN_SIZE, w), h: Math.max(MIN_SIZE, h) };
+  }
+
+  function metersPerUnit() {
+    const v = Number(state.plan && state.plan.meters_per_unit);
+    return Number.isFinite(v) && v > 0 ? v : 0.05;
+  }
+
+  /** Geometric area in m² from canvas rect (ignores lock). */
+  function geometricAreaM2(rect) {
+    if (!rect) return null;
+    const w = Number(rect.w);
+    const h = Number(rect.h);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+    const mpu = metersPerUnit();
+    return w * h * mpu * mpu;
+  }
+
+  /** Display / compile area: locked value when set, else geometry minus nested holes. */
+  function effectiveAreaM2(rect) {
+    if (!rect) return null;
+    if (rect.area_locked && Number(rect.area_m2) > 0) {
+      return Number(rect.area_m2);
+    }
+    const geo = geometricAreaM2(rect);
+    if (geo == null) return null;
+    const mpu = metersPerUnit();
+    const mpu2 = mpu * mpu;
+    const myA = Number(rect.w) * Number(rect.h);
+    let sub = 0;
+    for (const other of roomItems()) {
+      if (!other || other.id === rect.id) continue;
+      if (!(other.room_id || "").trim()) continue;
+      const otherA = Number(other.w) * Number(other.h);
+      if (!(otherA > 0) || otherA >= myA - 1e-6) continue;
+      if (!isNestedInside(other, rect)) continue;
+      sub += intersectionAreaCanvas(rect, other);
+    }
+    return Math.max(0, geo - sub * mpu2);
+  }
+
+  function intersectionAreaCanvas(a, b) {
+    const ax2 = Number(a.x) + Number(a.w);
+    const ay2 = Number(a.y) + Number(a.h);
+    const bx2 = Number(b.x) + Number(b.w);
+    const by2 = Number(b.y) + Number(b.h);
+    const ow = Math.max(0, Math.min(ax2, bx2) - Math.max(Number(a.x), Number(b.x)));
+    const oh = Math.max(0, Math.min(ay2, by2) - Math.max(Number(a.y), Number(b.y)));
+    return ow * oh;
+  }
+
+  function isNestedInside(inner, outer) {
+    const ia = Number(inner.w) * Number(inner.h);
+    const oa = Number(outer.w) * Number(outer.h);
+    if (!(ia > 0) || !(oa > 0) || ia >= oa - 1e-6) return false;
+    const cx = Number(inner.x) + Number(inner.w) / 2;
+    const cy = Number(inner.y) + Number(inner.h) / 2;
+    if (
+      cx < Number(outer.x) ||
+      cx > Number(outer.x) + Number(outer.w) ||
+      cy < Number(outer.y) ||
+      cy > Number(outer.y) + Number(outer.h)
+    ) {
+      return false;
+    }
+    return intersectionAreaCanvas(inner, outer) >= 0.85 * ia;
+  }
+
+  function formatAreaM2(m2) {
+    if (m2 == null || !Number.isFinite(m2)) return "—";
+    if (m2 < 10) return `${m2.toFixed(2)} m²`;
+    return `${m2.toFixed(1)} m²`;
+  }
+
+  function formatLengthM(meters) {
+    if (meters == null || !Number.isFinite(meters) || meters <= 0) return "";
+    if (meters < 10) return `${meters.toFixed(2)} m`;
+    return `${meters.toFixed(1)} m`;
+  }
+
+  function roomItems() {
+    if (!state.plan) return [];
+    return state.plan.mode === "free" ? state.plan.shapes || [] : state.plan.faces || [];
+  }
+
+  function itemKind() {
+    return state.plan && state.plan.mode === "free" ? "shape" : "face";
+  }
+
+  function findItemForRoom(roomId) {
+    const rid = String(roomId || "")
+      .trim()
+      .toLowerCase();
+    if (!rid) return null;
+    return roomItems().find((x) => (x.room_id || "").toLowerCase() === rid) || null;
+  }
+
+  function selectedRoomItem() {
+    if (!state.plan || !state.selectedId) return null;
+    if (state.selectedKind !== "shape" && state.selectedKind !== "face") return null;
+    return roomItems().find((x) => x.id === state.selectedId) || null;
+  }
+
+  /** Keep center; set w×h so geometric area matches areaM2. */
+  function reshapeToAreaM2(rect, areaM2) {
+    const mpu = metersPerUnit();
+    const target = Math.max(1e-6, Number(areaM2) / (mpu * mpu));
+    const aspect = Math.max(1e-6, Number(rect.w) / Math.max(Number(rect.h), 1e-6));
+    let h = Math.sqrt(target / aspect);
+    let w = target / h;
+    w = Math.max(MIN_SIZE, w);
+    h = Math.max(MIN_SIZE, h);
+    const cx = Number(rect.x) + Number(rect.w) / 2;
+    const cy = Number(rect.y) + Number(rect.h) / 2;
+    rect.w = w;
+    rect.h = h;
+    rect.x = cx - w / 2;
+    rect.y = cy - h / 2;
+    if (state.plan && state.plan.envelope) {
+      const c = clampRectInEnvelope(rect, state.plan.envelope);
+      rect.x = c.x;
+      rect.y = c.y;
+      rect.w = c.w;
+      rect.h = c.h;
+    }
+  }
+
+  /**
+   * Keep canvas area A = w×h while the user drags a handle.
+   * Only the aspect ratio changes (area is fixed).
+   */
+  function applyLockedCanvasArea(r, lockedCanvasArea, handle, orig) {
+    const A = Math.max(MIN_SIZE * MIN_SIZE, Number(lockedCanvasArea) || 0);
+    if (!(A > 0)) return r;
+    const hdl = String(handle || "");
+    let x = Number(orig.x);
+    let y = Number(orig.y);
+    let w = Number(orig.w);
+    let h = Number(orig.h);
+
+    // Edge handles: that edge follows the pointer; the orthogonal size is A / size.
+    if (hdl === "e" || hdl === "w") {
+      w = Math.max(MIN_SIZE, Number(r.w));
+      h = Math.max(MIN_SIZE, A / w);
+      x = hdl === "w" ? Number(orig.x) + Number(orig.w) - w : Number(orig.x);
+      y = Number(orig.y) + (Number(orig.h) - h) / 2; // keep vertical center
+    } else if (hdl === "n" || hdl === "s") {
+      h = Math.max(MIN_SIZE, Number(r.h));
+      w = Math.max(MIN_SIZE, A / h);
+      y = hdl === "n" ? Number(orig.y) + Number(orig.h) - h : Number(orig.y);
+      x = Number(orig.x) + (Number(orig.w) - w) / 2; // keep horizontal center
+    } else {
+      // Corner: drive by the larger pointer delta vs original size.
+      const dw = Math.abs(Number(r.w) - Number(orig.w));
+      const dh = Math.abs(Number(r.h) - Number(orig.h));
+      if (dw >= dh) {
+        w = Math.max(MIN_SIZE, Number(r.w));
+        h = Math.max(MIN_SIZE, A / w);
+      } else {
+        h = Math.max(MIN_SIZE, Number(r.h));
+        w = Math.max(MIN_SIZE, A / h);
+      }
+      x = hdl.includes("w") ? Number(orig.x) + Number(orig.w) - w : Number(orig.x);
+      y = hdl.includes("n") ? Number(orig.y) + Number(orig.h) - h : Number(orig.y);
+    }
+    return normalizeRect(x, y, w, h);
+  }
+
+  /** Clamp into envelope while trying to keep locked canvas area A. */
+  function clampLockedRectInEnvelope(r, env, lockedCanvasArea, handle, orig) {
+    const A = Math.max(MIN_SIZE * MIN_SIZE, Number(lockedCanvasArea) || 0);
+    let c = clampRectInEnvelope(r, env);
+    if (!(A > 0) || !env) return c;
+    if (Math.abs(c.w * c.h - A) <= 0.5) return c;
+    // Recover area inside remaining room: prefer the dragged axis.
+    c = applyLockedCanvasArea(c, A, handle, orig);
+    c = clampRectInEnvelope(c, env);
+    if (Math.abs(c.w * c.h - A) <= 0.5) return c;
+    // Last resort: fit max width under envelope, height = A/w (or vice versa).
+    const maxW = Math.max(MIN_SIZE, env.w);
+    const maxH = Math.max(MIN_SIZE, env.h);
+    let w = Math.min(Math.max(MIN_SIZE, c.w), maxW);
+    let h = A / w;
+    if (h > maxH) {
+      h = maxH;
+      w = Math.min(maxW, Math.max(MIN_SIZE, A / h));
+      h = A / w;
+    }
+    if (w > maxW) {
+      w = maxW;
+      h = Math.min(maxH, Math.max(MIN_SIZE, A / w));
+    }
+    return clampRectInEnvelope(
+      {
+        x: Number(orig.x),
+        y: Number(orig.y),
+        w,
+        h,
+      },
+      env
+    );
+  }
+
+  function syncLockedShapesGeometry() {
+    if (!state.plan || state.plan.mode !== "free") return;
+    for (const s of state.plan.shapes || []) {
+      if (!s.area_locked || !(Number(s.area_m2) > 0)) continue;
+      reshapeToAreaM2(s, s.area_m2);
+    }
+  }
+
+  function assignSelectedToRoom(roomId) {
+    const rid = String(roomId || "")
+      .trim()
+      .toLowerCase();
+    if (!rid) return;
+    const item = selectedRoomItem();
+    if (!item) {
+      setStatus("Select a shape on the plan first");
+      return;
+    }
+    if (state.selectedKind === "face") {
+      // Faces are derived; assignment is ok, lock not applicable.
+    }
+    captureBeforeEdit();
+    const others = roomItems().filter((x) => x.id !== item.id);
+    const prior = others.find((x) => (x.room_id || "").toLowerCase() === rid);
+    if (prior) {
+      prior.room_id = "";
+      prior.label = "";
+    }
+    item.room_id = rid;
+    const opt = state.roomOptions.find((r) => r.id === rid);
+    item.label = opt ? opt.label : item.label || rid;
+    state.dirty = true;
+    setStatus(`Assigned shape → ${item.label || rid}`);
+    renderSvg();
+  }
+
+  function selectRoomFromList(roomId) {
+    const item = findItemForRoom(roomId);
+    if (!item) {
+      setStatus(`No shape assigned to ${roomId} yet — select a shape, then Assign`);
+      return;
+    }
+    selectItem(itemKind(), item.id);
   }
 
   /** Keep a rect fully inside the apartment envelope (shrink if needed). */
@@ -356,6 +817,26 @@
       });
       bar.appendChild(btn);
     }
+
+    const snapLab = document.createElement("label");
+    snapLab.className = "plan-snap-toggle";
+    const snapCb = document.createElement("input");
+    snapCb.type = "checkbox";
+    snapCb.checked = !!state.snapEnabled;
+    snapCb.addEventListener("change", () => {
+      state.snapEnabled = snapCb.checked;
+      setStatus(state.snapEnabled ? "Snap enabled" : "Snap disabled");
+    });
+    const t =
+      window.I18n && typeof window.I18n.t === "function"
+        ? window.I18n.t.bind(window.I18n)
+        : (k) => k;
+    const snapTxt = document.createElement("span");
+    const snapLabel = t("map.plan.snap");
+    snapTxt.textContent = snapLabel === "map.plan.snap" ? "Snap" : snapLabel;
+    snapLab.appendChild(snapCb);
+    snapLab.appendChild(snapTxt);
+    bar.appendChild(snapLab);
   }
 
   function renderProps() {
@@ -366,6 +847,9 @@
       panel.replaceChildren();
       return;
     }
+    const prevList = panel.querySelector(".plan-room-list");
+    const prevScroll = prevList ? prevList.scrollTop : 0;
+
     panel.hidden = false;
     panel.replaceChildren();
 
@@ -389,80 +873,219 @@
     northEl.value = String(state.plan.north_deg ?? 0);
     mpuEl.value = String(state.plan.meters_per_unit ?? 0.05);
     nameEl.addEventListener("change", () => {
+      captureBeforeEdit();
       state.plan.name = nameEl.value.trim() || "Untitled";
       state.dirty = true;
       renderPlanSelect();
     });
     northEl.addEventListener("change", () => {
+      captureBeforeEdit();
       state.plan.north_deg = ((Number(northEl.value) || 0) % 360 + 360) % 360;
       state.dirty = true;
     });
     mpuEl.addEventListener("change", () => {
       const v = Number(mpuEl.value);
       if (v > 0) {
+        captureBeforeEdit();
         state.plan.meters_per_unit = v;
+        syncLockedShapesGeometry();
         state.dirty = true;
+        renderSvg();
       }
     });
 
-    const selKind = state.selectedKind;
-    const selId = state.selectedId;
-    if (!selKind || !selId) return;
+    // Live metrics
+    const metrics = document.createElement("div");
+    metrics.className = "plan-props-block plan-props-metrics";
+    const items = roomItems();
+    let total = 0;
+    let named = 0;
+    for (const it of items) {
+      if (!(it.room_id || "").trim()) continue;
+      const a = effectiveAreaM2(it);
+      if (a != null) {
+        total += a;
+        named += 1;
+      }
+    }
+    const envArea = geometricAreaM2(state.plan.envelope);
+    const sel = selectedRoomItem();
+    const selArea = effectiveAreaM2(sel);
+    metrics.innerHTML = `
+      <p class="plan-metrics-line"><span data-i18n-skip>Total rooms</span>
+        <strong>${formatAreaM2(total)}</strong>
+        <span class="muted">(${named})</span></p>
+      <p class="plan-metrics-line"><span>Envelope</span>
+        <strong>${formatAreaM2(envArea)}</strong></p>
+      <p class="plan-metrics-line"><span>Selected</span>
+        <strong>${formatAreaM2(selArea)}</strong>${
+          sel && sel.area_locked ? ' <span class="plan-area-lock-badge">locked</span>' : ""
+        }</p>
+    `;
+    panel.appendChild(metrics);
 
-    if (selKind === "shape" || selKind === "face") {
-      const list = selKind === "shape" ? state.plan.shapes : state.plan.faces;
-      const item = (list || []).find((x) => x.id === selId);
-      if (!item) return;
-      const block = document.createElement("div");
-      block.className = "plan-props-block";
-      const label = document.createElement("label");
-      label.textContent = "Room id ";
-      const select = document.createElement("select");
-      select.id = "plan-prop-room";
-      const empty = document.createElement("option");
-      empty.value = "";
-      empty.textContent = "(unassigned)";
-      select.appendChild(empty);
-      for (const r of state.roomOptions) {
-        const opt = document.createElement("option");
-        opt.value = r.id;
-        opt.textContent = `${r.label} (${r.id})`;
-        if (item.room_id === r.id) opt.selected = true;
-        select.appendChild(opt);
+    // Selected shape: lock / set area (free mode only)
+    if (sel && state.selectedKind === "shape") {
+      const lockBlock = document.createElement("div");
+      lockBlock.className = "plan-props-block";
+
+      const lockRow = document.createElement("label");
+      lockRow.className = "plan-props-check plan-props-lock-area";
+      const lockCb = document.createElement("input");
+      lockCb.type = "checkbox";
+      lockCb.id = "plan-prop-area-lock";
+      lockCb.checked = !!sel.area_locked;
+      lockRow.appendChild(lockCb);
+      const lockTxt = document.createElement("span");
+      lockTxt.textContent = "Lock area — resize only changes the ratio";
+      lockRow.appendChild(lockTxt);
+      lockBlock.appendChild(lockRow);
+
+      const geo = geometricAreaM2(sel);
+      const areaVal =
+        sel.area_locked && Number(sel.area_m2) > 0
+          ? Number(sel.area_m2)
+          : geo != null
+            ? Math.round(geo * 100) / 100
+            : "";
+      const areaLab = document.createElement("label");
+      areaLab.textContent = "Area (m²)";
+      const areaInp = document.createElement("input");
+      areaInp.type = "number";
+      areaInp.id = "plan-prop-area";
+      areaInp.min = "0.1";
+      areaInp.step = "0.1";
+      areaInp.value = areaVal === "" ? "" : String(areaVal);
+      areaInp.disabled = !sel.area_locked;
+      areaLab.appendChild(areaInp);
+      lockBlock.appendChild(areaLab);
+
+      if (sel.area_locked) {
+        const hint = document.createElement("p");
+        hint.className = "plan-props-hint";
+        hint.textContent =
+          "Surface fixed. Drag handles to change width/height ratio only.";
+        lockBlock.appendChild(hint);
       }
-      // Keep current value even if not in taxonomy
-      if (item.room_id && ![...select.options].some((o) => o.value === item.room_id)) {
-        const opt = document.createElement("option");
-        opt.value = item.room_id;
-        opt.textContent = item.room_id;
-        opt.selected = true;
-        select.appendChild(opt);
-      }
-      select.addEventListener("change", () => {
-        const rid = select.value.trim().toLowerCase();
-        const others = (list || []).filter((x) => x.id !== item.id);
-        if (rid && others.some((x) => (x.room_id || "").toLowerCase() === rid)) {
-          setStatus(`Room id "${rid}" already used in this plan`);
-          select.value = item.room_id || "";
-          return;
+
+      lockCb.addEventListener("change", () => {
+        if (lockCb.checked) {
+          const g = geometricAreaM2(sel);
+          if (g == null || g <= 0) {
+            lockCb.checked = false;
+            setStatus("Shape has no area to lock");
+            return;
+          }
+          captureBeforeEdit();
+          sel.area_m2 = Math.round(g * 1000) / 1000;
+          sel.area_locked = true;
+          setStatus(`Area locked at ${formatAreaM2(sel.area_m2)} — drag to change ratio only`);
+        } else {
+          captureBeforeEdit();
+          sel.area_locked = false;
+          setStatus("Area unlocked — free resize");
         }
-        item.room_id = rid;
-        const opt = state.roomOptions.find((r) => r.id === rid);
-        item.label = opt ? opt.label : item.label || "";
         state.dirty = true;
         renderSvg();
       });
-      label.appendChild(select);
-      block.appendChild(label);
-      if (!item.room_id) {
-        const warn = document.createElement("p");
-        warn.className = "plan-props-warn";
-        warn.textContent = "Assign a logical room id (e.g. bedroom, corridor).";
-        block.appendChild(warn);
-      }
-      panel.appendChild(block);
+
+      areaInp.addEventListener("change", () => {
+        if (!sel.area_locked) return;
+        const v = Number(areaInp.value);
+        if (!(v > 0)) {
+          areaInp.value = String(sel.area_m2 || "");
+          return;
+        }
+        captureBeforeEdit();
+        sel.area_m2 = Math.round(v * 1000) / 1000;
+        reshapeToAreaM2(sel, sel.area_m2);
+        state.dirty = true;
+        renderSvg();
+      });
+      panel.appendChild(lockBlock);
     }
 
+    // Scrollable room list
+    const listBlock = document.createElement("div");
+    listBlock.className = "plan-props-block plan-props-rooms";
+    const listTitle = document.createElement("p");
+    listTitle.className = "plan-room-list-title";
+    listTitle.textContent = "Rooms";
+    listBlock.appendChild(listTitle);
+    const hint = document.createElement("p");
+    hint.className = "plan-props-hint";
+    hint.textContent =
+      "Click a room to select its shape. Assign links the selected shape.";
+    listBlock.appendChild(hint);
+
+    const list = document.createElement("div");
+    list.className = "plan-room-list";
+    list.setAttribute("role", "list");
+
+    const assignedExtra = [];
+    for (const it of items) {
+      const rid = (it.room_id || "").trim().toLowerCase();
+      if (!rid) continue;
+      if (!state.roomOptions.some((r) => r.id === rid)) {
+        assignedExtra.push({ id: rid, label: it.label || rid });
+      }
+    }
+    const rooms = [...state.roomOptions, ...assignedExtra];
+    const seen = new Set();
+    for (const r of rooms) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      const item = findItemForRoom(r.id);
+      const area = effectiveAreaM2(item);
+      const isSelShape =
+        item &&
+        state.selectedId === item.id &&
+        (state.selectedKind === "shape" || state.selectedKind === "face");
+      const row = document.createElement("div");
+      row.className =
+        "plan-room-row" +
+        (isSelShape ? " selected" : "") +
+        (item ? " assigned" : " unassigned");
+      row.setAttribute("role", "listitem");
+      row.tabIndex = 0;
+      row.dataset.roomId = r.id;
+
+      const main = document.createElement("button");
+      main.type = "button";
+      main.className = "plan-room-row-main";
+      main.innerHTML = `
+        <span class="plan-room-row-name">${escapeHtml(r.label || r.id)}</span>
+        <span class="plan-room-row-id">${escapeHtml(r.id)}</span>
+        <span class="plan-room-row-area">${formatAreaM2(area)}${
+          item && item.area_locked ? " · locked" : ""
+        }</span>
+      `;
+      main.addEventListener("click", () => selectRoomFromList(r.id));
+      row.appendChild(main);
+
+      const assignBtn = document.createElement("button");
+      assignBtn.type = "button";
+      assignBtn.className = "plan-room-assign";
+      assignBtn.textContent = "Assign";
+      assignBtn.title = "Assign selected shape to this room";
+      const canAssign =
+        !!selectedRoomItem() &&
+        (state.selectedKind === "shape" || state.selectedKind === "face");
+      assignBtn.disabled = !canAssign;
+      assignBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        assignSelectedToRoom(r.id);
+      });
+      row.appendChild(assignBtn);
+      list.appendChild(row);
+    }
+    listBlock.appendChild(list);
+    panel.appendChild(listBlock);
+    list.scrollTop = prevScroll;
+
+    // Opening props (unchanged)
+    const selKind = state.selectedKind;
+    const selId = state.selectedId;
     if (selKind === "opening") {
       const op = (state.plan.openings || []).find((x) => x.id === selId);
       if (!op) return;
@@ -479,6 +1102,7 @@
         kindSel.appendChild(opt);
       }
       kindSel.addEventListener("change", () => {
+        captureBeforeEdit();
         op.kind = kindSel.value;
         state.dirty = true;
         renderSvg();
@@ -486,31 +1110,40 @@
       kindLabel.appendChild(kindSel);
       block.appendChild(kindLabel);
 
-      const rooms = namedRooms(state.plan);
+      const roomsNamed = namedRooms(state.plan);
       for (const field of ["room_a", "room_b"]) {
         const lab = document.createElement("label");
         lab.textContent = field === "room_a" ? "Room A " : "Room B ";
-        const sel = document.createElement("select");
+        const selOp = document.createElement("select");
         const out = document.createElement("option");
         out.value = "outdoor";
         out.textContent = "outdoor";
-        sel.appendChild(out);
-        for (const r of rooms) {
+        selOp.appendChild(out);
+        for (const rid of roomsNamed) {
           const opt = document.createElement("option");
-          opt.value = r;
-          opt.textContent = r;
-          sel.appendChild(opt);
+          opt.value = rid;
+          opt.textContent = rid;
+          selOp.appendChild(opt);
         }
-        sel.value = op[field] || "outdoor";
-        sel.addEventListener("change", () => {
-          op[field] = sel.value;
+        selOp.value = op[field] || "outdoor";
+        selOp.addEventListener("change", () => {
+          captureBeforeEdit();
+          op[field] = selOp.value;
           state.dirty = true;
         });
-        lab.appendChild(sel);
+        lab.appendChild(selOp);
         block.appendChild(lab);
       }
       panel.appendChild(block);
     }
+  }
+
+  function escapeHtml(s) {
+    return String(s || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 
   function namedRooms(plan) {
@@ -540,12 +1173,7 @@
     }
     const plan = state.plan;
     const env = plan.envelope;
-    const pad = 40;
-    const vbX = env.x - pad;
-    const vbY = env.y - pad;
-    const vbW = env.w + pad * 2;
-    const vbH = env.h + pad * 2;
-    svg.setAttribute("viewBox", `${vbX} ${vbY} ${vbW} ${vbH}`);
+    applyViewBox();
     svg.replaceChildren();
 
     const gEnv = svgEl("rect", {
@@ -558,6 +1186,7 @@
       "data-id": "envelope",
     });
     svg.appendChild(gEnv);
+    drawEnvelopeDimensions(svg, env);
 
     if (plan.mode === "free") {
       for (const s of plan.shapes || []) {
@@ -639,6 +1268,36 @@
     return el;
   }
 
+  /** Width under the bottom edge, height along the left edge (meters). */
+  function drawEnvelopeDimensions(svg, env) {
+    const mpu = metersPerUnit();
+    const wTxt = formatLengthM(Number(env.w) * mpu);
+    const hTxt = formatLengthM(Number(env.h) * mpu);
+    const gap = 14;
+
+    if (wTxt) {
+      const wt = svgEl("text", {
+        x: env.x + env.w / 2,
+        y: env.y + env.h + gap,
+        class: "plan-envelope-dim",
+      });
+      wt.textContent = wTxt;
+      svg.appendChild(wt);
+    }
+    if (hTxt) {
+      const hx = env.x - gap;
+      const hy = env.y + env.h / 2;
+      const ht = svgEl("text", {
+        x: hx,
+        y: hy,
+        class: "plan-envelope-dim",
+        transform: `rotate(-90 ${hx} ${hy})`,
+      });
+      ht.textContent = hTxt;
+      svg.appendChild(ht);
+    }
+  }
+
   function drawRoomRect(item, kind) {
     const g = svgEl("g", {
       class: "plan-room-group",
@@ -658,15 +1317,28 @@
       })
     );
     const label = roomLabel(state.plan, item.room_id) || "(unnamed)";
+    const area = effectiveAreaM2(item);
+    const areaTxt = area != null ? formatAreaM2(area) : "";
     const t = svgEl("text", {
       x: item.x + item.w / 2,
-      y: item.y + item.h / 2,
+      y: item.y + item.h / 2 - (areaTxt ? 5 : 0),
       class: "plan-room-label",
       "data-kind": kind,
       "data-id": item.id,
     });
     t.textContent = label;
     g.appendChild(t);
+    if (areaTxt) {
+      const t2 = svgEl("text", {
+        x: item.x + item.w / 2,
+        y: item.y + item.h / 2 + 9,
+        class: "plan-room-label plan-room-area-label",
+        "data-kind": kind,
+        "data-id": item.id,
+      });
+      t2.textContent = areaTxt + (item.area_locked ? " *" : "");
+      g.appendChild(t2);
+    }
     return g;
   }
 
@@ -741,6 +1413,11 @@
     if (!state.plan || !state.selectedKind || !state.selectedId) return;
     const plan = state.plan;
     const id = state.selectedId;
+    if (state.selectedKind === "envelope") {
+      setStatus("Envelope cannot be deleted — resize it instead");
+      return;
+    }
+    captureBeforeEdit();
     if (state.selectedKind === "shape") {
       plan.shapes = (plan.shapes || []).filter((x) => x.id !== id);
     } else if (state.selectedKind === "face") {
@@ -755,9 +1432,6 @@
       refreshPartitionFaces();
     } else if (state.selectedKind === "opening") {
       plan.openings = (plan.openings || []).filter((x) => x.id !== id);
-    } else if (state.selectedKind === "envelope") {
-      setStatus("Envelope cannot be deleted — resize it instead");
-      return;
     }
     state.selectedId = null;
     state.selectedKind = null;
@@ -767,9 +1441,28 @@
 
   function onPointerDown(evt) {
     if (!state.plan) return;
+    evt.preventDefault();
+    const sel = window.getSelection && window.getSelection();
+    if (sel && sel.removeAllRanges) sel.removeAllRanges();
     const svg = $("plan-editor-svg");
     const p = svgPoint(svg, evt);
     const hit = hitTarget(evt);
+
+    // Middle button or Alt+drag → pan
+    if (evt.button === 1 || (evt.button === 0 && evt.altKey)) {
+      const vb = currentViewBox();
+      const rect = svg.getBoundingClientRect();
+      state.drag = {
+        type: "pan",
+        clientX0: evt.clientX,
+        clientY0: evt.clientY,
+        orig: vb,
+        scaleX: vb.w / Math.max(1, rect.width),
+        scaleY: vb.h / Math.max(1, rect.height),
+      };
+      svg.setPointerCapture(evt.pointerId);
+      return;
+    }
 
     if (state.tool === "delete") {
       if (hit && hit.kind && hit.kind !== "handle" && hit.kind !== "envelope") {
@@ -815,12 +1508,21 @@
               (x) => x.id === state.selectedId
             );
       if (!rect) return;
+      const mpu = metersPerUnit();
+      const lockedCanvas =
+        state.selectedKind === "shape" && rect.area_locked
+          ? Number(rect.area_m2) > 0
+            ? Number(rect.area_m2) / (mpu * mpu)
+            : Number(rect.w) * Number(rect.h)
+          : null;
+      captureBeforeEdit();
       state.drag = {
         type: "resize",
         handle: hit.handle,
         orig: { ...rect },
         kind: state.selectedKind,
         id: state.selectedId,
+        lockedCanvasArea: lockedCanvas,
       };
       svg.setPointerCapture(evt.pointerId);
       return;
@@ -837,6 +1539,7 @@
       if (!rect) return;
       // Faces move by editing walls in partition mode — allow room select only
       if (hit.kind === "face") return;
+      captureBeforeEdit();
       state.drag = {
         type: "move",
         x0: p.x,
@@ -867,6 +1570,19 @@
     const p = svgPoint(svg, evt);
     const drag = state.drag;
     const guides = rectGuides(state.plan, drag.id);
+
+    if (drag.type === "pan") {
+      const dx = (evt.clientX - drag.clientX0) * drag.scaleX;
+      const dy = (evt.clientY - drag.clientY0) * drag.scaleY;
+      state.viewBox = {
+        x: drag.orig.x - dx,
+        y: drag.orig.y - dy,
+        w: drag.orig.w,
+        h: drag.orig.h,
+      };
+      applyViewBox();
+      return;
+    }
 
     if (drag.type === "draw-rect" || drag.type === "draw-wall" || drag.type === "draw-opening") {
       const env = state.plan.envelope;
@@ -992,7 +1708,20 @@
             ? (state.plan.shapes || []).find((x) => x.id === drag.id)
             : null;
       if (!target) return;
-      if (drag.kind === "shape") {
+      if (drag.kind === "shape" && target.area_locked) {
+        const lockedCanvas =
+          drag.lockedCanvasArea != null
+            ? drag.lockedCanvasArea
+            : Number(o.w) * Number(o.h);
+        r = applyLockedCanvasArea(r, lockedCanvas, handle, o);
+        r = clampLockedRectInEnvelope(
+          r,
+          state.plan.envelope,
+          lockedCanvas,
+          handle,
+          o
+        );
+      } else if (drag.kind === "shape") {
         r = clampRectInEnvelope(r, state.plan.envelope);
       }
       target.x = r.x;
@@ -1004,6 +1733,7 @@
       }
       state.dirty = true;
       renderSvg();
+      return;
     }
   }
 
@@ -1051,6 +1781,7 @@
       );
       r = clampRectInEnvelope(r, state.plan.envelope);
       if (r.w < MIN_SIZE || r.h < MIN_SIZE) return;
+      captureBeforeEdit();
       const shape = {
         id: uid("shape"),
         type: "rect",
@@ -1060,6 +1791,7 @@
         y: r.y,
         w: r.w,
         h: r.h,
+        area_locked: false,
       };
       state.plan.shapes = state.plan.shapes || [];
       state.plan.shapes.push(shape);
@@ -1067,7 +1799,7 @@
       state.tool = "select";
       selectItem("shape", shape.id);
       renderToolbar();
-      setStatus("Assign a room id in the properties panel");
+      setStatus("Select a room in the list, then Assign");
       return;
     }
 
@@ -1084,6 +1816,7 @@
       x2 = seg.x2;
       y2 = seg.y2;
       if (Math.hypot(x2 - x1, y2 - y1) < MIN_SIZE) return;
+      captureBeforeEdit();
       const wall = { id: uid("wall"), x1, y1, x2, y2 };
       state.plan.walls = state.plan.walls || [];
       state.plan.walls.push(wall);
@@ -1108,6 +1841,7 @@
       x2 = seg.x2;
       y2 = seg.y2;
       if (Math.hypot(x2 - x1, y2 - y1) < MIN_SIZE / 2) return;
+      captureBeforeEdit();
       const rooms = inferOpeningRooms(x1, y1, x2, y2);
       const op = {
         id: uid("open"),
@@ -1129,7 +1863,17 @@
     }
 
     if (drag.type === "move" || drag.type === "resize") {
-      state.dirty = true;
+      // Drop empty gestures (click without geometry change).
+      const last = state.undoStack[state.undoStack.length - 1];
+      if (
+        last &&
+        JSON.stringify(last.plan) === JSON.stringify(clonePlanSnapshot(state.plan))
+      ) {
+        state.undoStack.pop();
+        state.dirty = !!last.dirty;
+      } else {
+        state.dirty = true;
+      }
       renderSvg();
     }
   }
@@ -1168,6 +1912,8 @@
   }
 
   async function loadPlan(id) {
+    clearHistory();
+    state.viewBox = null;
     if (!id) {
       state.plan = null;
       state.selectedId = null;
@@ -1283,6 +2029,7 @@
     const id = state.plan.id;
     await api(`/api/apartment/plans/${encodeURIComponent(id)}`, { method: "DELETE" });
     state.plan = null;
+    clearHistory();
     await refreshList();
     renderToolbar();
     renderSvg();
@@ -1292,12 +2039,32 @@
   }
 
   function bind() {
+    document.removeEventListener("keydown", onEditorKeyDown);
+    document.addEventListener("keydown", onEditorKeyDown);
     const svg = $("plan-editor-svg");
     if (svg) {
       svg.addEventListener("pointerdown", onPointerDown);
       svg.addEventListener("pointermove", onPointerMove);
       svg.addEventListener("pointerup", onPointerUp);
       svg.addEventListener("pointercancel", onPointerUp);
+      svg.addEventListener("wheel", onWheelZoom, { passive: false });
+      svg.addEventListener("selectstart", (evt) => evt.preventDefault());
+      svg.addEventListener("dragstart", (evt) => evt.preventDefault());
+      svg.addEventListener("auxclick", (evt) => {
+        if (evt.button === 1) evt.preventDefault();
+      });
+    }
+    const zoomIn = $("plan-zoom-in");
+    if (zoomIn) {
+      zoomIn.addEventListener("click", () => zoomBy(1 / 1.25));
+    }
+    const zoomOut = $("plan-zoom-out");
+    if (zoomOut) {
+      zoomOut.addEventListener("click", () => zoomBy(1.25));
+    }
+    const zoomReset = $("plan-zoom-reset");
+    if (zoomReset) {
+      zoomReset.addEventListener("click", () => resetView());
     }
     const sel = $("plan-editor-select");
     if (sel) {

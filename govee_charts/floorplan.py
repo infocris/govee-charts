@@ -161,7 +161,7 @@ def _normalize_shape(raw: Any) -> dict[str, Any] | None:
     rid = str(raw.get("room_id") or "").strip().lower()
     sid = str(raw.get("id") or "").strip() or f"shape-{uuid.uuid4().hex[:8]}"
     rect = _normalize_rect(raw)
-    return {
+    out: dict[str, Any] = {
         "id": sid,
         "type": "rect",
         "room_id": rid,
@@ -171,6 +171,17 @@ def _normalize_shape(raw: Any) -> dict[str, Any] | None:
         "w": rect["w"],
         "h": rect["h"],
     }
+    locked = bool(raw.get("area_locked"))
+    area_m2 = None
+    if raw.get("area_m2") is not None:
+        try:
+            area_m2 = max(0.0, float(raw["area_m2"]))
+        except (TypeError, ValueError):
+            area_m2 = None
+    out["area_locked"] = locked and area_m2 is not None and area_m2 > 0
+    if area_m2 is not None and area_m2 > 0:
+        out["area_m2"] = round(area_m2, 3)
+    return out
 
 
 def _normalize_face(raw: Any) -> dict[str, Any] | None:
@@ -304,6 +315,42 @@ def _overlap_1d(a0: float, a1: float, b0: float, b1: float) -> float:
     return max(0.0, hi - lo)
 
 
+def _rect_area(rect: dict[str, Any]) -> float:
+    return max(0.0, float(rect["w"]) * float(rect["h"]))
+
+
+def _rect_intersection_area(a: dict[str, Any], b: dict[str, Any]) -> float:
+    """Axis-aligned intersection area in canvas units."""
+    ax, ay, aw, ah = float(a["x"]), float(a["y"]), float(a["w"]), float(a["h"])
+    bx, by, bw, bh = float(b["x"]), float(b["y"]), float(b["w"]), float(b["h"])
+    ow = _overlap_1d(ax, ax + aw, bx, bx + bw)
+    oh = _overlap_1d(ay, ay + ah, by, by + bh)
+    return ow * oh
+
+
+def _point_in_rect(x: float, y: float, rect: dict[str, Any], *, pad: float = 0.0) -> bool:
+    rx, ry = float(rect["x"]), float(rect["y"])
+    rw, rh = float(rect["w"]), float(rect["h"])
+    return (rx - pad) <= x <= (rx + rw + pad) and (ry - pad) <= y <= (ry + rh + pad)
+
+
+def _is_nested_inside(inner: dict[str, Any], outer: dict[str, Any]) -> bool:
+    """True when ``inner`` mostly sits inside ``outer`` (simple hole-in-room case).
+
+    Uses center containment plus ≥85% of the smaller footprint overlapping the larger.
+    """
+    ia = _rect_area(inner)
+    oa = _rect_area(outer)
+    if ia <= 0 or oa <= 0 or ia >= oa - 1e-6:
+        return False
+    cx = float(inner["x"]) + float(inner["w"]) / 2.0
+    cy = float(inner["y"]) + float(inner["h"]) / 2.0
+    if not _point_in_rect(cx, cy, outer):
+        return False
+    overlap = _rect_intersection_area(inner, outer)
+    return overlap >= 0.85 * ia
+
+
 def _shared_edge_length(
     a: dict[str, Any], b: dict[str, Any]
 ) -> float:
@@ -403,16 +450,50 @@ def _rooms_from_rects(
     north_deg: float,
     openings: list[dict[str, Any]],
 ) -> tuple[dict[str, RoomSpec], list[EdgeSpec], float]:
-    """Build RoomSpec / EdgeSpec from named rectangles."""
+    """Build RoomSpec / EdgeSpec from named rectangles.
+
+    Nested / overlapping free shapes: the smaller footprint is treated as a
+    separate room with walls around it; its canvas area is subtracted from the
+    larger room (unless that room has a locked ``area_m2``).
+    """
     mpu2 = float(meters_per_unit) ** 2
-    rooms: dict[str, RoomSpec] = {}
-    for rect in rects:
-        rid = str(rect.get("room_id") or "").strip().lower()
-        if not rid:
+    named = [r for r in rects if str(r.get("room_id") or "").strip()]
+
+    # Pair nesting: smaller mostly inside larger → subtract + wall.
+    nested_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for i, a in enumerate(named):
+        for b in named[i + 1 :]:
+            if _is_nested_inside(a, b):
+                nested_pairs.append((a, b))  # a inside b
+            elif _is_nested_inside(b, a):
+                nested_pairs.append((b, a))  # b inside a
+
+    subtract_canvas: dict[str, float] = {}
+    for inner, outer in nested_pairs:
+        oid = str(outer.get("id") or "")
+        if outer.get("area_locked"):
             continue
+        subtract_canvas[oid] = subtract_canvas.get(oid, 0.0) + _rect_intersection_area(
+            inner, outer
+        )
+
+    rooms: dict[str, RoomSpec] = {}
+    for rect in named:
+        rid = str(rect.get("room_id") or "").strip().lower()
         if rid in rooms:
             raise ValueError(f"Duplicate room_id in plan: {rid}")
-        area = float(rect["w"]) * float(rect["h"]) * mpu2
+        geo_area = _rect_area(rect) * mpu2
+        area = geo_area
+        if rect.get("area_locked") and rect.get("area_m2") is not None:
+            try:
+                locked = float(rect["area_m2"])
+                if locked > 0:
+                    area = locked
+            except (TypeError, ValueError):
+                pass
+        else:
+            sid = str(rect.get("id") or "")
+            area = max(0.0, geo_area - subtract_canvas.get(sid, 0.0) * mpu2)
         if area <= 0:
             continue
         exteriors: list[str] = []
@@ -436,30 +517,41 @@ def _rooms_from_rects(
 
     edges: list[EdgeSpec] = []
     seen: set[tuple[str, str]] = set()
-    named = [r for r in rects if str(r.get("room_id") or "").strip()]
+
+    def _add_edge(ra: str, rb: str, shared: float, *, force_wall: bool = False) -> None:
+        if ra not in rooms or rb not in rooms:
+            return
+        key = (ra, rb) if ra < rb else (rb, ra)
+        if key in seen:
+            return
+        seen.add(key)
+        open_len, open_kind = _opening_length_on_shared(openings, ra, rb)
+        if open_kind == "door" or (open_len > EDGE_EPS and open_kind != "window"):
+            kind = "door"
+        elif open_len > EDGE_EPS * 2 and open_len >= max(shared, 1.0) * WALL_PARTIAL_FRAC:
+            kind = "wall_partial"
+        elif open_len > EDGE_EPS:
+            kind = "wall_partial"
+        else:
+            kind = "wall"
+        if force_wall and kind == "wall":
+            kind = "wall"
+        edges.append(EdgeSpec(a=key[0], b=key[1], kind=kind))
+
     for i, a in enumerate(named):
         for b in named[i + 1 :]:
             ra = str(a["room_id"]).strip().lower()
             rb = str(b["room_id"]).strip().lower()
-            if ra not in rooms or rb not in rooms:
-                continue
             shared = _shared_edge_length(a, b)
-            if shared < EDGE_EPS:
-                continue
-            key = (ra, rb) if ra < rb else (rb, ra)
-            if key in seen:
-                continue
-            seen.add(key)
-            open_len, open_kind = _opening_length_on_shared(openings, ra, rb)
-            if open_kind == "door" or (open_len > EDGE_EPS and open_kind != "window"):
-                kind = "door"
-            elif open_len > EDGE_EPS * 2 and open_len >= shared * WALL_PARTIAL_FRAC:
-                kind = "wall_partial"
-            elif open_len > EDGE_EPS:
-                kind = "wall_partial"
-            else:
-                kind = "wall"
-            edges.append(EdgeSpec(a=key[0], b=key[1], kind=kind))
+            if shared >= EDGE_EPS:
+                _add_edge(ra, rb, shared)
+
+    # Nested rooms: treat the hole perimeter as a wall (or door if opening drawn).
+    for inner, outer in nested_pairs:
+        ra = str(inner["room_id"]).strip().lower()
+        rb = str(outer["room_id"]).strip().lower()
+        peri = 2.0 * (float(inner["w"]) + float(inner["h"]))
+        _add_edge(ra, rb, peri, force_wall=True)
 
     # Exterior openings with kind=door on envelope don't change edges;
     # façades already drive outdoor connections via exterior list.

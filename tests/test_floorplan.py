@@ -300,6 +300,65 @@ class FloorplanCompileTests(unittest.TestCase):
         self.assertIn("n", living0["exterior"])
         self.assertIn("e", living1["exterior"])
 
+    def test_locked_area_m2_overrides_geometry(self):
+        plan = empty_plan(name="locked", mode="free")
+        plan["meters_per_unit"] = 0.1
+        plan["envelope"] = {"type": "rect", "x": 0, "y": 0, "w": 100, "h": 60}
+        # Geometry would be 6 m × 6 m = 36 m²; lock to 20 m².
+        plan["shapes"] = [
+            {
+                "id": "s1",
+                "type": "rect",
+                "room_id": "living",
+                "label": "Living",
+                "x": 0,
+                "y": 0,
+                "w": 60,
+                "h": 60,
+                "area_locked": True,
+                "area_m2": 20.0,
+            }
+        ]
+        compiled = compile_plan(plan)
+        self.assertTrue(compiled["ok"], compiled)
+        living = next(r for r in compiled["rooms"] if r["id"] == "living")
+        self.assertAlmostEqual(living["area_m2"], 20.0, places=2)
+
+    def test_nested_room_subtracts_area_and_adds_wall(self):
+        plan = empty_plan(name="nested", mode="free")
+        plan["meters_per_unit"] = 0.1  # 10 u = 1 m
+        plan["envelope"] = {"type": "rect", "x": 0, "y": 0, "w": 100, "h": 80}
+        # Living 8×6 m = 48 m² with WC 2×2 m = 4 m² nested inside.
+        plan["shapes"] = [
+            {
+                "id": "s1",
+                "type": "rect",
+                "room_id": "living",
+                "label": "Living",
+                "x": 0,
+                "y": 0,
+                "w": 80,
+                "h": 60,
+            },
+            {
+                "id": "s2",
+                "type": "rect",
+                "room_id": "wc",
+                "label": "WC",
+                "x": 10,
+                "y": 10,
+                "w": 20,
+                "h": 20,
+            },
+        ]
+        compiled = compile_plan(plan)
+        self.assertTrue(compiled["ok"], compiled)
+        by_id = {r["id"]: r for r in compiled["rooms"]}
+        self.assertAlmostEqual(by_id["wc"]["area_m2"], 4.0, places=2)
+        self.assertAlmostEqual(by_id["living"]["area_m2"], 44.0, places=2)
+        edges = {(e["a"], e["b"], e["kind"]) for e in compiled["edges"]}
+        self.assertIn(("living", "wc", "wall"), edges)
+
 
 if __name__ == "__main__":
     unittest.main()

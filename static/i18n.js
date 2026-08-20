@@ -528,6 +528,15 @@
       "map.plan.unsaved": "Unsaved",
       "map.plan.openBtn": "Floor plan editor",
       "map.plan.openBtnTitle": "Open floor plan editor",
+      "map.plan.rooms": "Rooms",
+      "map.plan.assign": "Assign",
+      "map.plan.lockArea": "Lock area — resize only changes the ratio",
+      "map.plan.lockAreaHint":
+        "Surface fixed. Drag handles to change width/height ratio only.",
+      "map.plan.zoomIn": "Zoom in",
+      "map.plan.zoomOut": "Zoom out",
+      "map.plan.zoomReset": "Reset zoom (fit)",
+      "map.plan.snap": "Snap",
       "common.error": "Error: {error}",
     },
     fr: {
@@ -1056,6 +1065,15 @@
       "map.plan.unsaved": "Non enregistré",
       "map.plan.openBtn": "Éditeur de plan",
       "map.plan.openBtnTitle": "Ouvrir l’éditeur de plan",
+      "map.plan.rooms": "Pièces",
+      "map.plan.assign": "Attribuer",
+      "map.plan.lockArea": "Verrouiller la surface — seul le ratio change",
+      "map.plan.lockAreaHint":
+        "Surface fixe. Les poignées ne changent que le rapport largeur/hauteur.",
+      "map.plan.zoomIn": "Zoom avant",
+      "map.plan.zoomOut": "Zoom arrière",
+      "map.plan.zoomReset": "Réinitialiser le zoom",
+      "map.plan.snap": "Magnétisme",
       "common.error": "Erreur : {error}",
     },
   };

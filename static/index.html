@@ -700,12 +700,21 @@
           </div>
           <div class="plan-editor-tools" id="plan-editor-tools" hidden></div>
           <div class="plan-editor-body">
-            <svg
-              id="plan-editor-svg"
-              class="plan-editor-svg"
-              role="img"
-              aria-label="Floor plan editor"
-            ></svg>
+            <div class="plan-editor-canvas">
+              <svg
+                id="plan-editor-svg"
+                class="plan-editor-svg"
+                role="img"
+                aria-label="Floor plan editor"
+              ></svg>
+              <div class="plan-zoom-bar" role="group" aria-label="Zoom">
+                <button type="button" id="plan-zoom-out" title="Zoom out" data-i18n-title="map.plan.zoomOut">−</button>
+                <button type="button" id="plan-zoom-reset" title="Reset zoom" data-i18n-title="map.plan.zoomReset">
+                  <span id="plan-zoom-label">100%</span>
+                </button>
+                <button type="button" id="plan-zoom-in" title="Zoom in" data-i18n-title="map.plan.zoomIn">+</button>
+              </div>
+            </div>
             <aside class="plan-editor-props" id="plan-editor-props" hidden></aside>
           </div>
           <p class="status" id="plan-editor-status" aria-live="polite"></p>
