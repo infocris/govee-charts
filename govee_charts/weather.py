@@ -262,23 +262,27 @@ def simulate_window_strategy(
     open_tau_hours: float,
     goal: str,
     open_outdoor_future: list[dict[str, Any]] | None = None,
+    target_temp_c: float | None = None,
 ) -> tuple[list[float], list[str]]:
-    """Greedy open/close policy that min or max indoor temperature each step.
+    """Greedy open/close policy that min, max, or track a target indoor temp.
 
     At every forecast hour, both RC steps (windows open vs closed) are evaluated
-    from the current indoor state; the action that yields the cooler (``goal=min``)
-    or warmer (``goal=max``) temperature is kept. Ties keep the previous state
-    (default closed).
+    from the current indoor state; the action that yields the cooler (``goal=min``),
+    warmer (``goal=max``), or closer-to-target (``goal=target``) temperature is
+    kept. Ties keep the previous state (default closed).
     """
     goal_l = str(goal or "min").strip().lower()
-    if goal_l not in {"min", "max"}:
-        raise ValueError("goal must be 'min' or 'max'")
+    if goal_l not in {"min", "max", "target"}:
+        raise ValueError("goal must be 'min', 'max', or 'target'")
+    if goal_l == "target" and target_temp_c is None:
+        raise ValueError("target_temp_c is required when goal='target'")
     closed_tau_s = max(1e-3, float(closed_tau_hours)) * 3600.0
     open_tau_s = max(1e-3, float(open_tau_hours)) * 3600.0
     open_series = open_outdoor_future if open_outdoor_future is not None else outdoor_future
     open_by_ts = {
         float(p["ts"]): float(p["temperature_c"]) for p in open_series
     }
+    target = float(target_temp_c) if target_temp_c is not None else None
 
     t = float(t0)
     prev_ts = float(ts0)
@@ -298,6 +302,16 @@ def simulate_window_strategy(
             if t_open > t_closed + 1e-6:
                 pick_open = True
             elif t_closed > t_open + 1e-6:
+                pick_open = False
+            else:
+                pick_open = prev_state == "open"
+        elif goal_l == "target":
+            assert target is not None
+            err_open = abs(t_open - target)
+            err_closed = abs(t_closed - target)
+            if err_open < err_closed - 1e-6:
+                pick_open = True
+            elif err_closed < err_open - 1e-6:
                 pick_open = False
             else:
                 pick_open = prev_state == "open"
@@ -402,6 +416,7 @@ def build_window_scenarios(
     open_source: str = "default",
     anchor_ts: float | None = None,
     open_outdoor_future: list[dict[str, Any]] | None = None,
+    target_temp_c: float | None = None,
 ) -> dict[str, Any]:
     """
     What-if indoor temperatures driven only by outdoor forecast.
@@ -412,6 +427,7 @@ def build_window_scenarios(
       so solar bias is not double-counted with a meteo-calibrated delta
     - strategy_coolest / strategy_warmest: greedy hourly open/close policy
       that minimises or maximises indoor temperature (includes opening_plan)
+    - strategy_target: greedy policy toward ``target_temp_c`` when set
     """
     closed_tau = max(1e-3, float(closed_tau_hours))
     open_tau = max(1e-3, float(open_tau_hours))
@@ -499,7 +515,7 @@ def build_window_scenarios(
             for p, st in zip(outdoor_future, states)
         ]
 
-    return {
+    out: dict[str, Any] = {
         "windows_closed": _pack(
             closed_temps,
             outdoor_future,
@@ -531,6 +547,31 @@ def build_window_scenarios(
             opening_plan=_plan(warm_states),
         ),
     }
+    if target_temp_c is not None:
+        tgt = float(target_temp_c)
+        tgt_temps, tgt_states = simulate_window_strategy(
+            outdoor_future,
+            t0=t0,
+            ts0=ts0,
+            closed_delta=float(closed_delta),
+            closed_tau_hours=closed_tau,
+            open_delta=eff_open_delta,
+            open_tau_hours=open_tau,
+            goal="target",
+            open_outdoor_future=open_series if use_facade else None,
+            target_temp_c=tgt,
+        )
+        packed_tgt = _pack(
+            tgt_temps,
+            outdoor_future,
+            closed_delta,
+            closed_tau,
+            "greedy_target",
+            opening_plan=_plan(tgt_states),
+        )
+        packed_tgt["target_temp_c"] = round(tgt, 2)
+        out["strategy_target"] = packed_tgt
+    return out
 
 
 def _opening_state_at(
@@ -1176,6 +1217,7 @@ class WeatherService:
         *,
         now: float,
         until: float,
+        target_temp_c: float | None = None,
     ) -> dict[str, dict[str, Any]] | None:
         """Multi-room RC when apartment layout + enough mapped sensors."""
         layout = self.apartment
@@ -1373,6 +1415,7 @@ class WeatherService:
                     open_source=open_source,
                     anchor_ts=now,
                     open_outdoor_future=open_outdoor,
+                    target_temp_c=target_temp_c,
                 ),
             }
 
@@ -1386,6 +1429,7 @@ class WeatherService:
         *,
         now: float,
         until: float,
+        target_temp_c: float | None = None,
     ) -> dict[str, Any] | None:
         addr = str(device.get("address") or "").upper()
         last_ts = device.get("last_reading_ts") or device.get("last_seen")
@@ -1580,6 +1624,7 @@ class WeatherService:
                     open_source=str(open_fit["source"]),
                     anchor_ts=now,
                     open_outdoor_future=open_outdoor,
+                    target_temp_c=target_temp_c,
                 )
                 result["opening_state"] = current_open
                 result["opening_samples"] = {
@@ -1600,6 +1645,7 @@ class WeatherService:
                     closed_tau_hours=float(closed_tau),
                     anchor_ts=now,
                     open_outdoor_future=open_outdoor,
+                    target_temp_c=target_temp_c,
                 )
         return result
 
@@ -1612,6 +1658,7 @@ class WeatherService:
         addresses: list[str] | None = None,
         latitude: float | None = None,
         longitude: float | None = None,
+        target_temp_c: float | None = None,
     ) -> dict[str, Any]:
         past_h = max(1.0 / 60.0, min(float(FORECAST_MAX_HOURS), float(hours)))
         if future_hours is None:
@@ -1685,6 +1732,7 @@ class WeatherService:
             forecast["outdoor"],
             now=now,
             until=until,
+            target_temp_c=target_temp_c,
         )
         covered: set[str] = set()
         if network_proj:
@@ -1701,6 +1749,7 @@ class WeatherService:
                 forecast["outdoor"],
                 now=now,
                 until=until,
+                target_temp_c=target_temp_c,
             )
             if proj is not None:
                 projections[addr] = proj
@@ -1723,6 +1772,11 @@ class WeatherService:
             "projections": projections,
             "apartment": apt_meta,
             "station": station,
+            "target_temp_c": (
+                round(float(target_temp_c), 2)
+                if target_temp_c is not None
+                else None
+            ),
         }
 
 

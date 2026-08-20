@@ -59,6 +59,7 @@
   const viewSettings = document.getElementById("view-settings");
   const settingsLocaleEl = document.getElementById("settings-locale");
   const settingsAdviceModelEl = document.getElementById("settings-advice-model");
+  const settingsTargetTempEl = document.getElementById("settings-target-temp");
   const settingsStationsEl = document.getElementById("settings-stations");
   const settingsStationsEmptyEl = document.getElementById(
     "settings-stations-empty"
@@ -269,6 +270,7 @@
   const gitPullBtn = document.getElementById("git-pull-btn");
   const restartUiBtn = document.getElementById("restart-ui-btn");
   const restartWorkersBtn = document.getElementById("restart-workers-btn");
+  const restartAllBtn = document.getElementById("restart-all-btn");
   const restartStatusEl = document.getElementById("restart-status");
   const widgetMetricEl = document.getElementById("widget-metric");
   const widgetPastEl = document.getElementById("widget-past");
@@ -425,6 +427,8 @@
   const MAP_CHAT_SESSION_KEY = "govee-charts.mapChatSession";
   const GEO_KEY = "govee-charts.geo";
   const ADVICE_MODEL_KEY = "govee-charts.adviceModel";
+  const TARGET_TEMP_KEY = "govee-charts.targetTempC";
+  const DEFAULT_TARGET_TEMP_C = 24;
 
   function getAdviceModel() {
     return localStorage.getItem(ADVICE_MODEL_KEY) === "v2" ? "v2" : "v1";
@@ -434,6 +438,39 @@
     const v = model === "v2" ? "v2" : "v1";
     localStorage.setItem(ADVICE_MODEL_KEY, v);
     return v;
+  }
+
+  function getTargetTempC() {
+    const raw = localStorage.getItem(TARGET_TEMP_KEY);
+    if (raw == null || raw === "") return DEFAULT_TARGET_TEMP_C;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return DEFAULT_TARGET_TEMP_C;
+    return Math.min(30, Math.max(16, Math.round(n * 2) / 2));
+  }
+
+  function setTargetTempC(value) {
+    const n = Number(value);
+    const v = Number.isFinite(n)
+      ? Math.min(30, Math.max(16, Math.round(n * 2) / 2))
+      : DEFAULT_TARGET_TEMP_C;
+    localStorage.setItem(TARGET_TEMP_KEY, String(v));
+    return v;
+  }
+
+  /** Attach browser target temperature to apartment / forecast query params. */
+  function appendTargetTempParam(params) {
+    params.set("target_temp_c", String(getTargetTempC()));
+    return params;
+  }
+
+  function invalidateApartmentAdviceCache() {
+    if (
+      networkLastData &&
+      Object.prototype.hasOwnProperty.call(networkLastData, "window_advice_v2")
+    ) {
+      delete networkLastData.window_advice_v2;
+      delete networkLastData.airflow_v2;
+    }
   }
   const CAT_FILTER_KEY = "govee-charts.catFilters";
   const CHART_HEIGHT_KEY = "govee-charts.chartHeight";
@@ -913,7 +950,9 @@
   function loadProjectionScenario() {
     const raw = localStorage.getItem(PROJECTION_SCENARIO_KEY) || "closed";
     if (
-      ["auto", "closed", "open", "both", "coolest", "warmest"].includes(raw)
+      ["auto", "closed", "open", "both", "coolest", "warmest", "target"].includes(
+        raw
+      )
     ) {
       return raw;
     }
@@ -5446,6 +5485,7 @@
       params.set("latitude", String(browserGeo.latitude));
       params.set("longitude", String(browserGeo.longitude));
     }
+    appendTargetTempParam(params);
     const res = await fetch(`/api/apartment?${params}`);
     if (!res.ok) throw new Error(`apartment HTTP ${res.status}`);
     const data = await res.json();
@@ -5464,6 +5504,7 @@
       params.set("latitude", String(browserGeo.latitude));
       params.set("longitude", String(browserGeo.longitude));
     }
+    appendTargetTempParam(params);
     const res = await fetch(`/api/apartment?${params}`);
     if (!res.ok) throw new Error(`apartment HTTP ${res.status}`);
     const data = await res.json();
@@ -9054,8 +9095,13 @@
             })
             .join(", ")}`
         : "";
+      const plan = data.active_plan;
+      const planBit = plan
+        ? ` · plan “${plan.name || plan.id}” (${plan.mode})`
+        : "";
       networkMetaEl.textContent =
         `${rooms.length} rooms · ${edges.length} links` +
+        planBit +
         (openDoors ? ` · ${openDoors} contact open` : "") +
         (coupledLinks ? ` · ${coupledLinks} thermally coupled` : "") +
         (openWindows ? ` · ${openWindows} window(s) open` : "") +
@@ -9505,6 +9551,10 @@
             (scenarios.strategy_warmest &&
               scenarios.strategy_warmest.points) ||
             [];
+          const targetPts =
+            (scenarios.strategy_target &&
+              scenarios.strategy_target.points) ||
+            [];
           const showAuto = projectionScenario === "auto";
           const showClosed =
             projectionScenario === "closed" || projectionScenario === "both";
@@ -9512,6 +9562,7 @@
             projectionScenario === "open" || projectionScenario === "both";
           const showCoolest = projectionScenario === "coolest";
           const showWarmest = projectionScenario === "warmest";
+          const showTarget = projectionScenario === "target";
           if (showAuto && (rp.points || []).length) {
             datasets.push(
               makeDataset(
@@ -9564,6 +9615,17 @@
                 warmPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
                 false,
                 { borderDash: [4, 2, 1, 2], borderWidth: 1.75 }
+              )
+            );
+          }
+          if (showTarget && targetPts.length) {
+            datasets.push(
+              makeDataset(
+                `${labelBase} (toward ${getTargetTempC().toFixed(1)} °C)`,
+                color,
+                targetPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [3, 2, 1, 2], borderWidth: 1.85 }
               )
             );
           }
@@ -9880,23 +9942,61 @@
   }
 
   /**
-   * open  = outdoor cooler and dew point low enough
-   * close = outdoor warmer
-   * humid = outdoor cooler but dew point too high
-   * null  = near balance
+   * open  = outdoor helps toward target (or cooler when no target / cool mode)
+   * close = outdoor pulls away from target (or warmer in legacy cool-only)
+   * humid = cool-mode open blocked by high dew point
+   * null  = near balance / no strong action
    */
-  function windowAdviceKind(tin, text, rhOut, thresholdC) {
+  function windowAdviceKind(tin, text, rhOut, thresholdC, targetTempC) {
     if (tin == null || text == null) return null;
-    const d = tin - text;
-    if (d <= -thresholdC) return "close";
-    if (d >= thresholdC) {
+    const d = tin - text; // positive ⇒ outdoor cooler
+    const thr = thresholdC;
+
+    function humidOrOpen() {
       if (rhOut != null && rhOut > 0) {
         const dewOut = dewPoint(text, rhOut);
         if (dewOut >= tin - WINDOW_DEW_MARGIN_C) return "humid";
       }
       return "open";
     }
+
+    if (targetTempC == null || !Number.isFinite(Number(targetTempC))) {
+      if (d <= -thr) return "close";
+      if (d >= thr) return humidOrOpen();
+      return null;
+    }
+
+    const target = Number(targetTempC);
+    const err = tin - target; // positive ⇒ too hot
+    if (Math.abs(err) <= thr) {
+      if (err >= 0 && d <= -thr) return "close";
+      if (err <= 0 && d >= thr) return "close";
+      return null;
+    }
+    if (err > thr) {
+      if (d >= thr) return humidOrOpen();
+      if (d <= -thr) return "close";
+      return null;
+    }
+    // Need heating.
+    if (d <= -thr) return "open";
+    if (d >= thr) return "close";
     return null;
+  }
+
+  function climateGoal(tin, targetTempC, thresholdC) {
+    if (
+      tin == null ||
+      targetTempC == null ||
+      !Number.isFinite(Number(targetTempC))
+    ) {
+      return "cool";
+    }
+    const err = Number(tin) - Number(targetTempC);
+    const thr = thresholdC != null ? thresholdC : WINDOW_DELTA_C;
+    if (err > thr) return "cool";
+    if (err < -thr) return "heat";
+    return "hold";
   }
 
   /**
@@ -9907,6 +10007,10 @@
     if (!indoorSeries.length || !outdoorPoints.length) return [];
     const exterior = (windOpts && windOpts.exterior) || null;
     const allExterior = (windOpts && windOpts.allExterior) || exterior;
+    const targetTempC =
+      windOpts && windOpts.targetTempC != null
+        ? windOpts.targetTempC
+        : getTargetTempC();
     const samples = [];
     for (const p of outdoorPoints) {
       const indoor = nearestIndoor(indoorSeries, p.ts, WINDOW_ALIGN_GAP_S);
@@ -9915,7 +10019,8 @@
         indoor.t,
         p.temperature_c,
         p.humidity,
-        thresholdC
+        thresholdC,
+        targetTempC
       );
       let vent = null;
       if (exterior && exterior.length) {
@@ -9979,16 +10084,35 @@
     localStorage.setItem(WINDOW_NOTIFY_STATE_KEY, JSON.stringify(state));
   }
 
-  function windowAdviceMessage(kind, label, tin, text) {
+  function windowAdviceMessage(kind, label, tin, text, goal) {
     const dIn = tin != null ? tin.toFixed(1) : "?";
     const dOut = text != null ? text.toFixed(1) : "?";
+    const target = getTargetTempC().toFixed(1);
     if (kind === "open") {
+      if (goal === "heat") {
+        return {
+          title: t("notify.openHeatTitle", { label }),
+          body: t("notify.openHeatBody", { out: dOut, in: dIn, target }),
+        };
+      }
+      if (goal === "cool") {
+        return {
+          title: t("notify.openCoolTitle", { label }),
+          body: t("notify.openCoolBody", { out: dOut, in: dIn, target }),
+        };
+      }
       return {
         title: t("notify.openTitle", { label }),
         body: t("notify.openBody", { out: dOut, in: dIn }),
       };
     }
     if (kind === "close") {
+      if (goal === "heat" || (goal === "hold" && text != null && tin != null && text < tin)) {
+        return {
+          title: t("notify.closeTitle", { label }),
+          body: t("notify.closeCoolBody", { out: dOut, in: dIn, target }),
+        };
+      }
       return {
         title: t("notify.closeTitle", { label }),
         body: t("notify.closeBody", { out: dOut, in: dIn }),
@@ -10067,6 +10191,9 @@
     const okClosed = [];
     const openContactNames = [];
     let humidBias = false;
+    let heatBias = false;
+    let coolBias = false;
+    const target = getTargetTempC();
 
     for (const [room, device] of rooms) {
       const openings = roomOpeningState(room);
@@ -10078,8 +10205,12 @@
         tin,
         text,
         outdoorNow.humidity,
-        WINDOW_DELTA_C
+        WINDOW_DELTA_C,
+        target
       );
+      const goal = climateGoal(tin, target, WINDOW_DELTA_C);
+      if (goal === "heat") heatBias = true;
+      if (goal === "cool") coolBias = true;
       const label = roomDisplayName(room, device);
       for (const name of openings.openNames) {
         if (!openContactNames.includes(name)) openContactNames.push(name);
@@ -10140,18 +10271,46 @@
       title = t("banner.closeTitle", { rooms: join(closeNow) });
       detail = humidBias
         ? t("banner.closeHumid", { climate: climateBit, open: openBit })
-        : t("banner.closeWarm", { climate: climateBit, open: openBit });
+        : heatBias && !coolBias
+          ? t("banner.closeCool", { climate: climateBit, open: openBit })
+          : t("banner.closeWarm", { climate: climateBit, open: openBit });
       if (openNow.length) {
         detail = `${detail}${t("banner.alsoOpen", { rooms: join(openNow) })}`;
       }
     } else if (openNow.length) {
       tone = "open";
-      title = t("banner.openTitle", { rooms: join(openNow) });
-      detail = t("banner.openDetail", { climate: climateBit, open: openBit });
+      const targetStr = target.toFixed(1);
+      if (heatBias && !coolBias) {
+        title = t("banner.openHeatTitle", { rooms: join(openNow) });
+        detail = t("banner.openHeatDetail", {
+          climate: climateBit,
+          open: openBit,
+          target: targetStr,
+        });
+      } else {
+        title = t("banner.openCoolTitle", { rooms: join(openNow) });
+        detail = t("banner.openCoolDetail", {
+          climate: climateBit,
+          open: openBit,
+          target: targetStr,
+        });
+      }
     } else if (okOpen.length) {
       tone = "ok";
       title = t("banner.okOpenTitle", { rooms: join(okOpen) });
-      detail = t("banner.okOpenDetail", { climate: climateBit, open: openBit });
+      const targetStr = target.toFixed(1);
+      detail =
+        heatBias && !coolBias
+          ? t("banner.okOpenHeatDetail", {
+              climate: climateBit,
+              open: openBit,
+              target: targetStr,
+            })
+          : t("banner.okOpenCoolDetail", {
+              climate: climateBit,
+              open: openBit,
+              target: targetStr,
+            });
       if (okClosed.length) {
         detail = `${detail}${t("banner.closedOk", { rooms: join(okClosed) })}`;
       }
@@ -10179,7 +10338,10 @@
     if (apartmentAdviceInflight) return apartmentAdviceInflight;
     apartmentAdviceInflight = (async () => {
       try {
-        const res = await fetch("/api/apartment?hours=1");
+        const params = appendTargetTempParam(
+          new URLSearchParams({ hours: "1" })
+        );
+        const res = await fetch(`/api/apartment?${params}`);
         if (!res.ok) return networkLastData;
         const data = await res.json();
         networkLastData = data;
@@ -10282,24 +10444,54 @@
     let tone = "idle";
     let title = t("banner.noAction");
     let detail = t("banner.tempsClose", { climate: climateBit, open: openBit });
+    const target =
+      wa.target_temp_c != null ? Number(wa.target_temp_c) : getTargetTempC();
+    const targetStr = Number.isFinite(target) ? target.toFixed(1) : "—";
+    const mode = wa.mode || "";
+    const heatMode = mode === "heating";
 
     if (closeNow.length) {
       tone = wa.humid ? "humid" : "close";
       title = t("banner.closeTitle", { rooms: join(closeNow) });
       detail = wa.humid
         ? t("banner.closeHumid", { climate: climateBit, open: openBit })
-        : t("banner.closeWarm", { climate: climateBit, open: openBit });
+        : heatMode
+          ? t("banner.closeCool", { climate: climateBit, open: openBit })
+          : t("banner.closeWarm", { climate: climateBit, open: openBit });
       if (openNow.length) {
         detail = `${detail}${t("banner.alsoOpen", { rooms: join(openNow) })}`;
       }
     } else if (openNow.length) {
       tone = "open";
-      title = t("banner.openTitle", { rooms: join(openNow) });
-      detail = t("banner.openDetail", { climate: climateBit, open: openBit });
+      if (heatMode) {
+        title = t("banner.openHeatTitle", { rooms: join(openNow) });
+        detail = t("banner.openHeatDetail", {
+          climate: climateBit,
+          open: openBit,
+          target: targetStr,
+        });
+      } else {
+        title = t("banner.openCoolTitle", { rooms: join(openNow) });
+        detail = t("banner.openCoolDetail", {
+          climate: climateBit,
+          open: openBit,
+          target: targetStr,
+        });
+      }
     } else if (okOpen.length) {
       tone = "ok";
       title = t("banner.okOpenTitle", { rooms: join(okOpen) });
-      detail = t("banner.okOpenDetail", { climate: climateBit, open: openBit });
+      detail = heatMode
+        ? t("banner.okOpenHeatDetail", {
+            climate: climateBit,
+            open: openBit,
+            target: targetStr,
+          })
+        : t("banner.okOpenCoolDetail", {
+            climate: climateBit,
+            open: openBit,
+            target: targetStr,
+          });
       if (okClosed.length) {
         detail = `${detail}${t("banner.closedOk", { rooms: join(okClosed) })}`;
       }
@@ -11210,7 +11402,8 @@
         tin,
         text,
         outdoorNow.humidity,
-        WINDOW_DELTA_C
+        WINDOW_DELTA_C,
+        getTargetTempC()
       );
       const key = room;
       const prev = state[key] || {};
@@ -11246,7 +11439,8 @@
       }
 
       const label = deviceLabel(device);
-      const msg = windowAdviceMessage(kind, label, tin, text);
+      const goal = climateGoal(tin, getTargetTempC(), WINDOW_DELTA_C);
+      const msg = windowAdviceMessage(kind, label, tin, text, goal);
       if (msg) {
         sendWindowNotification(msg.title, msg.body, `govee-window-${key}`);
       } else if (prevKind === "open" || prevKind === "close" || prevKind === "humid") {
@@ -11319,7 +11513,8 @@
       }
 
       const label = row.label || row.id || key;
-      const msg = windowAdviceMessage(kind, label, tin, text);
+      const goal = climateGoal(tin, getTargetTempC(), WINDOW_DELTA_C);
+      const msg = windowAdviceMessage(kind, label, tin, text, goal);
       if (msg) {
         sendWindowNotification(msg.title, msg.body, `govee-window-${key}`);
       } else if (prevKind === "open" || prevKind === "close" || prevKind === "humid") {
@@ -11556,7 +11751,8 @@
   async function ensureApartmentRooms() {
     if (apartmentLastRooms && apartmentLastRooms.length) return;
     try {
-      const res = await fetch("/api/apartment?hours=1");
+      const params = appendTargetTempParam(new URLSearchParams({ hours: "1" }));
+      const res = await fetch(`/api/apartment?${params}`);
       if (!res.ok) return;
       const data = await res.json();
       if (data && data.rooms) apartmentLastRooms = data.rooms;
@@ -11910,6 +12106,20 @@
           scenarioTxt =
             ` · warmest ${Number(warm.summary.temp_min).toFixed(1)}–${Number(warm.summary.temp_max).toFixed(1)} °C${openH}`;
         }
+      } else if (projectionScenario === "target") {
+        const tgt = scenarios.strategy_target;
+        if (tgt && tgt.summary) {
+          const openH =
+            tgt.summary.hours_open != null
+              ? ` · ${tgt.summary.hours_open}h open`
+              : "";
+          const tStar =
+            tgt.target_temp_c != null
+              ? Number(tgt.target_temp_c).toFixed(1)
+              : getTargetTempC().toFixed(1);
+          scenarioTxt =
+            ` · toward ${tStar} °C ${Number(tgt.summary.temp_min).toFixed(1)}–${Number(tgt.summary.temp_max).toFixed(1)} °C${openH}`;
+        }
       }
       cards.push(`
         <article class="projection-card" style="--device-color:${colorFor(device.address)}">
@@ -11969,6 +12179,7 @@
       params.set("latitude", String(browserGeo.latitude));
       params.set("longitude", String(browserGeo.longitude));
     }
+    appendTargetTempParam(params);
     const res = await fetch(`/api/forecast?${params}`);
     if (!res.ok) throw new Error(`forecast HTTP ${res.status}`);
     return res.json();
@@ -13372,6 +13583,7 @@
           projectionScenario === "open" || projectionScenario === "both";
         const showCoolest = projectionScenario === "coolest";
         const showWarmest = projectionScenario === "warmest";
+        const showTarget = projectionScenario === "target";
         for (const { device } of results) {
           const proj = projections[device.address];
           if (!proj) continue;
@@ -13388,6 +13600,10 @@
           const warmPts =
             (scenarios.strategy_warmest &&
               scenarios.strategy_warmest.points) ||
+            [];
+          const targetPts =
+            (scenarios.strategy_target &&
+              scenarios.strategy_target.points) ||
             [];
 
           if (showAuto && (proj.points || []).length) {
@@ -13470,6 +13686,17 @@
                 warmPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
                 false,
                 { borderDash: [4, 2, 1, 2], borderWidth: 1.75 }
+              )
+            );
+          }
+          if (showTarget && targetPts.length) {
+            tempDatasets.push(
+              makeDataset(
+                `${deviceLabel(device)} (toward ${getTargetTempC().toFixed(1)} °C)`,
+                color,
+                targetPts.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+                false,
+                { borderDash: [3, 2, 1, 2], borderWidth: 1.85 }
               )
             );
           }
@@ -13678,9 +13905,14 @@
         const bannerPromise = updateWindowBanner(null);
         if (windowNotify) {
           if (!apartmentLastRooms) {
-            fetch("/api/apartment?hours=1")
-              .then((r) => r.ok ? r.json() : null)
-              .then((d) => { if (d && d.rooms) apartmentLastRooms = d.rooms; })
+            const params = appendTargetTempParam(
+              new URLSearchParams({ hours: "1" })
+            );
+            fetch(`/api/apartment?${params}`)
+              .then((r) => (r.ok ? r.json() : null))
+              .then((d) => {
+                if (d && d.rooms) apartmentLastRooms = d.rooms;
+              })
               .catch(() => {});
           }
           await evaluateWindowNotifications(null);
@@ -15575,6 +15807,86 @@
     });
   }
 
+  if (restartAllBtn) {
+    restartAllBtn.addEventListener("click", async () => {
+      if (!window.confirm(t("nav.restartAllConfirm"))) return;
+      const buttons = [
+        gitPullBtn,
+        restartUiBtn,
+        restartWorkersBtn,
+        restartAllBtn,
+      ].filter(Boolean);
+      for (const btn of buttons) btn.disabled = true;
+      if (restartStatusEl) {
+        restartStatusEl.hidden = false;
+        restartStatusEl.textContent = "Pulling…";
+      }
+      try {
+        const pullRes = await fetch("/api/git/pull", { method: "POST" });
+        const pullData = await pullRes.json().catch(() => ({}));
+        if (!pullRes.ok) {
+          const detail =
+            typeof pullData.detail === "string"
+              ? pullData.detail
+              : pullData.message || `HTTP ${pullRes.status}`;
+          throw new Error(detail);
+        }
+        if (restartStatusEl) {
+          restartStatusEl.textContent = pullData.changed
+            ? `${pullData.message || "Pull complete."} Restarting workers…`
+            : `${pullData.message || "Already up to date."} Restarting workers…`;
+        }
+
+        try {
+          const wRes = await fetch("/api/restart?target=workers", {
+            method: "POST",
+          });
+          const wData = await wRes.json().catch(() => ({}));
+          if (!wRes.ok) {
+            throw new Error(wData.detail || `Workers HTTP ${wRes.status}`);
+          }
+          if (restartStatusEl) {
+            restartStatusEl.textContent =
+              (wData.message || "Workers restarting…") + " Waiting…";
+          }
+          await waitForWorkers(30000);
+        } catch (wErr) {
+          console.warn("[restart-all] workers:", wErr);
+          if (restartStatusEl) {
+            restartStatusEl.textContent = `Workers: ${wErr.message} — restarting UI…`;
+          }
+        }
+
+        if (restartStatusEl) {
+          restartStatusEl.textContent = "Restarting UI…";
+        }
+        try {
+          await fetch("/api/restart?target=ui", { method: "POST" });
+        } catch (_) {
+          /* process may die before responding */
+        }
+        const ok = await waitForHealth();
+        if (ok) {
+          if (restartStatusEl) {
+            restartStatusEl.textContent = "Back online — reloading…";
+          }
+          hardReload();
+          return;
+        }
+        if (restartStatusEl) {
+          restartStatusEl.textContent =
+            "UI did not come back — if not under systemd, start it manually.";
+        }
+      } catch (err) {
+        if (restartStatusEl) {
+          restartStatusEl.textContent = `Restart all failed: ${err.message}`;
+        }
+      } finally {
+        for (const btn of buttons) btn.disabled = false;
+      }
+    });
+  }
+
   updateGeoStatus();
 
   if (backfillPauseBtn) {
@@ -16085,15 +16397,36 @@
     settingsAdviceModelEl.value = getAdviceModel();
     settingsAdviceModelEl.addEventListener("change", () => {
       setAdviceModel(settingsAdviceModelEl.value);
+      invalidateApartmentAdviceCache();
       if (networkLastData) renderNetwork(networkLastData);
       updateWindowBanner(null).catch((err) => console.warn(err));
       evaluateWindowNotifications(null).catch((err) => console.warn(err));
     });
   }
 
+  if (settingsTargetTempEl) {
+    settingsTargetTempEl.value = String(getTargetTempC());
+    const onTargetChange = () => {
+      const v = setTargetTempC(settingsTargetTempEl.value);
+      settingsTargetTempEl.value = String(v);
+      invalidateApartmentAdviceCache();
+      updateWindowBanner(null).catch((err) => console.warn(err));
+      evaluateWindowNotifications(null).catch((err) => console.warn(err));
+      if (currentView === "network") {
+        loadNetwork().catch((err) => console.warn(err));
+      } else if (currentView === "facades") {
+        loadFacades().catch((err) => console.warn(err));
+      } else if (currentView === "compare") {
+        loadHistory().catch((err) => console.warn(err));
+      }
+    };
+    settingsTargetTempEl.addEventListener("change", onTargetChange);
+  }
+
   function refreshLocaleDependentUi() {
     if (settingsLocaleEl) settingsLocaleEl.value = I18n.getLocale();
     if (settingsAdviceModelEl) settingsAdviceModelEl.value = getAdviceModel();
+    if (settingsTargetTempEl) settingsTargetTempEl.value = String(getTargetTempC());
     applyChartHeight(chartHeight, { persist: false });
     syncTtsBtn();
     syncWindowNotifyBtn();
@@ -16149,4 +16482,24 @@
   setView(currentView, { url: "replace" });
   refresh();
   setInterval(refresh, 30000);
+
+  if (window.GoveePlanEditor && typeof window.GoveePlanEditor.init === "function") {
+    window.GoveePlanEditor.init({
+      onLayoutChanged: () =>
+        loadNetwork().catch((err) => {
+          if (networkStatusEl) {
+            networkStatusEl.textContent = `Error: ${err.message}`;
+          }
+        }),
+    });
+  }
+
+  const planEditorOpenBtn = document.getElementById("plan-editor-open-btn");
+  const foldPlanEditorEl = document.getElementById("fold-plan-editor");
+  if (planEditorOpenBtn && foldPlanEditorEl) {
+    planEditorOpenBtn.addEventListener("click", () => {
+      foldPlanEditorEl.open = true;
+      foldPlanEditorEl.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
 })();

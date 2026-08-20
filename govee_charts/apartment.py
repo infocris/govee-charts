@@ -580,21 +580,54 @@ def advice_kind_v2(
     station_c: float | None = None,
     rh_out: float | None = None,
     threshold_c: float = ADVICE_V2_DELTA_C,
+    target_temp_c: float | None = None,
 ) -> str | None:
-    """open / close / humid / None (near balance), using air-at-window."""
+    """open / close / humid / None (near balance), using air-at-window.
+
+    Without ``target_temp_c``: legacy cool-only (open when outdoor is cooler).
+    With a target: cool when indoor is above target, heat when below, hold near
+    target (close only if outdoor would pull away).
+    """
     if tin is None or twindow is None:
         return None
-    d = float(tin) - float(twindow)
+    d = float(tin) - float(twindow)  # positive ⇒ outdoor cooler
     thr = float(threshold_c)
-    if d <= -thr:
-        return "close"
-    if d >= thr:
+
+    def _humid_or_open() -> str:
         t_dew_src = station_c if station_c is not None else twindow
         if rh_out is not None and float(rh_out) > 0:
             dew = dew_point_c(t_dew_src, float(rh_out))
             if dew is not None and dew >= float(tin) - ADVICE_V2_DEW_MARGIN_C:
                 return "humid"
         return "open"
+
+    if target_temp_c is None:
+        if d <= -thr:
+            return "close"
+        if d >= thr:
+            return _humid_or_open()
+        return None
+
+    err = float(tin) - float(target_temp_c)  # positive ⇒ too hot
+    if abs(err) <= thr:
+        # Near target: close if outdoor would pull away.
+        if err >= 0 and d <= -thr:
+            return "close"
+        if err <= 0 and d >= thr:
+            return "close"
+        return None
+    if err > thr:
+        # Need cooling.
+        if d >= thr:
+            return _humid_or_open()
+        if d <= -thr:
+            return "close"
+        return None
+    # Need heating (err < -thr).
+    if d <= -thr:
+        return "open"
+    if d >= thr:
+        return "close"
     return None
 
 
@@ -627,6 +660,7 @@ def advise_climate_v2(
     outdoor_temp_c: float | None = None,
     outdoor_humidity: float | None = None,
     hvac: dict[str, Any] | None = None,
+    target_temp_c: float | None = None,
 ) -> dict[str, Any]:
     """Per-room open/close advice using façade air and HVAC isolation."""
     outdoor = None
@@ -641,6 +675,12 @@ def advise_climate_v2(
             rh = float(outdoor_humidity)
         except (TypeError, ValueError):
             rh = None
+    target = None
+    if target_temp_c is not None:
+        try:
+            target = float(target_temp_c)
+        except (TypeError, ValueError):
+            target = None
     dew = dew_point_c(outdoor, rh) if outdoor is not None and rh is not None else None
     hvac_id = _hvac_room_id(hvac)
     hvac_door_open = bool(hvac_id and _hvac_door_open(edges, hvac_id))
@@ -651,15 +691,25 @@ def advise_climate_v2(
     ok_closed: list[dict[str, str]] = []
     humid = False
     room_rows: list[dict[str, Any]] = []
+    indoor_temps: list[float] = []
 
     for room in rooms:
+        tin_live = _room_live_temp(room)
+        if tin_live is not None:
+            indoor_temps.append(tin_live)
         if not list(room.get("exterior") or []):
             continue
         rid = str(room.get("id") or "")
         label = str(room.get("label") or rid)
-        tin = _room_live_temp(room)
+        tin = tin_live
         twindow, wsrc = room_window_air_c(room, outdoor)
-        kind = advice_kind_v2(tin, twindow, station_c=outdoor, rh_out=rh)
+        kind = advice_kind_v2(
+            tin,
+            twindow,
+            station_c=outdoor,
+            rh_out=rh,
+            target_temp_c=target,
+        )
         if hvac_id and kind == "open":
             kind = "close"
         win = str(room.get("window_state") or "")
@@ -721,10 +771,21 @@ def advise_climate_v2(
     else:
         tone = "idle"
 
+    indoor_avg = (
+        round(sum(indoor_temps) / len(indoor_temps), 2) if indoor_temps else None
+    )
+    thr = ADVICE_V2_DELTA_C
     if hvac_id:
         mode = "hvac_isolate"
     elif open_rooms or ok_open:
-        mode = "cooling"
+        if (
+            target is not None
+            and indoor_avg is not None
+            and indoor_avg < target - thr
+        ):
+            mode = "heating"
+        else:
+            mode = "cooling"
     else:
         mode = "hold"
 
@@ -744,6 +805,8 @@ def advise_climate_v2(
         "station_humidity": round(rh, 0) if rh is not None else None,
         "dew_c": dew,
         "delta_c": ADVICE_V2_DELTA_C,
+        "target_temp_c": round(target, 2) if target is not None else None,
+        "indoor_temp_c": indoor_avg,
         "rooms": room_rows,
         "actions": actions,
     }
@@ -758,6 +821,7 @@ def suggest_cooling_airflow_v2(
     wind_speed_ms: float | None = None,
     wind_direction_deg: float | None = None,
     hvac: dict[str, Any] | None = None,
+    target_temp_c: float | None = None,
 ) -> dict[str, Any]:
     """Through-flow suggestion using v2 façade/HVAC rules; v1 function is unchanged."""
     advice = advise_climate_v2(
@@ -766,6 +830,7 @@ def suggest_cooling_airflow_v2(
         outdoor_temp_c=outdoor_temp_c,
         outdoor_humidity=outdoor_humidity,
         hvac=hvac,
+        target_temp_c=target_temp_c,
     )
     by_id = {str(r.get("id")): r for r in rooms if r.get("id")}
     indoor_temps = [
@@ -785,6 +850,7 @@ def suggest_cooling_airflow_v2(
             if outdoor is not None and indoor_avg is not None
             else None
         ),
+        "target_temp_c": advice.get("target_temp_c"),
         "inlet": None,
         "outlet": None,
         "path": [],
@@ -792,50 +858,127 @@ def suggest_cooling_airflow_v2(
         "advice": advice,
     }
 
-    if advice.get("mode") != "cooling" or advice.get("hvac_isolate"):
+    advice_mode = advice.get("mode")
+    if advice_mode not in ("cooling", "heating") or advice.get("hvac_isolate"):
         actions = list(advice.get("actions") or [])
         if not actions:
-            actions = [
-                "Outdoor air at the façades is not cooler than indoors — "
-                "keep windows closed or use mechanical cooling."
-            ]
+            want_heat = (
+                advice.get("target_temp_c") is not None
+                and indoor_avg is not None
+                and indoor_avg
+                < float(advice["target_temp_c"]) - ADVICE_V2_DELTA_C
+            )
+            if want_heat:
+                actions = [
+                    "Outdoor air at the façades is not warmer than indoors — "
+                    "keep windows closed or use heating."
+                ]
+            else:
+                actions = [
+                    "Outdoor air at the façades is not cooler than indoors — "
+                    "keep windows closed or use mechanical cooling."
+                ]
         return {**hold_base, "actions": actions}
 
-    cooling_ids = {
+    active_ids = {
         str(r["id"])
         for r in (advice.get("open_rooms") or []) + (advice.get("ok_open") or [])
         if r.get("id")
     }
-    if not cooling_ids:
+    if not active_ids:
         actions = list(advice.get("actions") or [])
         if not actions:
-            actions = [
-                "No façade is cool enough for a through-draft — keep windows closed."
-            ]
+            if advice_mode == "heating":
+                actions = [
+                    "No façade is warm enough for a through-draft — keep windows closed."
+                ]
+            else:
+                actions = [
+                    "No façade is cool enough for a through-draft — keep windows closed."
+                ]
         return {**hold_base, "actions": actions}
 
     patched: list[dict[str, Any]] = []
     for r in rooms:
         row = dict(r)
         rid = str(row.get("id") or "")
-        if list(row.get("exterior") or []) and rid not in cooling_ids:
+        if list(row.get("exterior") or []) and rid not in active_ids:
             row["exterior"] = []
         patched.append(row)
     window_temps = [
         room_window_air_c(by_id[rid], outdoor)[0]
-        for rid in cooling_ids
+        for rid in active_ids
         if rid in by_id and room_window_air_c(by_id[rid], outdoor)[0] is not None
     ]
-    v1 = suggest_cooling_airflow(
-        patched,
-        edges,
-        outdoor_temp_c=min(window_temps) if window_temps else outdoor,
-        wind_speed_ms=wind_speed_ms,
-        wind_direction_deg=wind_direction_deg,
-    )
+
+    heating = advice_mode == "heating"
+    if heating:
+        # Negate temps so cooling path-finder prefers the warmest façade as inlet.
+        heat_rooms: list[dict[str, Any]] = []
+        for r in patched:
+            row = dict(r)
+            try:
+                if row.get("temp_c") is not None:
+                    row["temp_c"] = -float(row["temp_c"])
+            except (TypeError, ValueError):
+                pass
+            sensors = []
+            for s in row.get("sensors") or []:
+                sens = dict(s)
+                try:
+                    if sens.get("temperature_c") is not None:
+                        sens["temperature_c"] = -float(sens["temperature_c"])
+                except (TypeError, ValueError):
+                    pass
+                sensors.append(sens)
+            row["sensors"] = sensors
+            try:
+                if row.get("facade_temp_c") is not None:
+                    row["facade_temp_c"] = -float(row["facade_temp_c"])
+            except (TypeError, ValueError):
+                pass
+            heat_rooms.append(row)
+        outdoor_for_path = (
+            -max(window_temps)
+            if window_temps
+            else (-float(outdoor) if outdoor is not None else None)
+        )
+        v1 = suggest_cooling_airflow(
+            heat_rooms,
+            edges,
+            outdoor_temp_c=outdoor_for_path,
+            wind_speed_ms=wind_speed_ms,
+            wind_direction_deg=wind_direction_deg,
+        )
+    else:
+        v1 = suggest_cooling_airflow(
+            patched,
+            edges,
+            outdoor_temp_c=min(window_temps) if window_temps else outdoor,
+            wind_speed_ms=wind_speed_ms,
+            wind_direction_deg=wind_direction_deg,
+        )
     v1 = dict(v1)
     v1["model"] = "v2"
     v1["advice"] = advice
+    v1["target_temp_c"] = advice.get("target_temp_c")
+    v1["outdoor_temp_c"] = outdoor
+    v1["indoor_temp_c"] = indoor_avg
+    if outdoor is not None and indoor_avg is not None:
+        v1["delta_c"] = round(float(outdoor) - indoor_avg, 2)
+    if heating and v1.get("mode") not in (None, "hold", "unknown"):
+        v1["mode"] = "heating"
+        rewritten: list[str] = []
+        for a in v1.get("actions") or []:
+            text = str(a)
+            text = text.replace("cool air inlet", "warm air inlet")
+            text = text.replace("warm air outlet", "cooler air outlet")
+            text = text.replace(
+                "for night purge when outdoor is cooler",
+                "to admit warmer outdoor air",
+            )
+            rewritten.append(text)
+        v1["actions"] = rewritten
     extra = list(advice.get("actions") or [])
     if extra:
         v1["actions"] = extra + list(v1.get("actions") or [])

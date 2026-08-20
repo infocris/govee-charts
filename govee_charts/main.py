@@ -39,6 +39,7 @@ from govee_charts.apartment import (
     default_apartment_dict,
     load_overrides,
 )
+from govee_charts.floorplan import apply_plan_to_layout, find_plan, load_plans
 from govee_charts.sslutil import resolve_ssl_files
 from govee_charts.weather import WeatherConfig, WeatherService
 
@@ -688,7 +689,9 @@ def _install_stop_signals(stop_event: asyncio.Event) -> None:
             pass
 
 
-def _build_weather(cfg: dict[str, Any]) -> WeatherService:
+def _build_weather(
+    cfg: dict[str, Any],
+) -> tuple[WeatherService, dict[str, Any], dict[str, Any] | None]:
     weather_cfg = WeatherConfig.from_dict(cfg.get("weather"))
     apt_raw = dict(cfg.get("apartment") or {})
     if not apt_raw.get("timezone") and cfg.get("weather", {}).get("timezone"):
@@ -697,6 +700,30 @@ def _build_weather(cfg: dict[str, Any]) -> WeatherService:
     n_ovr = apartment.apply_overrides(load_overrides())
     if n_ovr:
         logging.info("Applied façade overrides for %d room(s)", n_ovr)
+    # Snapshot before floor-plan activation (used when deactivating a plan).
+    apartment_fallback = apartment.summary()
+    plans_store = load_plans()
+    active_id = plans_store.get("active_plan_id")
+    if active_id:
+        plan = find_plan(plans_store, str(active_id))
+        if plan is None:
+            logging.warning("Active floor plan %s missing; using config layout", active_id)
+            plans_store = {**plans_store, "active_plan_id": None}
+        else:
+            compiled = apply_plan_to_layout(apartment, plan)
+            if compiled.get("ok"):
+                logging.info(
+                    "Active floor plan %s (%s) → %d rooms",
+                    plan.get("id"),
+                    plan.get("name"),
+                    len(compiled.get("rooms") or []),
+                )
+            else:
+                logging.warning(
+                    "Active floor plan %s failed to compile (%s); using config layout",
+                    active_id,
+                    compiled.get("error") or "; ".join(compiled.get("warnings") or []),
+                )
     weather = WeatherService(weather_cfg, apartment=apartment)
     if weather.enabled:
         if weather.has_config_location:
@@ -726,7 +753,7 @@ def _build_weather(cfg: dict[str, Any]) -> WeatherService:
             logging.info("Météo-France stations enabled: %s", names)
     else:
         logging.info("Weather forecast disabled (set weather.enabled=true)")
-    return weather
+    return weather, plans_store, apartment_fallback
 
 
 def _systemd_unit_pid(unit: str) -> int | None:
@@ -791,7 +818,7 @@ async def run_ui_server(
     else:
         db = db_override
         suffix_map = suffix_map_override
-    weather = _build_weather(cfg)
+    weather, apartment_plans, apartment_fallback = _build_weather(cfg)
     fed = cfg["federation"]
     backfill = workers_runtime.get("backfill") if workers_runtime else None
     hvac_cfg = workers_runtime.get("hvac_cfg") if workers_runtime else HvacConfig.from_dict(
@@ -858,6 +885,8 @@ async def run_ui_server(
         tts=cfg.get("tts") or {},
         cursor_chat=cfg.get("cursor_chat") or {},
         map_chat_store=map_chat_store,
+        apartment_plans=apartment_plans,
+        apartment_fallback=apartment_fallback,
     )
 
     http_config = uvicorn.Config(

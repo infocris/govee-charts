@@ -24,6 +24,7 @@ from govee_charts.address import is_ble_mac, register_mac, resolve_device_addres
 from govee_charts.apartment import (
     TEMP_COUPLE_CLOSED_C,
     TEMP_COUPLE_OPEN_C,
+    ApartmentLayout,
     infer_temp_coupling,
     ORIENTATIONS,
     compass_from_deg,
@@ -32,6 +33,19 @@ from govee_charts.apartment import (
     suggest_cooling_airflow,
     suggest_cooling_airflow_v2,
     ventilation_mode,
+)
+from govee_charts.floorplan import (
+    active_plan_meta,
+    apply_plan_to_layout,
+    compile_plan,
+    duplicate_plan,
+    empty_plan,
+    find_plan,
+    known_room_options,
+    load_plans,
+    plan_summary,
+    save_plans,
+    validate_plan_update,
 )
 from govee_charts.backfill import BackfillService
 from govee_charts.categories import normalize_door_patch, normalize_patch, taxonomy
@@ -101,6 +115,7 @@ def static_asset_version() -> str:
         "widget.js",
         "widget.html",
         "i18n.js",
+        "plan-editor.js",
         "sw.js",
     ):
         path = STATIC / name
@@ -118,6 +133,9 @@ def index_html_response() -> HTMLResponse:
     html = html.replace('href="/static/style.css"', f'href="/static/style.css?v={ver}"')
     html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={ver}"')
     html = html.replace('src="/static/i18n.js"', f'src="/static/i18n.js?v={ver}"')
+    html = html.replace(
+        'src="/static/plan-editor.js"', f'src="/static/plan-editor.js?v={ver}"'
+    )
     return HTMLResponse(content=html, headers=dict(_HTML_CACHE_HEADERS))
 
 
@@ -663,6 +681,19 @@ class FacadePatch(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class PlanCreate(BaseModel):
+    name: str = Field(default="Untitled", max_length=120)
+    mode: str = Field(..., min_length=1, max_length=32)
+
+    model_config = {"extra": "forbid"}
+
+
+class PlanDuplicate(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+
+    model_config = {"extra": "forbid"}
+
+
 class BackfillDevicePatch(BaseModel):
     address: str = Field(min_length=1)
     enabled: bool | None = None
@@ -858,6 +889,8 @@ def create_app(
     tts: dict[str, Any] | None = None,
     cursor_chat: dict[str, Any] | None = None,
     map_chat_store: MapChatStore | None = None,
+    apartment_plans: dict[str, Any] | None = None,
+    apartment_fallback: dict[str, Any] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Govee Charts", docs_url=None, redoc_url=None)
     app.state.db = db
@@ -893,6 +926,47 @@ def create_app(
     }
     app.state.cursor_chat = normalize_cursor_chat_config(cursor_chat)
     app.state.map_chat_store = map_chat_store
+    app.state.apartment_plans = (
+        apartment_plans if isinstance(apartment_plans, dict) else load_plans()
+    )
+    if apartment_fallback is not None:
+        app.state.apartment_fallback = apartment_fallback
+    elif weather is not None and getattr(weather, "apartment", None) is not None:
+        app.state.apartment_fallback = weather.apartment.summary()
+    else:
+        app.state.apartment_fallback = None
+
+    def _plans_store() -> dict[str, Any]:
+        store = getattr(app.state, "apartment_plans", None)
+        if not isinstance(store, dict):
+            store = load_plans()
+            app.state.apartment_plans = store
+        return store
+
+    def _persist_plans(store: dict[str, Any]) -> None:
+        save_plans(store)
+        app.state.apartment_plans = store
+
+    def _restore_fallback_layout(layout: ApartmentLayout) -> None:
+        fb = getattr(app.state, "apartment_fallback", None)
+        if not isinstance(fb, dict) or not fb.get("rooms"):
+            return
+        raw = {
+            "enabled": layout.enabled,
+            "ceiling_m": layout.ceiling_m,
+            "door_height_m": layout.door_height_m,
+            "area_m2": fb.get("area_m2", layout.area_m2),
+            "floor": layout.floor,
+            "floors_total": layout.floors_total,
+            "timezone": layout.timezone,
+            "rooms": fb.get("rooms") or [],
+            "edges": fb.get("edges") or [],
+        }
+        restored = ApartmentLayout.from_dict(raw)
+        layout.rooms = restored.rooms
+        layout.edges = restored.edges
+        layout.area_m2 = restored.area_m2
+        layout._rebuild_matrices()
 
     @app.get("/")
     async def index() -> HTMLResponse:
@@ -2439,6 +2513,7 @@ def create_app(
         future_hours: float | None = Query(default=None, gt=0, le=384),
         latitude: float | None = Query(default=None, ge=-90, le=90),
         longitude: float | None = Query(default=None, ge=-180, le=180),
+        target_temp_c: float | None = Query(default=None, ge=10, le=40),
     ) -> dict[str, Any]:
         weather_svc: WeatherService | None = app.state.weather
         if weather_svc is None or weather_svc.apartment is None:
@@ -3078,6 +3153,7 @@ def create_app(
                 else solar.get("wind_direction_deg")
             ),
             hvac=payload.get("hvac"),
+            target_temp_c=target_temp_c,
         )
         payload["window_advice_v2"] = payload["airflow_v2"].get("advice") or {}
 
@@ -3093,7 +3169,202 @@ def create_app(
         else:
             payload["presence"] = {"enabled": False, "people": []}
 
+        payload["active_plan"] = active_plan_meta(_plans_store())
+        payload["room_options"] = known_room_options()
         return payload
+
+    @app.get("/api/apartment/plans")
+    async def api_list_plans() -> dict[str, Any]:
+        store = _plans_store()
+        return {
+            "active_plan_id": store.get("active_plan_id"),
+            "plans": [plan_summary(p) for p in store.get("plans") or []],
+            "room_options": known_room_options(),
+        }
+
+    @app.post("/api/apartment/plans")
+    async def api_create_plan(payload: PlanCreate) -> dict[str, Any]:
+        try:
+            plan = empty_plan(name=payload.name, mode=payload.mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        store = _plans_store()
+        plans = list(store.get("plans") or [])
+        plans.append(plan)
+        store = {**store, "plans": plans}
+        try:
+            _persist_plans(store)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to save plan: {exc}"
+            ) from exc
+        return plan
+
+    @app.get("/api/apartment/plans/{plan_id}")
+    async def api_get_plan(plan_id: str) -> dict[str, Any]:
+        plan = find_plan(_plans_store(), plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="Unknown plan")
+        return plan
+
+    @app.put("/api/apartment/plans/{plan_id}")
+    async def api_put_plan(plan_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        store = _plans_store()
+        existing = find_plan(store, plan_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Unknown plan")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Expected JSON object")
+        try:
+            updated = validate_plan_update(existing, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        plans = []
+        for p in store.get("plans") or []:
+            if str(p.get("id")) == str(plan_id):
+                plans.append(updated)
+            else:
+                plans.append(p)
+        store = {**store, "plans": plans}
+        try:
+            _persist_plans(store)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to save plan: {exc}"
+            ) from exc
+        # If this is the active plan, recompile into the live layout.
+        if store.get("active_plan_id") == plan_id:
+            weather_svc: WeatherService | None = app.state.weather
+            if weather_svc is not None and weather_svc.apartment is not None:
+                compiled = apply_plan_to_layout(weather_svc.apartment, updated)
+                if not compiled.get("ok"):
+                    logger.warning(
+                        "Active plan saved but compile failed: %s",
+                        compiled.get("error") or compiled.get("warnings"),
+                    )
+                else:
+                    try:
+                        await _ensure_layout_connections(db, weather_svc.apartment)
+                    except Exception as exc:
+                        logger.warning("Connection sync after plan save failed: %s", exc)
+        return updated
+
+    @app.post("/api/apartment/plans/{plan_id}/compile")
+    async def api_compile_plan(plan_id: str) -> dict[str, Any]:
+        plan = find_plan(_plans_store(), plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="Unknown plan")
+        return compile_plan(plan)
+
+    @app.post("/api/apartment/plans/{plan_id}/activate")
+    async def api_activate_plan(plan_id: str) -> dict[str, Any]:
+        weather_svc: WeatherService | None = app.state.weather
+        if weather_svc is None or weather_svc.apartment is None:
+            raise HTTPException(status_code=503, detail="Apartment layout not available")
+        store = _plans_store()
+        plan = find_plan(store, plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="Unknown plan")
+        compiled = apply_plan_to_layout(weather_svc.apartment, plan)
+        if not compiled.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=compiled.get("error")
+                or "; ".join(compiled.get("warnings") or ["Compile failed"]),
+            )
+        store = {**store, "active_plan_id": plan_id}
+        try:
+            _persist_plans(store)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to activate plan: {exc}"
+            ) from exc
+        try:
+            await _ensure_layout_connections(db, weather_svc.apartment)
+        except Exception as exc:
+            logger.warning("Connection sync after activate failed: %s", exc)
+        logger.info(
+            "Activated floor plan %s (%s) → %d rooms",
+            plan_id,
+            plan.get("name"),
+            len(compiled.get("rooms") or []),
+        )
+        return {
+            "active_plan_id": plan_id,
+            "compiled": compiled,
+            "active_plan": active_plan_meta(store),
+        }
+
+    @app.post("/api/apartment/plans/{plan_id}/deactivate")
+    async def api_deactivate_plan(plan_id: str) -> dict[str, Any]:
+        """Clear active plan and restore config.toml layout (if this plan was active)."""
+        weather_svc: WeatherService | None = app.state.weather
+        store = _plans_store()
+        if store.get("active_plan_id") != plan_id:
+            raise HTTPException(status_code=400, detail="Plan is not active")
+        store = {**store, "active_plan_id": None}
+        try:
+            _persist_plans(store)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to deactivate plan: {exc}"
+            ) from exc
+        if weather_svc is not None and weather_svc.apartment is not None:
+            _restore_fallback_layout(weather_svc.apartment)
+            try:
+                await _ensure_layout_connections(db, weather_svc.apartment)
+            except Exception as exc:
+                logger.warning("Connection sync after deactivate failed: %s", exc)
+        return {"active_plan_id": None, "active_plan": None}
+
+    @app.post("/api/apartment/plans/{plan_id}/duplicate")
+    async def api_duplicate_plan(
+        plan_id: str, payload: PlanDuplicate | None = None
+    ) -> dict[str, Any]:
+        store = _plans_store()
+        plan = find_plan(store, plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="Unknown plan")
+        name = payload.name if payload else None
+        clone = duplicate_plan(plan, name=name)
+        plans = list(store.get("plans") or [])
+        plans.append(clone)
+        store = {**store, "plans": plans}
+        try:
+            _persist_plans(store)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to duplicate plan: {exc}"
+            ) from exc
+        return clone
+
+    @app.delete("/api/apartment/plans/{plan_id}")
+    async def api_delete_plan(plan_id: str) -> dict[str, Any]:
+        weather_svc: WeatherService | None = app.state.weather
+        store = _plans_store()
+        plan = find_plan(store, plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="Unknown plan")
+        was_active = store.get("active_plan_id") == plan_id
+        plans = [p for p in (store.get("plans") or []) if str(p.get("id")) != plan_id]
+        store = {
+            **store,
+            "plans": plans,
+            "active_plan_id": None if was_active else store.get("active_plan_id"),
+        }
+        try:
+            _persist_plans(store)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to delete plan: {exc}"
+            ) from exc
+        if was_active and weather_svc is not None and weather_svc.apartment is not None:
+            _restore_fallback_layout(weather_svc.apartment)
+            try:
+                await _ensure_layout_connections(db, weather_svc.apartment)
+            except Exception as exc:
+                logger.warning("Connection sync after plan delete failed: %s", exc)
+        return {"deleted": plan_id, "active_plan_id": store.get("active_plan_id")}
 
     @app.patch("/api/apartment/rooms/{room_id}")
     async def api_patch_facade(room_id: str, payload: FacadePatch) -> dict[str, Any]:
@@ -3608,6 +3879,7 @@ def create_app(
         address: list[str] | None = Query(default=None),
         latitude: float | None = Query(default=None, ge=-90, le=90),
         longitude: float | None = Query(default=None, ge=-180, le=180),
+        target_temp_c: float | None = Query(default=None, ge=10, le=40),
     ) -> dict[str, Any]:
         weather_svc: WeatherService | None = app.state.weather
         if weather_svc is None:
@@ -3632,6 +3904,7 @@ def create_app(
             addresses=addresses,
             latitude=latitude,
             longitude=longitude,
+            target_temp_c=target_temp_c,
         )
 
     @app.post("/api/ingest")

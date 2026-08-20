@@ -11,6 +11,8 @@ data/weather_cache.tmp
 data/ssl/
 data/apartment_overrides.json
 data/apartment_overrides.tmp
+data/apartment_plans.json
+data/apartment_plans.tmp
 data/secrets/
 data/mail_inbox.json
 data/mail_inbox.tmp

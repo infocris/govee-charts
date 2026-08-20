@@ -332,6 +332,7 @@
             <option value="both" data-i18n="compare.scenario.both">Closed + open</option>
             <option value="coolest" data-i18n="compare.scenario.coolest">Coolest (open/close)</option>
             <option value="warmest" data-i18n="compare.scenario.warmest">Warmest (open/close)</option>
+            <option value="target" data-i18n="compare.scenario.target">Toward target</option>
           </select>
         </label>
         <label class="forecast-toggle">
@@ -567,6 +568,7 @@
             <option value="both">Closed + open</option>
             <option value="coolest">Coolest (open/close)</option>
             <option value="warmest">Warmest (open/close)</option>
+            <option value="target" data-i18n="compare.scenario.target">Toward target</option>
           </select>
         </label>
         <label class="forecast-toggle">
@@ -647,8 +649,69 @@
             <span class="map-click-keys"><kbd>+</kbd> · <kbd>−</kbd> · <kbd>100%</kbd></span>
             — zoom the topology map
           </li>
+          <li>
+            <span class="map-click-keys" data-i18n="map.help.floorPlanKeys">Floor plan</span>
+            <span data-i18n="map.help.floorPlan">
+              — draw rooms and openings; activate a plan to drive the topology graph
+            </span>
+          </li>
         </ul>
       </div>
+
+      <details class="compare-fold plan-editor-fold" id="fold-plan-editor" open>
+        <summary class="compare-fold-summary">
+          <span data-i18n="map.plan.title">Floor plan editor</span>
+          <span class="compare-fold-meta" id="plan-editor-meta" data-i18n="map.plan.metaHint">
+            Draw rooms · activate layout
+          </span>
+        </summary>
+        <div class="plan-editor" id="plan-editor">
+          <div class="plan-editor-bar">
+            <label class="plan-editor-field">
+              <span data-i18n="map.plan.select">Plan</span>
+              <select id="plan-editor-select">
+                <option value="" data-i18n="map.plan.selectPlaceholder">Select a plan…</option>
+              </select>
+            </label>
+            <label class="plan-editor-field">
+              <span data-i18n="map.plan.newName">Name</span>
+              <input
+                type="text"
+                id="plan-editor-new-name"
+                maxlength="120"
+                data-i18n-placeholder="map.plan.newNamePlaceholder"
+                placeholder="New plan"
+              />
+            </label>
+            <label class="plan-editor-field">
+              <span data-i18n="map.plan.mode">Mode</span>
+              <select id="plan-editor-new-mode">
+                <option value="free" data-i18n="map.plan.modeFree">Free shapes</option>
+                <option value="partition" data-i18n="map.plan.modePartition">Partition walls</option>
+              </select>
+            </label>
+            <button type="button" id="plan-editor-create" class="backfill-btn" data-i18n="map.plan.create">Create</button>
+            <button type="button" id="plan-editor-save" class="backfill-btn" disabled data-i18n="map.plan.save">Save</button>
+            <button type="button" id="plan-editor-activate" class="backfill-btn" disabled data-i18n="map.plan.activate">Activate</button>
+            <button type="button" id="plan-editor-deactivate" class="linkish" disabled data-i18n="map.plan.deactivate">Deactivate</button>
+            <button type="button" id="plan-editor-duplicate" class="linkish" disabled data-i18n="map.plan.duplicate">Duplicate</button>
+            <button type="button" id="plan-editor-delete" class="linkish" disabled data-i18n="map.plan.delete">Delete</button>
+            <span class="plan-editor-dirty" id="plan-editor-dirty" hidden data-i18n="map.plan.unsaved">Unsaved</span>
+          </div>
+          <div class="plan-editor-tools" id="plan-editor-tools" hidden></div>
+          <div class="plan-editor-body">
+            <svg
+              id="plan-editor-svg"
+              class="plan-editor-svg"
+              role="img"
+              aria-label="Floor plan editor"
+            ></svg>
+            <aside class="plan-editor-props" id="plan-editor-props" hidden></aside>
+          </div>
+          <p class="status" id="plan-editor-status" aria-live="polite"></p>
+        </div>
+      </details>
+
       <details class="compare-fold map-chat-fold" id="fold-map-chat">
         <summary class="compare-fold-summary">
           <span data-i18n="map.chat.title">Ask Cursor</span>
@@ -710,6 +773,16 @@
           <button type="button" data-map-metric="humidity">Humidity</button>
           <button type="button" data-map-metric="both">Both</button>
         </div>
+        <button
+          type="button"
+          id="plan-editor-open-btn"
+          class="backfill-btn plan-editor-open-btn"
+          data-i18n="map.plan.openBtn"
+          data-i18n-title="map.plan.openBtnTitle"
+          title="Open floor plan editor"
+        >
+          Floor plan editor
+        </button>
       </div>
       <p class="network-meta" id="network-meta" aria-live="polite">Loading…</p>
 
@@ -1393,6 +1466,22 @@
             v1 compares the weather station to indoor air. v2 uses air at each façade, ignores exhaust plumes, and keeps windows closed while AC is on.
           </span>
         </label>
+        <label class="settings-field" for="settings-target-temp">
+          <span class="settings-field-label" data-i18n="settings.targetTemp">Target temperature</span>
+          <input
+            id="settings-target-temp"
+            type="number"
+            min="16"
+            max="30"
+            step="0.5"
+            inputmode="decimal"
+            data-i18n-aria-label="settings.targetTempHelp"
+            aria-label="Indoor target temperature in °C"
+          />
+          <span class="settings-field-help" data-i18n="settings.targetTempHelp">
+            Window alerts and open/close strategies aim toward this indoor temperature (cool when warmer, heat when cooler). Stored in this browser.
+          </span>
+        </label>
         <label class="settings-field" for="tts-voice-select">
           <span class="settings-field-label" data-i18n="settings.voice">Voice for alerts</span>
           <div class="settings-voice-row">
@@ -1477,6 +1566,16 @@
             >
               Restart workers
             </button>
+            <button
+              type="button"
+              id="restart-all-btn"
+              class="restart-btn restart-btn-all"
+              data-i18n="nav.restartAll"
+              data-i18n-title="nav.restartAllTitle"
+              title="Git pull, then restart workers and UI"
+            >
+              Restart all
+            </button>
           </div>
           <p class="restart-status" id="restart-status" hidden aria-live="polite"></p>
           <span class="settings-field-help" data-i18n="settings.serviceHelp">
@@ -1488,6 +1587,7 @@
   </main>
 
   <script src="/static/i18n.js"></script>
+  <script src="/static/plan-editor.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

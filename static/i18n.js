@@ -37,6 +37,10 @@
       "nav.restartUiTitle": "Restart UI service",
       "nav.restartWorkers": "Restart workers",
       "nav.restartWorkersTitle": "Restart workers service",
+      "nav.restartAll": "Restart all",
+      "nav.restartAllTitle": "Git pull, then restart workers and UI",
+      "nav.restartAllConfirm":
+        "Pull latest code, then restart workers and UI? The page will reload when the UI is back.",
       "alerts.bar": "Alerts",
       "tts.title": "Voice alerts (text-to-speech)",
       "tts.aria": "Toggle voice alerts",
@@ -123,6 +127,9 @@
         "v1 compares the weather station to indoor air (0.5 °C). v2 uses air at each façade (1.5 °C), ignores exhaust plumes, and keeps windows closed while AC is on.",
       "settings.advice.v1": "v1 — weather station (current)",
       "settings.advice.v2": "v2 — façades and AC",
+      "settings.targetTemp": "Target temperature",
+      "settings.targetTempHelp":
+        "Window alerts and open/close strategies aim toward this indoor temperature (cool when warmer, heat when cooler). Stored in this browser.",
       "settings.voice": "Voice for alerts",
       "settings.voiceHelp":
         "Only voices for the selected language. Enable voice alerts with the speaker button in the alert bar.",
@@ -139,7 +146,7 @@
       "settings.stationsCoords": "{lat}, {lon}",
       "settings.service": "Service",
       "settings.serviceHelp":
-        "Pull the latest code, then restart UI and/or workers to apply changes.",
+        "Pull the latest code, then restart UI and/or workers to apply changes. “Restart all” does pull + both restarts.",
       "settings.lang.en": "English",
       "settings.lang.fr": "Français",
 
@@ -316,6 +323,7 @@
       "compare.scenario.both": "Closed + open",
       "compare.scenario.coolest": "Coolest (open/close)",
       "compare.scenario.warmest": "Warmest (open/close)",
+      "compare.scenario.target": "Toward target",
       "compare.windowBands": "Window open / close",
       "compare.hvac": "AC & power",
       "compare.locate": "Locate",
@@ -429,21 +437,41 @@
         "{climate}. Outdoor is cooler but too humid while openings are still open. {open}.",
       "banner.closeWarm":
         "{climate}. Outdoor air is warmer than indoors. {open}.",
+      "banner.closeCool":
+        "{climate}. Outdoor air is cooler than indoors (would cool below target). {open}.",
       "banner.alsoOpen": " Also open: {rooms}.",
       "banner.openTitle": "Open windows — {rooms}",
       "banner.openDetail":
         "{climate}. Outdoor is cooler and dry enough. {open}.",
+      "banner.openHeatTitle": "Open windows to warm — {rooms}",
+      "banner.openHeatDetail":
+        "{climate}. Outdoor is warmer than indoors (toward target {target} °C). {open}.",
+      "banner.openCoolTitle": "Open windows to cool — {rooms}",
+      "banner.openCoolDetail":
+        "{climate}. Outdoor is cooler and dry enough (toward target {target} °C). {open}.",
       "banner.okOpenTitle": "Windows OK open — {rooms}",
       "banner.okOpenDetail": "{climate}. Cooling with outdoor air. {open}.",
+      "banner.okOpenHeatDetail":
+        "{climate}. Warming with outdoor air (target {target} °C). {open}.",
+      "banner.okOpenCoolDetail":
+        "{climate}. Cooling with outdoor air (target {target} °C). {open}.",
       "banner.closedOk": " Closed OK: {rooms}.",
       "banner.okClosedTitle": "Windows OK closed — {rooms}",
       "banner.okClosedDetail": "{climate}. {open}.",
       "notify.openTitle": "Open windows — {label}",
       "notify.openBody":
         "Outdoor air is cooler ({out} °C vs {in} °C indoors) and dry enough.",
+      "notify.openCoolTitle": "Open to cool — {label}",
+      "notify.openCoolBody":
+        "Outdoor is cooler ({out} °C vs {in} °C) toward target {target} °C.",
+      "notify.openHeatTitle": "Open to warm — {label}",
+      "notify.openHeatBody":
+        "Outdoor is warmer ({out} °C vs {in} °C) toward target {target} °C.",
       "notify.closeTitle": "Close windows — {label}",
       "notify.closeBody":
         "Outdoor air is warmer ({out} °C vs {in} °C indoors).",
+      "notify.closeCoolBody":
+        "Outdoor is cooler ({out} °C vs {in} °C) and would pull below target {target} °C.",
       "notify.humidTitle": "Keep windows closed — {label}",
       "notify.humidBody":
         "Outdoor is cooler ({out} °C) but too humid (high dew point).",
@@ -477,6 +505,29 @@
       "map.edge.locked": "locked",
       "map.edge.unlocked": "not locked",
       "map.edge.reported": "sensors: {state}",
+      "map.help.floorPlanKeys": "Floor plan",
+      "map.help.floorPlan":
+        "— draw rooms and openings; activate a plan to drive the topology graph",
+      "map.plan.title": "Floor plan editor",
+      "map.plan.metaHint": "Draw rooms · activate layout",
+      "map.plan.metaIdle": "Create a plan or select one to edit",
+      "map.plan.metaActive": "Active: {name} ({mode})",
+      "map.plan.select": "Plan",
+      "map.plan.selectPlaceholder": "Select a plan…",
+      "map.plan.newName": "Name",
+      "map.plan.newNamePlaceholder": "New plan",
+      "map.plan.mode": "Mode",
+      "map.plan.modeFree": "Free shapes",
+      "map.plan.modePartition": "Partition walls",
+      "map.plan.create": "Create",
+      "map.plan.save": "Save",
+      "map.plan.activate": "Activate",
+      "map.plan.deactivate": "Deactivate",
+      "map.plan.duplicate": "Duplicate",
+      "map.plan.delete": "Delete",
+      "map.plan.unsaved": "Unsaved",
+      "map.plan.openBtn": "Floor plan editor",
+      "map.plan.openBtnTitle": "Open floor plan editor",
       "common.error": "Error: {error}",
     },
     fr: {
@@ -507,6 +558,10 @@
       "nav.restartUiTitle": "Redémarrer le service UI",
       "nav.restartWorkers": "Redémarrer les workers",
       "nav.restartWorkersTitle": "Redémarrer le service workers",
+      "nav.restartAll": "Tout redémarrer",
+      "nav.restartAllTitle": "Git pull, puis redémarrer les workers et l’UI",
+      "nav.restartAllConfirm":
+        "Récupérer le dernier code, puis redémarrer les workers et l’UI ? La page se rechargera quand l’UI sera de retour.",
       "alerts.bar": "Alertes",
       "tts.title": "Alertes vocales (synthèse vocale)",
       "tts.aria": "Activer/désactiver les alertes vocales",
@@ -597,6 +652,9 @@
         "v1 compare la station météo à l’air intérieur (0,5 °C). v2 utilise l’air à chaque façade (1,5 °C), ignore les panaches d’extraction, et garde les fenêtres fermées quand la clim est allumée.",
       "settings.advice.v1": "v1 — station météo (actuel)",
       "settings.advice.v2": "v2 — façades et clim",
+      "settings.targetTemp": "Température cible",
+      "settings.targetTempHelp":
+        "Les alertes fenêtres et les stratégies d’ouverture/fermeture visent cette température intérieure (rafraîchir si plus chaud, réchauffer si plus frais). Stocké dans ce navigateur.",
       "settings.voice": "Voix des alertes",
       "settings.voiceHelp":
         "Uniquement les voix de la langue choisie. Activez les alertes vocales avec le bouton haut-parleur dans la barre d’alertes.",
@@ -613,7 +671,7 @@
       "settings.stationsCoords": "{lat}, {lon}",
       "settings.service": "Service",
       "settings.serviceHelp":
-        "Récupérer le dernier code, puis redémarrer l’UI et/ou les workers pour appliquer les changements.",
+        "Récupérer le dernier code, puis redémarrer l’UI et/ou les workers pour appliquer les changements. « Tout redémarrer » enchaîne pull + les deux redémarrages.",
       "settings.lang.en": "English",
       "settings.lang.fr": "Français",
 
@@ -792,6 +850,7 @@
       "compare.scenario.both": "Fermé + ouvert",
       "compare.scenario.coolest": "Le plus frais (ouv./ferm.)",
       "compare.scenario.warmest": "Le plus chaud (ouv./ferm.)",
+      "compare.scenario.target": "Vers la cible",
       "compare.windowBands": "Ouverture / fermeture fenêtres",
       "compare.hvac": "Clim et puissance",
       "compare.locate": "Localiser",
@@ -905,22 +964,42 @@
         "{climate}. L’extérieur est plus frais mais trop humide alors que des ouvertures restent ouvertes. {open}.",
       "banner.closeWarm":
         "{climate}. L’air extérieur est plus chaud qu’à l’intérieur. {open}.",
+      "banner.closeCool":
+        "{climate}. L’air extérieur est plus frais qu’à l’intérieur (refroidirait sous la cible). {open}.",
       "banner.alsoOpen": " À ouvrir aussi : {rooms}.",
       "banner.openTitle": "Ouvrir les fenêtres — {rooms}",
       "banner.openDetail":
         "{climate}. L’extérieur est plus frais et assez sec. {open}.",
+      "banner.openHeatTitle": "Ouvrir pour réchauffer — {rooms}",
+      "banner.openHeatDetail":
+        "{climate}. L’extérieur est plus chaud qu’à l’intérieur (vers la cible {target} °C). {open}.",
+      "banner.openCoolTitle": "Ouvrir pour rafraîchir — {rooms}",
+      "banner.openCoolDetail":
+        "{climate}. L’extérieur est plus frais et assez sec (vers la cible {target} °C). {open}.",
       "banner.okOpenTitle": "Fenêtres OK ouvertes — {rooms}",
       "banner.okOpenDetail":
         "{climate}. Refroidissement à l’air extérieur. {open}.",
+      "banner.okOpenHeatDetail":
+        "{climate}. Réchauffement à l’air extérieur (cible {target} °C). {open}.",
+      "banner.okOpenCoolDetail":
+        "{climate}. Refroidissement à l’air extérieur (cible {target} °C). {open}.",
       "banner.closedOk": " Fermées OK : {rooms}.",
       "banner.okClosedTitle": "Fenêtres OK fermées — {rooms}",
       "banner.okClosedDetail": "{climate}. {open}.",
       "notify.openTitle": "Ouvrir les fenêtres — {label}",
       "notify.openBody":
         "L’air extérieur est plus frais ({out} °C vs {in} °C dedans) et assez sec.",
+      "notify.openCoolTitle": "Ouvrir pour rafraîchir — {label}",
+      "notify.openCoolBody":
+        "L’extérieur est plus frais ({out} °C vs {in} °C) vers la cible {target} °C.",
+      "notify.openHeatTitle": "Ouvrir pour réchauffer — {label}",
+      "notify.openHeatBody":
+        "L’extérieur est plus chaud ({out} °C vs {in} °C) vers la cible {target} °C.",
       "notify.closeTitle": "Fermer les fenêtres — {label}",
       "notify.closeBody":
         "L’air extérieur est plus chaud ({out} °C vs {in} °C dedans).",
+      "notify.closeCoolBody":
+        "L’extérieur est plus frais ({out} °C vs {in} °C) et tirerait sous la cible {target} °C.",
       "notify.humidTitle": "Garder les fenêtres fermées — {label}",
       "notify.humidBody":
         "L’extérieur est plus frais ({out} °C) mais trop humide (point de rosée élevé).",
@@ -954,6 +1033,29 @@
       "map.edge.locked": "verrouillé",
       "map.edge.unlocked": "non verrouillé",
       "map.edge.reported": "capteurs : {state}",
+      "map.help.floorPlanKeys": "Plan",
+      "map.help.floorPlan":
+        "— dessiner les pièces et ouvertures ; activer un plan pour piloter le graphe",
+      "map.plan.title": "Éditeur de plan",
+      "map.plan.metaHint": "Dessiner les pièces · activer le layout",
+      "map.plan.metaIdle": "Créer un plan ou en sélectionner un",
+      "map.plan.metaActive": "Actif : {name} ({mode})",
+      "map.plan.select": "Plan",
+      "map.plan.selectPlaceholder": "Choisir un plan…",
+      "map.plan.newName": "Nom",
+      "map.plan.newNamePlaceholder": "Nouveau plan",
+      "map.plan.mode": "Mode",
+      "map.plan.modeFree": "Formes libres",
+      "map.plan.modePartition": "Découpe (murs)",
+      "map.plan.create": "Créer",
+      "map.plan.save": "Enregistrer",
+      "map.plan.activate": "Activer",
+      "map.plan.deactivate": "Désactiver",
+      "map.plan.duplicate": "Dupliquer",
+      "map.plan.delete": "Supprimer",
+      "map.plan.unsaved": "Non enregistré",
+      "map.plan.openBtn": "Éditeur de plan",
+      "map.plan.openBtnTitle": "Ouvrir l’éditeur de plan",
       "common.error": "Erreur : {error}",
     },
   };
