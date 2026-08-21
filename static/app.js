@@ -60,6 +60,7 @@
   const settingsLocaleEl = document.getElementById("settings-locale");
   const settingsAdviceModelEl = document.getElementById("settings-advice-model");
   const settingsTargetTempEl = document.getElementById("settings-target-temp");
+  const topBarTargetTempEl = document.getElementById("top-bar-target-temp");
   const settingsStationsEl = document.getElementById("settings-stations");
   const settingsStationsEmptyEl = document.getElementById(
     "settings-stations-empty"
@@ -454,6 +455,33 @@
       ? Math.min(30, Math.max(16, Math.round(n * 2) / 2))
       : DEFAULT_TARGET_TEMP_C;
     localStorage.setItem(TARGET_TEMP_KEY, String(v));
+    return v;
+  }
+
+  function syncTargetTempInputs(value) {
+    const v = value != null ? value : getTargetTempC();
+    const text = String(v);
+    if (settingsTargetTempEl && document.activeElement !== settingsTargetTempEl) {
+      settingsTargetTempEl.value = text;
+    }
+    if (topBarTargetTempEl && document.activeElement !== topBarTargetTempEl) {
+      topBarTargetTempEl.value = text;
+    }
+  }
+
+  function applyTargetTempChange(raw) {
+    const v = setTargetTempC(raw);
+    syncTargetTempInputs(v);
+    invalidateApartmentAdviceCache();
+    updateWindowBanner(null).catch((err) => console.warn(err));
+    evaluateWindowNotifications(null).catch((err) => console.warn(err));
+    if (currentView === "network") {
+      loadNetwork().catch((err) => console.warn(err));
+    } else if (currentView === "facades") {
+      loadFacades().catch((err) => console.warn(err));
+    } else if (currentView === "compare") {
+      loadHistory().catch((err) => console.warn(err));
+    }
     return v;
   }
 
@@ -14572,13 +14600,23 @@
     return el;
   }
 
-  function appendMapChatContext({ banner, snapshot } = {}) {
+  function appendMapChatContext({ banner, snapshot, targetTempC } = {}) {
     if (!mapChatLogEl) return;
     const details = document.createElement("details");
     details.className = "map-chat-context";
     const summary = document.createElement("summary");
     summary.textContent = t("map.chat.context");
     details.appendChild(summary);
+    const targetBox = document.createElement("p");
+    targetBox.className = "map-chat-context-target";
+    const tgt =
+      targetTempC != null && Number.isFinite(Number(targetTempC))
+        ? Number(targetTempC)
+        : getTargetTempC();
+    targetBox.textContent = t("map.chat.targetTemp", {
+      temp: tgt.toFixed(1),
+    });
+    details.appendChild(targetBox);
     const bannerBox = document.createElement("p");
     bannerBox.className = "map-chat-context-banner";
     if (banner && !banner.hidden && (banner.title || banner.detail)) {
@@ -14607,7 +14645,14 @@
   function renderMapChatExchange(ex) {
     const createdAt = ex.created_at;
     appendMapChatMessage("user", ex.user_message || "", { createdAt });
-    appendMapChatContext({ banner: ex.banner, snapshot: ex.snapshot });
+    appendMapChatContext({
+      banner: ex.banner,
+      snapshot: ex.snapshot,
+      targetTempC:
+        ex.snapshot && ex.snapshot.target_temp_c != null
+          ? ex.snapshot.target_temp_c
+          : undefined,
+    });
     if (ex.error) {
       appendMapChatMessage(
         "assistant",
@@ -14830,11 +14875,12 @@
     mapChatBusy = true;
     setMapChatControlsEnabled(true);
     const banner = currentWindowBannerPayload();
+    const targetTempC = getTargetTempC();
     const provisionalAt = Date.now() / 1000;
     const userEl = appendMapChatMessage("user", message, {
       createdAt: provisionalAt,
     });
-    appendMapChatContext({ banner });
+    appendMapChatContext({ banner, targetTempC });
     if (mapChatInputEl) mapChatInputEl.value = "";
     const assistantEl = appendMapChatMessage("assistant", t("map.chat.busy"), {
       pending: true,
@@ -14853,6 +14899,7 @@
           session_id: sessionId || null,
           banner,
           advice_model: getAdviceModel(),
+          target_temp_c: targetTempC,
         }),
       });
       if (!res.ok) {
@@ -16765,29 +16812,23 @@
     });
   }
 
-  if (settingsTargetTempEl) {
-    settingsTargetTempEl.value = String(getTargetTempC());
-    const onTargetChange = () => {
-      const v = setTargetTempC(settingsTargetTempEl.value);
-      settingsTargetTempEl.value = String(v);
-      invalidateApartmentAdviceCache();
-      updateWindowBanner(null).catch((err) => console.warn(err));
-      evaluateWindowNotifications(null).catch((err) => console.warn(err));
-      if (currentView === "network") {
-        loadNetwork().catch((err) => console.warn(err));
-      } else if (currentView === "facades") {
-        loadFacades().catch((err) => console.warn(err));
-      } else if (currentView === "compare") {
-        loadHistory().catch((err) => console.warn(err));
-      }
+  if (settingsTargetTempEl || topBarTargetTempEl) {
+    syncTargetTempInputs(getTargetTempC());
+    const onTargetChange = (ev) => {
+      applyTargetTempChange(ev && ev.target ? ev.target.value : getTargetTempC());
     };
-    settingsTargetTempEl.addEventListener("change", onTargetChange);
+    if (settingsTargetTempEl) {
+      settingsTargetTempEl.addEventListener("change", onTargetChange);
+    }
+    if (topBarTargetTempEl) {
+      topBarTargetTempEl.addEventListener("change", onTargetChange);
+    }
   }
 
   function refreshLocaleDependentUi() {
     if (settingsLocaleEl) settingsLocaleEl.value = I18n.getLocale();
     if (settingsAdviceModelEl) settingsAdviceModelEl.value = getAdviceModel();
-    if (settingsTargetTempEl) settingsTargetTempEl.value = String(getTargetTempC());
+    syncTargetTempInputs(getTargetTempC());
     applyChartHeight(chartHeight, { persist: false });
     syncTtsBtn();
     syncWindowNotifyBtn();

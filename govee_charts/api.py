@@ -665,6 +665,7 @@ class MapChatBody(BaseModel):
     session_id: str | None = Field(default=None, max_length=128)
     banner: dict[str, Any] | None = None
     advice_model: str | None = Field(default=None, max_length=8)
+    target_temp_c: float | None = Field(default=None, ge=10, le=40)
 
     model_config = {"extra": "forbid"}
 
@@ -1250,6 +1251,13 @@ def create_app(
         advice_model = (
             "v2" if str(body.advice_model or "").strip().lower() == "v2" else "v1"
         )
+        target_temp_c = body.target_temp_c
+        if target_temp_c is not None:
+            try:
+                target_temp_c = max(10.0, min(40.0, float(target_temp_c)))
+                target_temp_c = round(target_temp_c * 2) / 2
+            except (TypeError, ValueError):
+                target_temp_c = None
 
         # Fresh apartment snapshot (same builder as GET /api/apartment),
         # with enough future outdoor hours for the chat forecast slice.
@@ -1259,6 +1267,7 @@ def create_app(
                 future_hours=12.0,
                 latitude=None,
                 longitude=None,
+                target_temp_c=target_temp_c,
             )
         except Exception as exc:
             logger.exception("map-chat apartment snapshot failed")
@@ -1266,13 +1275,21 @@ def create_app(
                 status_code=502, detail=f"apartment snapshot failed: {exc}"
             ) from exc
         snapshot_obj = apartment_snapshot_dict(
-            apartment, advice_model=advice_model
+            apartment,
+            advice_model=advice_model,
+            target_temp_c=target_temp_c,
         )
         snapshot = compact_apartment_snapshot(
-            apartment, advice_model=advice_model
+            apartment,
+            advice_model=advice_model,
+            target_temp_c=target_temp_c,
         )
         prompt = build_prompt(
-            message, snapshot, banner=banner, advice_model=advice_model
+            message,
+            snapshot,
+            banner=banner,
+            advice_model=advice_model,
+            target_temp_c=target_temp_c,
         )
         workspace = resolve_workspace(str(cfg.get("workspace") or ""))
         model = str(cfg.get("model") or "auto")

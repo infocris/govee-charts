@@ -22,8 +22,9 @@ SYSTEM_PREAMBLE = (
     "You are advising on apartment climate for the Govee Charts Map view. "
     "The JSON snapshot includes the apartment layout (room areas, façade "
     "orientations, ceiling and door-frame heights) plus live sensors, "
-    "doors/windows, outdoor now, next-12h forecast, HVAC, and thermal "
-    "coupling — use that JSON; do not open config.toml. Ceiling is about "
+    "doors/windows, outdoor now, next-12h forecast, HVAC, thermal "
+    "coupling, and the user's indoor target temperature — use that JSON; "
+    "do not open config.toml. Ceiling is about "
     "2.5 m and interior door frames about 2.0 m: air above the lintel is a "
     "weakly mixed pocket. Answer clearly in the user's language. Ask mode is "
     "read-only: do not edit files or run mutating commands."
@@ -141,6 +142,7 @@ def apartment_snapshot_dict(
     payload: dict[str, Any],
     *,
     advice_model: str = "v1",
+    target_temp_c: float | None = None,
 ) -> dict[str, Any]:
     """Compact /api/apartment payload for prompts and chat history."""
     ceiling_m = _round_num(payload.get("ceiling_m"), 2)
@@ -261,6 +263,11 @@ def apartment_snapshot_dict(
         },
         "advice_model": "v2" if use_v2 else "v1",
     }
+    if target_temp_c is not None:
+        try:
+            out["target_temp_c"] = round(float(target_temp_c), 2)
+        except (TypeError, ValueError):
+            pass
     if use_v2:
         wa = payload.get("window_advice_v2") or airflow.get("advice") or {}
         out["window_advice"] = {
@@ -297,9 +304,12 @@ def compact_apartment_snapshot(
     payload: dict[str, Any],
     *,
     advice_model: str = "v1",
+    target_temp_c: float | None = None,
 ) -> str:
     """Shrink /api/apartment payload for the agent prompt (JSON string)."""
-    snap = apartment_snapshot_dict(payload, advice_model=advice_model)
+    snap = apartment_snapshot_dict(
+        payload, advice_model=advice_model, target_temp_c=target_temp_c
+    )
     text = json.dumps(snap, ensure_ascii=False, separators=(",", ":"))
     if len(text) > SNAPSHOT_MAX_CHARS:
         text = text[: SNAPSHOT_MAX_CHARS - 1] + "…"
@@ -329,6 +339,7 @@ def build_prompt(
     *,
     banner: dict[str, Any] | None = None,
     advice_model: str = "v1",
+    target_temp_c: float | None = None,
 ) -> str:
     msg = (user_message or "").strip()
     if len(msg) > USER_MESSAGE_MAX:
@@ -346,6 +357,16 @@ def build_prompt(
                 + (f"Title: {title}\n" if title else "")
                 + (f"Detail: {detail}\n" if detail else "")
             )
+    target_block = ""
+    if target_temp_c is not None:
+        try:
+            target_block = (
+                f"\n\nUser indoor target temperature: {float(target_temp_c):.1f} °C.\n"
+                "Window and airflow advice should aim toward this setpoint "
+                "(cool when warmer, heat when cooler)."
+            )
+        except (TypeError, ValueError):
+            target_block = ""
     preamble = (
         SYSTEM_PREAMBLE_V2
         if str(advice_model or "").strip().lower() == "v2"
@@ -354,6 +375,7 @@ def build_prompt(
     prompt = (
         f"{preamble}\n\n"
         f"Live apartment snapshot (JSON):\n{snapshot}"
+        f"{target_block}"
         f"{banner_block}\n"
         f"User question:\n{msg}"
     )

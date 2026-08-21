@@ -130,6 +130,7 @@
       "settings.targetTemp": "Target temperature",
       "settings.targetTempHelp":
         "Window alerts and open/close strategies aim toward this indoor temperature (cool when warmer, heat when cooler). Stored in this browser.",
+      "topBar.targetTemp": "Target",
       "settings.voice": "Voice for alerts",
       "settings.voiceHelp":
         "Only voices for the selected language. Enable voice alerts with the speaker button in the alert bar.",
@@ -493,6 +494,7 @@
       "map.chat.error": "Error: {error}",
       "map.chat.context": "Sensors & advice at request",
       "map.chat.bannerHidden": "No window advice banner",
+      "map.chat.targetTemp": "Target temperature: {temp} °C",
       "map.chat.session": "Session",
       "map.chat.sessionNew": "New chat…",
       "map.chat.sessionTitle": "Title",
@@ -675,6 +677,7 @@
       "settings.targetTemp": "Température cible",
       "settings.targetTempHelp":
         "Les alertes fenêtres et les stratégies d’ouverture/fermeture visent cette température intérieure (rafraîchir si plus chaud, réchauffer si plus frais). Stocké dans ce navigateur.",
+      "topBar.targetTemp": "Cible",
       "settings.voice": "Voix des alertes",
       "settings.voiceHelp":
         "Uniquement les voix de la langue choisie. Activez les alertes vocales avec le bouton haut-parleur dans la barre d’alertes.",
@@ -1041,6 +1044,7 @@
       "map.chat.error": "Erreur : {error}",
       "map.chat.context": "Capteurs et conseil à la requête",
       "map.chat.bannerHidden": "Pas de bannière de conseil",
+      "map.chat.targetTemp": "Température cible : {temp} °C",
       "map.chat.session": "Session",
       "map.chat.sessionNew": "Nouveau chat…",
       "map.chat.sessionTitle": "Titre",
