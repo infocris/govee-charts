@@ -390,6 +390,25 @@ class Database:
             if suffix and suffix in suffix_to_mac:
                 await self._rekey_device(addr, suffix_to_mac[suffix])
 
+    async def merge_device_alias(self, alias_address: str, canonical_address: str) -> bool:
+        """Merge an alias row (e.g. macOS UUID) onto a canonical BLE MAC.
+
+        Returns True when the alias existed and was rekeyed.
+        """
+        alias = alias_address.strip().upper()
+        canonical = canonical_address.strip().upper()
+        if not alias or not canonical or alias == canonical:
+            return False
+        if not is_ble_mac(canonical):
+            return False
+        cursor = await self.db.execute(
+            "SELECT 1 FROM devices WHERE address = ? LIMIT 1", (alias,)
+        )
+        if await cursor.fetchone() is None:
+            return False
+        await self._rekey_device(alias, canonical)
+        return True
+
     async def _rekey_device(self, old_address: str, new_address: str) -> None:
         old_address = old_address.upper()
         new_address = new_address.upper()
@@ -458,7 +477,27 @@ class Database:
             "UPDATE device_placements SET address = ? WHERE address = ?",
             (new_address, old_address),
         )
+        await self.db.execute("DELETE FROM ble_nearby WHERE address = ?", (old_address,))
+        await self.db.execute(
+            """
+            INSERT OR IGNORE INTO backfill_state
+                (address, last_success_ts, last_attempt_ts, last_rssi,
+                 last_battery, enabled, gatt_enabled)
+            SELECT ?, last_success_ts, last_attempt_ts, last_rssi,
+                   last_battery, enabled, gatt_enabled
+            FROM backfill_state WHERE address = ?
+            """,
+            (new_address, old_address),
+        )
+        await self.db.execute(
+            "DELETE FROM backfill_state WHERE address = ?", (old_address,)
+        )
+        await self.db.execute(
+            "UPDATE backfill_jobs SET address = ? WHERE address = ?",
+            (new_address, old_address),
+        )
         await self.db.execute("DELETE FROM devices WHERE address = ?", (old_address,))
+        await self.db.commit()
 
     async def _migrate_placements_from_devices(self) -> None:
         """One-shot copy of legacy device metadata into device_placements."""

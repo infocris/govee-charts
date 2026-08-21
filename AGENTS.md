@@ -39,6 +39,24 @@ Chat replies to the repository owner may follow their preferred language; projec
 
 - `scanner.adapters = ["hci0", "hci1", …]` runs parallel BlueZ scanners; empty means the system default adapter.
 
+### Device identity: MAC vs macOS UUID (recurring pitfall)
+
+**Symptom on macOS nodes:** new sensors show up as UUID addresses (e.g. `A889CA39-71C5-…`) and duplicate federation peers that already store the real BLE MAC. GATT `find_device_by_address(MAC)` also fails while live ads still decode.
+
+**Cause:** CoreBluetooth / Bleak on Darwin expose opaque peripheral **UUIDs**, not the public BLE MAC. BlueZ on Linux exposes the real MAC. Dedup and federation key on `(address, ts)`, so UUID ≠ MAC splits one physical sensor into two rows.
+
+**Canonical resolution (do not regress):**
+
+| Family | How the real MAC is recovered | Code |
+| --- | --- | --- |
+| Govee H5075 / H5179 | Last four hex chars of the local name (`GVH5075_2E08` → `…:2E:08`), mapped via `labels` / known MACs | `govee_charts/address.py` (`resolve_device_address`, `suffix_map`) |
+| SwitchBot Meter family | First 6 bytes of manufacturer data company id `0x0969` (Bleak already strips the company id) | `govee_charts/switchbot_decode.py` (`mac_from_manufacturer`) |
+
+- Store and federate the **canonical MAC** only; never persist a Darwin UUID as the device primary key once a MAC is known.
+- On first sight of UUID → MAC, the scanner merges the alias row (`Database.merge_device_alias` / `_rekey_device`) so history follows the MAC.
+- GATT on macOS must reuse the cached `BLEDevice` from the scanner (or a MAC-aware scan), not `find_device_by_address(MAC)` alone — see `history_gatt.py` / `scanner.remember_ble_device`.
+- When adding a **new BLE brand**, assume macOS will hand you a UUID and plan an embedded-MAC or name-suffix path before shipping decode support. A Linux-only smoke test will miss this bug.
+
 ## Conventions
 
 - Prefer small, focused changes; match existing module style.

@@ -13,7 +13,7 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from bleak.exc import BleakError
 
-from govee_charts.address import build_suffix_map, register_mac, resolve_device_address
+from govee_charts.address import build_suffix_map, is_ble_mac, register_mac, resolve_device_address
 from govee_charts.db import Database
 from govee_charts.decode import Reading, decode_advertisement
 from govee_charts.federation import PeerPublisher
@@ -138,6 +138,8 @@ class GoveeScanner:
         self._last_adv_wall: float | None = None
         self._last_ble_hb_write: float = 0.0
         self._ble_hb_interval: float = 5.0
+        # Platform UUID addresses already rekeyed onto a canonical MAC this run.
+        self._merged_aliases: set[str] = set()
 
     def remember_ble_device(self, address: str, device: BLEDevice) -> None:
         self._ble_devices[address.strip().upper()] = (device, time.time())
@@ -222,6 +224,22 @@ class GoveeScanner:
 
         register_mac(self.suffix_map, reading.address)
         self.remember_ble_device(reading.address, device)
+        platform_addr = device.address.strip().upper()
+        if (
+            platform_addr != reading.address
+            and is_ble_mac(reading.address)
+            and not is_ble_mac(platform_addr)
+            and platform_addr not in self._merged_aliases
+        ):
+            self._merged_aliases.add(platform_addr)
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    self._merge_platform_alias(platform_addr, reading.address),
+                    name=f"alias-merge-{reading.address[-8:]}",
+                )
+            except RuntimeError:
+                pass
         self._latest[reading.address] = reading
         try:
             loop = asyncio.get_running_loop()
@@ -240,6 +258,19 @@ class GoveeScanner:
         asyncio.get_running_loop().create_task(
             self._store(reading, adapter=adapter)
         )
+
+    async def _merge_platform_alias(self, alias: str, canonical: str) -> None:
+        try:
+            merged = await self.db.merge_device_alias(alias, canonical)
+            if merged:
+                logger.info(
+                    "Merged BLE alias %s → %s (macOS UUID → MAC)",
+                    alias,
+                    canonical,
+                )
+        except Exception:
+            self._merged_aliases.discard(alias)
+            logger.exception("Failed to merge BLE alias %s → %s", alias, canonical)
 
     async def _store(
         self,

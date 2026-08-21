@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
-from govee_charts.address import resolve_device_address
+from govee_charts.address import is_ble_mac, resolve_device_address
 from govee_charts.switchbot_decode import decode_switchbot_advertisement
 
 # Govee manufacturer company IDs (as exposed by bleak)
@@ -200,7 +200,13 @@ def decode_advertisement(
         rssi = getattr(adv, "rssi", None)
         rssi = int(rssi) if rssi is not None else None
     ble_name = str(sb.get("name") or name or address.upper())
-    canonical = resolve_device_address(address, ble_name, suffix_map=suffix_map)
+    # SwitchBot embeds the real MAC in manufacturer data — prefer it over the
+    # macOS CoreBluetooth UUID so federation/UI share one device identity.
+    sb_mac = sb.get("mac")
+    if isinstance(sb_mac, str) and is_ble_mac(sb_mac):
+        canonical = sb_mac.strip().upper()
+    else:
+        canonical = resolve_device_address(address, ble_name, suffix_map=suffix_map)
     return Reading(
         temperature_c=float(sb["temperature_c"]),
         humidity=float(sb["humidity"]),

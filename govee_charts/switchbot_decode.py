@@ -39,6 +39,22 @@ def _switchbot_mfg_payload(adv: AdvertisementData) -> bytes | None:
     return None
 
 
+def mac_from_manufacturer(adv: AdvertisementData) -> str | None:
+    """Extract the real BLE MAC from SwitchBot 0x0969 manufacturer data.
+
+    On macOS, CoreBluetooth exposes UUID peripherals; SwitchBot still embeds the
+    MAC as the first 6 bytes of company-id 0x0969 payload (after Bleak strips
+    the company id itself).
+    """
+    mfg = _switchbot_mfg_payload(adv)
+    if mfg is None or len(mfg) < 6:
+        return None
+    mac_bytes = mfg[:6]
+    if mac_bytes == b"\x00" * 6:
+        return None
+    return ":".join(f"{b:02X}" for b in mac_bytes)
+
+
 def is_switchbot_meter_type(dev_type: int) -> bool:
     return (dev_type & 0x7F) in _METER_TYPES
 
@@ -100,7 +116,16 @@ def decode_switchbot_advertisement(
     adv: AdvertisementData,
 ) -> dict[str, Any] | None:
     """Decode a SwitchBot Meter-family advertisement into reading fields."""
-    dev_type = resolve_meter_type(address, adv)
+    mac = mac_from_manufacturer(adv)
+    # Prefer the embedded MAC for type cache so split ADV/SCAN_RSP pairs still
+    # match after macOS UUID→MAC resolution.
+    lookup = mac or address
+    dev_type = resolve_meter_type(lookup, adv)
+    if dev_type is None and mac and mac.upper() != address.upper():
+        # Service-data-only packet may have been cached under the platform UUID.
+        dev_type = resolve_meter_type(address, adv)
+        if dev_type is not None:
+            _cache_type(mac, dev_type)
     if dev_type is None:
         return None
 
@@ -131,6 +156,7 @@ def decode_switchbot_advertisement(
     if temp is None or humidity is None:
         return None
 
+    canonical = mac or address
     label = (name or "").strip()
     if not label:
         short = {
@@ -140,7 +166,7 @@ def decode_switchbot_advertisement(
             "switchbot-meter-pro-co2": "MeterProCO2",
             "switchbot-meter-outdoor": "MeterOutdoor",
         }.get(model or "", "SwitchBot")
-        suffix = address.replace(":", "")[-4:].upper()
+        suffix = canonical.replace(":", "")[-4:].upper()
         label = f"{short}-{suffix}"
 
     return {
@@ -149,4 +175,5 @@ def decode_switchbot_advertisement(
         "battery": battery if battery is not None else 0,
         "model": model,
         "name": label,
+        "mac": mac,
     }

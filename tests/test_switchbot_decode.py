@@ -119,6 +119,27 @@ class SwitchBotDecodeTests(unittest.TestCase):
         self.assertEqual(reading.model, "switchbot-meter-plus")
         self.assertEqual(reading.address, "EC:6F:05:C6:28:6D")
 
+    def test_macos_uuid_resolves_to_embedded_mac(self) -> None:
+        """CoreBluetooth UUID must collapse onto the MAC in 0x0969 mfg data."""
+        from govee_charts.switchbot_decode import mac_from_manufacturer
+
+        mfg = bytes.fromhex("ec6f05c6286d050f059a38")
+        svc = bytes.fromhex("69c0e4059a38")
+        adv = _adv(
+            mfg={0x0969: mfg},
+            service_data={
+                "0000fd3d-0000-1000-8000-00805f9b34fb": svc,
+            },
+        )
+        self.assertEqual(mac_from_manufacturer(adv), "EC:6F:05:C6:28:6D")
+        uuid = "A889CA39-71C5-58EA-7806-D0D6A5EED1F5"
+        reading = decode_advertisement(uuid, "", adv)
+        self.assertIsNotNone(reading)
+        assert reading is not None
+        self.assertEqual(reading.address, "EC:6F:05:C6:28:6D")
+        self.assertEqual(reading.name, "MeterPlus-286D")
+        self.assertNotEqual(reading.address, uuid)
+
 
 if __name__ == "__main__":
     unittest.main()
