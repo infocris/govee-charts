@@ -359,6 +359,53 @@ class FloorplanCompileTests(unittest.TestCase):
         edges = {(e["a"], e["b"], e["kind"]) for e in compiled["edges"]}
         self.assertIn(("living", "wc", "wall"), edges)
 
+    def test_has_window_only_with_exterior_window_opening(self):
+        plan = empty_plan(name="windows", mode="free")
+        plan["meters_per_unit"] = 0.1
+        plan["envelope"] = {"type": "rect", "x": 0, "y": 0, "w": 100, "h": 60}
+        plan["shapes"] = [
+            {
+                "id": "s1",
+                "type": "rect",
+                "room_id": "living",
+                "label": "Living",
+                "x": 0,
+                "y": 0,
+                "w": 50,
+                "h": 60,
+            },
+            {
+                "id": "s2",
+                "type": "rect",
+                "room_id": "bedroom",
+                "label": "Bedroom",
+                "x": 50,
+                "y": 0,
+                "w": 50,
+                "h": 60,
+            },
+        ]
+        # Window only on living's west façade (x=0).
+        plan["openings"] = [
+            {
+                "id": "w1",
+                "kind": "window",
+                "x1": 0,
+                "y1": 20,
+                "x2": 0,
+                "y2": 40,
+                "room_a": "living",
+                "room_b": "outdoor",
+            }
+        ]
+        compiled = compile_plan(plan)
+        self.assertTrue(compiled["ok"], compiled)
+        by_id = {r["id"]: r for r in compiled["rooms"]}
+        self.assertTrue(by_id["living"]["has_window"])
+        self.assertTrue(by_id["living"]["exterior"])
+        self.assertFalse(by_id["bedroom"]["has_window"])
+        self.assertTrue(by_id["bedroom"]["exterior"])
+
 
 if __name__ == "__main__":
     unittest.main()

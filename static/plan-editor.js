@@ -7,7 +7,7 @@
 
   const SNAP = 8;
   const MIN_SIZE = 16;
-  const HANDLE = 7;
+  const HANDLE = 7 / 3;
   const HISTORY_MAX = 60;
   const VIEW_PAD = 40;
   const ZOOM_MIN = 0.5;
@@ -17,6 +17,9 @@
   let state = null;
   /** @type {{ onLayoutChanged?: () => void | Promise<void> } | null} */
   let opts = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let topoPreviewTimer = null;
+  let topoPreviewSeq = 0;
 
   function createState() {
     return {
@@ -68,6 +71,7 @@
     svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
     const label = $("plan-zoom-label");
     if (label) label.textContent = `${Math.round(zoomLevel() * 100)}%`;
+    positionToolbar();
   }
 
   function resetView() {
@@ -222,8 +226,7 @@
 
   function onEditorKeyDown(evt) {
     if (!state || !state.plan) return;
-    const mod = evt.metaKey || evt.ctrlKey;
-    if (!mod) return;
+    if (!isModalOpen()) return;
     const t = evt.target;
     if (
       t &&
@@ -235,13 +238,38 @@
       return;
     }
     const key = String(evt.key || "").toLowerCase();
-    if (key === "z" && !evt.shiftKey) {
-      evt.preventDefault();
-      undoEdit();
-    } else if ((key === "z" && evt.shiftKey) || key === "y") {
-      evt.preventDefault();
-      redoEdit();
+    const mod = evt.metaKey || evt.ctrlKey;
+    if (mod) {
+      if (key === "z" && !evt.shiftKey) {
+        evt.preventDefault();
+        undoEdit();
+      } else if ((key === "z" && evt.shiftKey) || key === "y") {
+        evt.preventDefault();
+        redoEdit();
+      }
+      return;
     }
+    if (key === "delete" || key === "backspace") {
+      evt.preventDefault();
+      deleteSelected();
+    }
+  }
+
+  /** Delete current selection, then return to select tool. */
+  function deleteSelectionOrEnterDeleteTool() {
+    if (
+      state.selectedId &&
+      state.selectedKind &&
+      state.selectedKind !== "envelope"
+    ) {
+      deleteSelected();
+      state.tool = "select";
+      renderToolbar();
+      return;
+    }
+    state.tool = "delete";
+    renderToolbar();
+    setStatus("Click a shape, wall, or opening to delete (or select one first)");
   }
 
   function $(id) {
@@ -771,6 +799,144 @@
     }
   }
 
+  function toolIconSvg(kind) {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", "18");
+    svg.setAttribute("height", "18");
+    svg.setAttribute("aria-hidden", "true");
+    svg.classList.add("plan-tool-icon");
+    const add = (name, attrs) => {
+      const el = document.createElementNS(NS, name);
+      for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+      svg.appendChild(el);
+      return el;
+    };
+    if (kind === "select") {
+      // Pointer cursor
+      const p = add("path", { d: "M5 3l14 9-6 1.5L11 21z" });
+      p.setAttribute("fill", "currentColor");
+      p.setAttribute("stroke", "none");
+    } else if (kind === "rect") {
+      add("rect", { x: 5, y: 5, width: 14, height: 14, rx: 2 });
+    } else if (kind === "wall") {
+      add("line", { x1: 4, y1: 12, x2: 20, y2: 12 });
+      add("line", { x1: 4, y1: 8, x2: 4, y2: 16 });
+      add("line", { x1: 20, y1: 8, x2: 20, y2: 16 });
+    } else if (kind === "opening") {
+      add("path", { d: "M6 20V8a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v12" });
+      add("line", { x1: 12, y1: 5, x2: 12, y2: 20 });
+    } else if (kind === "delete") {
+      add("path", { d: "M5 7h14" });
+      add("path", { d: "M9 7V5h6v2" });
+      add("path", { d: "M8 7l1 12h6l1-12" });
+    } else if (kind === "snap") {
+      add("path", { d: "M8 4v6H4" });
+      add("path", { d: "M16 4v6h4" });
+      add("path", { d: "M4 14h4v6" });
+      add("path", { d: "M20 14h-4v6" });
+      add("circle", { cx: 12, cy: 12, r: 2.2 });
+    }
+    return svg;
+  }
+
+  function selectionAnchorUser() {
+    if (!state || !state.plan || !state.selectedKind || !state.selectedId) return null;
+    const plan = state.plan;
+    const id = state.selectedId;
+    const kind = state.selectedKind;
+    if (kind === "envelope") {
+      const e = plan.envelope;
+      if (!e) return null;
+      return { x: e.x + e.w / 2, y: e.y, belowY: e.y + e.h };
+    }
+    if (kind === "shape" || kind === "face") {
+      const items = kind === "shape" ? plan.shapes : plan.faces;
+      const it = (items || []).find((x) => x.id === id);
+      if (!it) return null;
+      return { x: it.x + it.w / 2, y: it.y, belowY: it.y + it.h };
+    }
+    if (kind === "wall" || kind === "opening") {
+      const items = kind === "wall" ? plan.walls : plan.openings;
+      const it = (items || []).find((x) => x.id === id);
+      if (!it) return null;
+      return {
+        x: (Number(it.x1) + Number(it.x2)) / 2,
+        y: Math.min(Number(it.y1), Number(it.y2)),
+        belowY: Math.max(Number(it.y1), Number(it.y2)),
+      };
+    }
+    return null;
+  }
+
+  function svgUserToCanvas(svg, canvas, x, y) {
+    if (!svg.createSVGPoint || !svg.getScreenCTM) return null;
+    const pt = svg.createSVGPoint();
+    pt.x = x;
+    pt.y = y;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return null;
+    const sp = pt.matrixTransform(ctm);
+    const crect = canvas.getBoundingClientRect();
+    return { x: sp.x - crect.left, y: sp.y - crect.top };
+  }
+
+  function positionToolbar() {
+    const bar = $("plan-editor-tools");
+    const svg = $("plan-editor-svg");
+    const canvas = bar && bar.parentElement;
+    if (!bar || !svg || !canvas || bar.hidden || !state || !state.plan) return;
+
+    const margin = 8;
+    const crect = canvas.getBoundingClientRect();
+    if (crect.width < 8 || crect.height < 8) return;
+    const barW = Math.max(bar.offsetWidth || 0, 140);
+    const barH = Math.max(bar.offsetHeight || 0, 36);
+
+    const clampLeft = (x) =>
+      Math.max(barW / 2 + margin, Math.min(crect.width - barW / 2 - margin, x));
+
+    const anchor = selectionAnchorUser();
+    if (!anchor) {
+      bar.classList.remove("is-anchored");
+      bar.style.left = "50%";
+      bar.style.top = `${margin}px`;
+      bar.style.transform = "translateX(-50%)";
+      return;
+    }
+
+    const above = svgUserToCanvas(svg, canvas, anchor.x, anchor.y);
+    const below = svgUserToCanvas(svg, canvas, anchor.x, anchor.belowY);
+    if (!above) {
+      bar.classList.remove("is-anchored");
+      bar.style.left = "50%";
+      bar.style.top = `${margin}px`;
+      bar.style.transform = "translateX(-50%)";
+      return;
+    }
+
+    bar.classList.add("is-anchored");
+    let left = clampLeft(above.x);
+    let top;
+    let transform;
+    // Prefer floating just above the selection; flip below if clipped.
+    if (above.y - barH - margin >= margin) {
+      top = above.y - margin;
+      transform = "translate(-50%, -100%)";
+    } else if (below && below.y + barH + margin <= crect.height - margin) {
+      top = below.y + margin;
+      transform = "translate(-50%, 0)";
+    } else {
+      top = margin;
+      transform = "translate(-50%, 0)";
+    }
+    top = Math.max(margin, Math.min(crect.height - margin, top));
+    bar.style.left = `${left}px`;
+    bar.style.top = `${top}px`;
+    bar.style.transform = transform;
+  }
+
   function renderToolbar() {
     const bar = $("plan-editor-tools");
     if (!bar || !state.plan) {
@@ -782,25 +948,33 @@
     const tools =
       mode === "free"
         ? [
-            ["select", "Select"],
-            ["rect", "Room"],
-            ["opening", "Opening"],
-            ["delete", "Delete"],
+            ["select", "map.plan.toolSelect", "Select"],
+            ["rect", "map.plan.toolRoom", "Draw room"],
+            ["opening", "map.plan.toolOpening", "Draw opening"],
+            ["delete", "map.plan.toolDelete", "Delete selection"],
           ]
         : [
-            ["select", "Select"],
-            ["wall", "Wall"],
-            ["opening", "Opening"],
-            ["delete", "Delete"],
+            ["select", "map.plan.toolSelect", "Select"],
+            ["wall", "map.plan.toolWall", "Draw wall"],
+            ["opening", "map.plan.toolOpening", "Draw opening"],
+            ["delete", "map.plan.toolDelete", "Delete selection"],
           ];
     bar.replaceChildren();
-    for (const [id, label] of tools) {
+    for (const [id, i18nKey, fallback] of tools) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "plan-tool-btn" + (state.tool === id ? " active" : "");
       btn.dataset.tool = id;
-      btn.textContent = label;
-      btn.addEventListener("click", () => {
+      const label = tPlan(i18nKey, fallback);
+      btn.title = label;
+      btn.setAttribute("aria-label", label);
+      btn.appendChild(toolIconSvg(id));
+      btn.addEventListener("click", (evt) => {
+        evt.stopPropagation();
+        if (id === "delete") {
+          deleteSelectionOrEnterDeleteTool();
+          return;
+        }
         state.tool = id;
         renderToolbar();
         setStatus(
@@ -810,33 +984,35 @@
               ? "Drag to draw an axis-aligned wall"
               : id === "opening"
                 ? "Drag along a shared edge or façade for a door/window"
-                : id === "delete"
-                  ? "Click a shape, wall, or opening to delete"
-                  : "Select and drag handles to move / resize"
+                : "Select and drag handles to move / resize"
         );
       });
       bar.appendChild(btn);
     }
 
-    const snapLab = document.createElement("label");
-    snapLab.className = "plan-snap-toggle";
-    const snapCb = document.createElement("input");
-    snapCb.type = "checkbox";
-    snapCb.checked = !!state.snapEnabled;
-    snapCb.addEventListener("change", () => {
-      state.snapEnabled = snapCb.checked;
+    const sep = document.createElement("span");
+    sep.className = "plan-tool-sep";
+    sep.setAttribute("aria-hidden", "true");
+    bar.appendChild(sep);
+
+    const snapBtn = document.createElement("button");
+    snapBtn.type = "button";
+    snapBtn.className = "plan-tool-btn";
+    snapBtn.dataset.tool = "snap";
+    const snapLabel = tPlan("map.plan.snap", "Snap");
+    snapBtn.title = snapLabel;
+    snapBtn.setAttribute("aria-label", snapLabel);
+    snapBtn.setAttribute("aria-pressed", state.snapEnabled ? "true" : "false");
+    snapBtn.appendChild(toolIconSvg("snap"));
+    snapBtn.addEventListener("click", (evt) => {
+      evt.stopPropagation();
+      state.snapEnabled = !state.snapEnabled;
+      snapBtn.setAttribute("aria-pressed", state.snapEnabled ? "true" : "false");
       setStatus(state.snapEnabled ? "Snap enabled" : "Snap disabled");
     });
-    const t =
-      window.I18n && typeof window.I18n.t === "function"
-        ? window.I18n.t.bind(window.I18n)
-        : (k) => k;
-    const snapTxt = document.createElement("span");
-    const snapLabel = t("map.plan.snap");
-    snapTxt.textContent = snapLabel === "map.plan.snap" ? "Snap" : snapLabel;
-    snapLab.appendChild(snapCb);
-    snapLab.appendChild(snapTxt);
-    bar.appendChild(snapLab);
+    bar.appendChild(snapBtn);
+
+    requestAnimationFrame(() => positionToolbar());
   }
 
   function renderProps() {
@@ -857,8 +1033,11 @@
     meta.className = "plan-props-block";
     meta.innerHTML = `
       <label>Name <input type="text" id="plan-prop-name" maxlength="120" /></label>
-      <label>North (° clockwise from top)
-        <input type="number" id="plan-prop-north" step="1" min="0" max="359" />
+      <label class="plan-prop-north">North (° clockwise from top)
+        <div class="plan-prop-north-row">
+          <input type="range" id="plan-prop-north" min="0" max="359" step="1" />
+          <output id="plan-prop-north-val" for="plan-prop-north">0°</output>
+        </div>
       </label>
       <label>Meters / unit
         <input type="number" id="plan-prop-mpu" step="0.001" min="0.0001" />
@@ -868,9 +1047,12 @@
     panel.appendChild(meta);
     const nameEl = meta.querySelector("#plan-prop-name");
     const northEl = meta.querySelector("#plan-prop-north");
+    const northVal = meta.querySelector("#plan-prop-north-val");
     const mpuEl = meta.querySelector("#plan-prop-mpu");
     nameEl.value = state.plan.name || "";
-    northEl.value = String(state.plan.north_deg ?? 0);
+    const northDeg = ((Number(state.plan.north_deg) || 0) % 360 + 360) % 360;
+    northEl.value = String(Math.round(northDeg));
+    northVal.textContent = `${Math.round(northDeg)}°`;
     mpuEl.value = String(state.plan.meters_per_unit ?? 0.05);
     nameEl.addEventListener("change", () => {
       captureBeforeEdit();
@@ -878,10 +1060,29 @@
       state.dirty = true;
       renderPlanSelect();
     });
-    northEl.addEventListener("change", () => {
-      captureBeforeEdit();
-      state.plan.north_deg = ((Number(northEl.value) || 0) % 360 + 360) % 360;
+    let northHistArmed = true;
+    northEl.addEventListener("pointerdown", () => {
+      northHistArmed = true;
+    });
+    northEl.addEventListener("keydown", () => {
+      northHistArmed = true;
+    });
+    northEl.addEventListener("input", () => {
+      if (northHistArmed) {
+        captureBeforeEdit();
+        northHistArmed = false;
+      }
+      const v = ((Number(northEl.value) || 0) % 360 + 360) % 360;
+      northVal.textContent = `${Math.round(v)}°`;
+      state.plan.north_deg = v;
       state.dirty = true;
+      drawOrientationPartitions($("plan-editor-svg"), state.plan.envelope, v);
+      drawNorthIndicator($("plan-editor-svg"), state.plan.envelope, v);
+      updateActionButtons();
+      scheduleTopoPreview();
+    });
+    northEl.addEventListener("change", () => {
+      northHistArmed = true;
     });
     mpuEl.addEventListener("change", () => {
       const v = Number(mpuEl.value);
@@ -1169,6 +1370,7 @@
     const svg = $("plan-editor-svg");
     if (!svg || !state.plan) {
       if (svg) svg.replaceChildren();
+      clearTopoPreview();
       return;
     }
     const plan = state.plan;
@@ -1186,15 +1388,22 @@
       "data-id": "envelope",
     });
     svg.appendChild(gEnv);
+    drawOrientationPartitions(svg, env, plan.north_deg || 0);
     drawEnvelopeDimensions(svg, env);
 
     if (plan.mode === "free") {
       for (const s of plan.shapes || []) {
         svg.appendChild(drawRoomRect(s, "shape"));
       }
+      for (const s of plan.shapes || []) {
+        svg.appendChild(drawRoomBorder(s, "shape"));
+      }
     } else {
       for (const f of plan.faces || []) {
         svg.appendChild(drawRoomRect(f, "face"));
+      }
+      for (const f of plan.faces || []) {
+        svg.appendChild(drawRoomBorder(f, "face"));
       }
       for (const w of plan.walls || []) {
         const line = svgEl("line", {
@@ -1236,9 +1445,544 @@
     }
 
     // North indicator
+    drawNorthIndicator(svg, env, plan.north_deg || 0);
+
+    renderProps();
+    updateActionButtons();
+    scheduleTopoPreview();
+    requestAnimationFrame(() => positionToolbar());
+  }
+
+  function tPlan(key, fallback, vars) {
+    const t =
+      window.I18n && typeof window.I18n.t === "function"
+        ? window.I18n.t.bind(window.I18n)
+        : null;
+    if (!t) return fallback;
+    const out = t(key, vars);
+    return out === key ? fallback : out;
+  }
+
+  function clearTopoPreview() {
+    const wrap = $("plan-editor-topo");
+    const svg = $("plan-editor-topo-svg");
+    const warn = $("plan-editor-topo-warn");
+    if (wrap) wrap.hidden = true;
+    if (svg) svg.replaceChildren();
+    if (warn) {
+      warn.hidden = true;
+      warn.textContent = "";
+    }
+  }
+
+  function scheduleTopoPreview() {
+    if (topoPreviewTimer) clearTimeout(topoPreviewTimer);
+    topoPreviewTimer = setTimeout(() => {
+      topoPreviewTimer = null;
+      refreshTopoPreview().catch(() => {
+        /* status already set when useful */
+      });
+    }, 280);
+  }
+
+  function topoCompassUnit(key) {
+    const tokens = String(key || "")
+      .toLowerCase()
+      .split("+")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    let dx = 0;
+    let dy = 0;
+    for (const tok of tokens) {
+      if (tok === "n" || tok === "north") dy -= 1;
+      else if (tok === "s" || tok === "south") dy += 1;
+      else if (tok === "e" || tok === "east") dx += 1;
+      else if (tok === "w" || tok === "west") dx -= 1;
+      else {
+        if (tok.includes("n")) dy -= 1;
+        if (tok.includes("s")) dy += 1;
+        if (tok.includes("e")) dx += 1;
+        if (tok.includes("w")) dx -= 1;
+      }
+    }
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) return { x: 0, y: -1 };
+    return { x: dx / len, y: dy / len };
+  }
+
+  function topoFacadeKey(room) {
+    return [...new Set((room.exterior || []).map((o) => String(o).toLowerCase()))]
+      .filter(Boolean)
+      .sort()
+      .join("+");
+  }
+
+  function layoutTopoPreview(rooms, edges) {
+    const ids = rooms.map((r) => r.id);
+    const degree = Object.fromEntries(ids.map((id) => [id, 0]));
+    for (const e of edges) {
+      if (degree[e.a] != null) degree[e.a] += 1;
+      if (degree[e.b] != null) degree[e.b] += 1;
+    }
+    const hub =
+      ids.find((id) => id === "corridor") ||
+      ids.slice().sort((a, b) => degree[b] - degree[a])[0];
+    /** @type {Record<string, {x:number,y:number}>} */
+    const pos = {};
+    if (hub) pos[hub] = { x: 0, y: 0 };
+    const others = ids.filter((id) => id !== hub);
+    others.forEach((id, i) => {
+      const ang = -Math.PI / 2 + (i * 2 * Math.PI) / Math.max(others.length, 1);
+      pos[id] = { x: Math.cos(ang), y: Math.sin(ang) };
+    });
+    // Light repulsion so labels stay readable.
+    for (let iter = 0; iter < 24; iter++) {
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          const a = pos[ids[i]];
+          const b = pos[ids[j]];
+          let dx = b.x - a.x;
+          let dy = b.y - a.y;
+          let dist = Math.hypot(dx, dy) || 0.01;
+          if (dist >= 0.85) continue;
+          const push = ((0.85 - dist) / dist) * 0.08;
+          dx *= push;
+          dy *= push;
+          a.x -= dx;
+          a.y -= dy;
+          b.x += dx;
+          b.y += dy;
+        }
+      }
+      for (const e of edges) {
+        const a = pos[e.a];
+        const b = pos[e.b];
+        if (!a || !b) continue;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const dist = Math.hypot(dx, dy) || 0.01;
+        const pull = (dist - 1.0) * 0.04;
+        const ox = (dx / dist) * pull;
+        const oy = (dy / dist) * pull;
+        a.x += ox;
+        a.y += oy;
+        b.x -= ox;
+        b.y -= oy;
+      }
+    }
+
+    /** @type {{key:string,label:string,dir:{x:number,y:number},rooms:string[]}[]} */
+    const facades = [];
+    const seen = new Map();
+    for (const room of rooms) {
+      if (room.has_window === false) continue;
+      const key = topoFacadeKey(room);
+      if (!key) continue;
+      if (!seen.has(key)) {
+        const g = {
+          key,
+          label: key.toUpperCase(),
+          dir: topoCompassUnit(key),
+          rooms: [],
+        };
+        seen.set(key, g);
+        facades.push(g);
+      }
+      seen.get(key).rooms.push(room.id);
+    }
+
+    /** @type {Record<string, {x:number,y:number}>} */
+    const facadePos = {};
+    for (const g of facades) {
+      let sx = 0;
+      let sy = 0;
+      let n = 0;
+      for (const rid of g.rooms) {
+        const p = pos[rid];
+        if (!p) continue;
+        sx += p.x;
+        sy += p.y;
+        n += 1;
+      }
+      if (!n) continue;
+      facadePos[g.key] = {
+        x: sx / n + g.dir.x * 0.72,
+        y: sy / n + g.dir.y * 0.72,
+      };
+    }
+    return { pos, facades, facadePos };
+  }
+
+  function paintTopoPreview(compiled) {
+    const wrap = $("plan-editor-topo");
+    const svg = $("plan-editor-topo-svg");
+    const warn = $("plan-editor-topo-warn");
+    if (!wrap || !svg) return;
+    wrap.hidden = false;
+    svg.replaceChildren();
+
+    const rooms = compiled.rooms || [];
+    const edges = compiled.edges || [];
+    const warnings = compiled.warnings || [];
+    if (warn) {
+      if (!rooms.length) {
+        warn.hidden = false;
+        warn.textContent = tPlan(
+          "map.plan.topologyEmpty",
+          "Assign room ids to see the topology graph."
+        );
+      } else if (warnings.length) {
+        warn.hidden = false;
+        warn.textContent = warnings.slice(0, 2).join(" · ");
+      } else {
+        warn.hidden = true;
+        warn.textContent = "";
+      }
+    }
+    if (!rooms.length) return;
+
+    const { pos, facades, facadePos } = layoutTopoPreview(rooms, edges);
+    const pts = [...Object.values(pos), ...Object.values(facadePos)];
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of pts) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+    }
+    if (!Number.isFinite(minX)) return;
+
+    // Paint in a fixed pixel-like viewBox so strokes / labels match the panel size.
+    const W = 240;
+    const H = 168;
+    const padL = 18;
+    const padR = 18;
+    const padT = 16;
+    const padB = 22; // room for labels under nodes
+    const spanX = Math.max(0.35, maxX - minX);
+    const spanY = Math.max(0.35, maxY - minY);
+    const scale = Math.min((W - padL - padR) / spanX, (H - padT - padB) / spanY);
+    const ox = padL + ((W - padL - padR) - spanX * scale) / 2;
+    const oy = padT + ((H - padT - padB) - spanY * scale) / 2;
+    const toXY = (p) => ({
+      x: ox + (p.x - minX) * scale,
+      y: oy + (p.y - minY) * scale,
+    });
+
+    const nRooms = rooms.length;
+    const nodeR = nRooms > 8 ? 7 : nRooms > 5 ? 8 : 9;
+    const fontSize = nRooms > 8 ? 8 : 9;
+    const extW = 22;
+    const extH = 12;
+    const strokeWall = 1;
+    const strokeDoor = 1.75;
+    const strokeExt = 1.15;
+
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+    function shortLabel(text, maxLen) {
+      const s = String(text || "").trim() || "?";
+      if (s.length <= maxLen) return s;
+      return s.slice(0, Math.max(1, maxLen - 1)) + "…";
+    }
+
+    for (const e of edges) {
+      const a = pos[e.a] && toXY(pos[e.a]);
+      const b = pos[e.b] && toXY(pos[e.b]);
+      if (!a || !b) continue;
+      const kind = e.kind || "wall";
+      const sw =
+        kind === "door" ? strokeDoor : kind === "wall_partial" ? 1.35 : strokeWall;
+      svg.appendChild(
+        svgEl("line", {
+          x1: a.x,
+          y1: a.y,
+          x2: b.x,
+          y2: b.y,
+          class: `plan-topo-edge plan-topo-edge-${kind}`,
+          "stroke-width": sw,
+        })
+      );
+    }
+    for (const g of facades) {
+      const fp0 = facadePos[g.key];
+      if (!fp0) continue;
+      const fp = toXY(fp0);
+      for (const rid of g.rooms) {
+        const rp0 = pos[rid];
+        if (!rp0) continue;
+        const rp = toXY(rp0);
+        svg.appendChild(
+          svgEl("line", {
+            x1: rp.x,
+            y1: rp.y,
+            x2: fp.x,
+            y2: fp.y,
+            class: "plan-topo-edge plan-topo-edge-exterior",
+            "stroke-width": strokeExt,
+          })
+        );
+      }
+    }
+    for (const room of rooms) {
+      const p0 = pos[room.id];
+      if (!p0) continue;
+      const p = toXY(p0);
+      svg.appendChild(
+        svgEl("circle", {
+          cx: p.x,
+          cy: p.y,
+          r: nodeR,
+          class: "plan-topo-node-room",
+        })
+      );
+      const label = svgEl("text", {
+        x: p.x,
+        y: p.y + nodeR + 9,
+        class: "plan-topo-label",
+        "font-size": fontSize,
+      });
+      label.textContent = shortLabel(room.label || room.id, nRooms > 6 ? 8 : 10);
+      svg.appendChild(label);
+    }
+    for (const g of facades) {
+      const p0 = facadePos[g.key];
+      if (!p0) continue;
+      const p = toXY(p0);
+      svg.appendChild(
+        svgEl("rect", {
+          x: p.x - extW / 2,
+          y: p.y - extH / 2,
+          width: extW,
+          height: extH,
+          rx: 3,
+          class: "plan-topo-node-exterior",
+        })
+      );
+      const label = svgEl("text", {
+        x: p.x,
+        y: p.y,
+        class: "plan-topo-label plan-topo-label-ext",
+        "font-size": fontSize - 1,
+      });
+      label.textContent = g.label;
+      svg.appendChild(label);
+    }
+  }
+
+  async function refreshTopoPreview() {
+    const wrap = $("plan-editor-topo");
+    if (!state || !state.plan) {
+      clearTopoPreview();
+      return;
+    }
+    if (wrap) wrap.hidden = false;
+    const seq = ++topoPreviewSeq;
+    const plan = state.plan;
+    const body = {
+      id: plan.id,
+      name: plan.name,
+      mode: plan.mode,
+      north_deg: plan.north_deg,
+      meters_per_unit: plan.meters_per_unit,
+      envelope: plan.envelope,
+      shapes: plan.shapes || [],
+      walls: plan.walls || [],
+      faces: plan.faces || [],
+      openings: plan.openings || [],
+    };
+    try {
+      const compiled = await api("/api/apartment/plans/compile-preview", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (seq !== topoPreviewSeq) return;
+      paintTopoPreview(compiled || {});
+    } catch (err) {
+      if (seq !== topoPreviewSeq) return;
+      const warn = $("plan-editor-topo-warn");
+      if (wrap) wrap.hidden = false;
+      const svg = $("plan-editor-topo-svg");
+      if (svg) svg.replaceChildren();
+      if (warn) {
+        warn.hidden = false;
+        warn.textContent = String(err.message || err);
+      }
+    }
+  }
+
+  const ORIENT_IDS = ["n", "ne", "e", "se", "s", "sw", "w", "nw"];
+  const ORIENT_LABELS = {
+    n: "N",
+    ne: "NE",
+    e: "E",
+    se: "SE",
+    s: "S",
+    sw: "SW",
+    w: "W",
+    nw: "NW",
+  };
+
+  /** Match server compass_from_deg / _side_to_orientation. */
+  function compassFromDeg(deg) {
+    const idx = Math.floor((((Number(deg) || 0) % 360) + 360 + 22.5) / 45) % 8;
+    return ORIENT_IDS[idx];
+  }
+
+  function sideToOrientation(side, northDeg) {
+    const base = { n: 0, e: 90, s: 180, w: 270 }[side];
+    return compassFromDeg(base + (Number(northDeg) || 0));
+  }
+
+  /**
+   * Meteorological bearing β (0=N, 90=E) → canvas unit vector (+y down).
+   * north_deg=0 ⇒ N toward top of the SVG.
+   */
+  function bearingToCanvasUnit(bearingDeg) {
+    const rad = ((Number(bearingDeg) || 0) * Math.PI) / 180;
+    return { x: Math.sin(rad), y: -Math.cos(rad) };
+  }
+
+  function polarPoint(cx, cy, bearingDeg, r) {
+    const u = bearingToCanvasUnit(bearingDeg);
+    return { x: cx + u.x * r, y: cy + u.y * r };
+  }
+
+  function wedgePath(cx, cy, r, a0, a1) {
+    const steps = 12;
+    const pts = [{ x: cx, y: cy }];
+    for (let i = 0; i <= steps; i++) {
+      const t = a0 + ((a1 - a0) * i) / steps;
+      pts.push(polarPoint(cx, cy, t, r));
+    }
+    return (
+      "M " +
+      pts
+        .map((p, i) => `${i === 0 ? "" : "L "}${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
+        .join(" ") +
+      " Z"
+    );
+  }
+
+  function drawOrientationPartitions(svg, env, northDeg) {
+    if (!svg || !env) return;
+    svg.querySelectorAll(".plan-orient-root").forEach((el) => el.remove());
+
+    const cx = env.x + env.w / 2;
+    const cy = env.y + env.h / 2;
+    const r = Math.hypot(env.w, env.h) * 0.75;
+    const north = ((Number(northDeg) || 0) % 360 + 360) % 360;
+    const clipId = "plan-orient-clip";
+
+    const root = svgEl("g", { class: "plan-orient-root" });
+    const defs = svgEl("defs", {});
+    const clip = svgEl("clipPath", { id: clipId });
+    clip.appendChild(
+      svgEl("rect", { x: env.x, y: env.y, width: env.w, height: env.h })
+    );
+    defs.appendChild(clip);
+    root.appendChild(defs);
+
+    const bg = svgEl("g", {
+      class: "plan-orient-bg",
+      "clip-path": `url(#${clipId})`,
+    });
+    // Sector i covers meteorological [i*45-22.5, i*45+22.5], drawn in canvas
+    // so that bearing 0 (N) follows north_deg (same mapping as façades).
+    for (let i = 0; i < 8; i++) {
+      const mid = i * 45;
+      const a0 = north + mid - 22.5;
+      const a1 = north + mid + 22.5;
+      bg.appendChild(
+        svgEl("path", {
+          d: wedgePath(cx, cy, r, a0, a1),
+          class: "plan-orient-wedge plan-orient-wedge-" + (i % 2 === 0 ? "a" : "b"),
+        })
+      );
+    }
+    for (let i = 0; i < 8; i++) {
+      const a = north + i * 45 - 22.5;
+      const p = polarPoint(cx, cy, a, r);
+      bg.appendChild(
+        svgEl("line", {
+          x1: cx,
+          y1: cy,
+          x2: p.x,
+          y2: p.y,
+          class: "plan-orient-ray",
+        })
+      );
+    }
+    for (let i = 0; i < 8; i++) {
+      const mid = north + i * 45;
+      const p = polarPoint(cx, cy, mid, Math.min(env.w, env.h) * 0.28);
+      const lab = svgEl("text", {
+        x: p.x,
+        y: p.y,
+        class: "plan-orient-label",
+      });
+      lab.textContent = ORIENT_LABELS[ORIENT_IDS[i]];
+      bg.appendChild(lab);
+    }
+    root.appendChild(bg);
+
+    // Edge labels = orientation assigned to that envelope side by the compiler.
+    // Keep mid-bottom / mid-left free for metric dimensions (width / height).
+    const badgeW = 18;
+    const badgeH = 10;
+    const out = 11;
+    const edgePos = {
+      n: { x: cx, y: env.y - out },
+      e: { x: env.x + env.w + out, y: cy },
+      // Offset along the edge so they don't sit on the length / height labels.
+      s: { x: env.x + env.w * 0.78, y: env.y + env.h + out },
+      w: { x: env.x - out, y: env.y + env.h * 0.22 },
+    };
+    for (const side of ["n", "e", "s", "w"]) {
+      const o = sideToOrientation(side, north);
+      const m = edgePos[side];
+      const g = svgEl("g", { class: "plan-orient-edge" });
+      g.appendChild(
+        svgEl("rect", {
+          x: m.x - badgeW / 2,
+          y: m.y - badgeH / 2,
+          width: badgeW,
+          height: badgeH,
+          rx: 2,
+          class: "plan-orient-edge-badge",
+        })
+      );
+      const t = svgEl("text", {
+        x: m.x,
+        y: m.y,
+        class: "plan-orient-edge-label",
+      });
+      t.textContent = ORIENT_LABELS[o];
+      g.appendChild(t);
+      root.appendChild(g);
+    }
+
+    // Keep wedges under rooms: always right after the envelope rect.
+    const envEl = svg.querySelector(".plan-envelope");
+    if (envEl && envEl.nextSibling) {
+      svg.insertBefore(root, envEl.nextSibling);
+    } else if (envEl) {
+      envEl.after(root);
+    } else {
+      svg.insertBefore(root, svg.firstChild);
+    }
+  }
+
+  function drawNorthIndicator(svg, env, northDeg) {
+    if (!svg || !env) return;
+    svg.querySelectorAll(".plan-north-arrow, .plan-north-label").forEach((el) => el.remove());
     const nx = env.x + env.w + 18;
     const ny = env.y + 24;
-    const ang = ((plan.north_deg || 0) * Math.PI) / 180;
+    const ang = ((Number(northDeg) || 0) * Math.PI) / 180;
     // Arrow points toward north (top when north_deg=0)
     const ax = nx + Math.sin(ang) * 18;
     const ay = ny - Math.cos(ang) * 18;
@@ -1254,9 +1998,6 @@
     const nt = svgEl("text", { x: nx, y: ny + 16, class: "plan-north-label" });
     nt.textContent = "N";
     svg.appendChild(nt);
-
-    renderProps();
-    updateActionButtons();
   }
 
   function svgEl(name, attrs) {
@@ -1321,7 +2062,7 @@
     const areaTxt = area != null ? formatAreaM2(area) : "";
     const t = svgEl("text", {
       x: item.x + item.w / 2,
-      y: item.y + item.h / 2 - (areaTxt ? 5 : 0),
+      y: item.y + item.h / 2 - (areaTxt ? 2.5 : 0),
       class: "plan-room-label",
       "data-kind": kind,
       "data-id": item.id,
@@ -1331,7 +2072,7 @@
     if (areaTxt) {
       const t2 = svgEl("text", {
         x: item.x + item.w / 2,
-        y: item.y + item.h / 2 + 9,
+        y: item.y + item.h / 2 + 4.5,
         class: "plan-room-label plan-room-area-label",
         "data-kind": kind,
         "data-id": item.id,
@@ -1340,6 +2081,23 @@
       g.appendChild(t2);
     }
     return g;
+  }
+
+  /** Stroke drawn after fills so shared edges stay visible. */
+  function drawRoomBorder(item, kind) {
+    const selected = state.selectedId === item.id && state.selectedKind === kind;
+    return svgEl("rect", {
+      x: item.x,
+      y: item.y,
+      width: item.w,
+      height: item.h,
+      class:
+        "plan-room-border" +
+        (selected ? " selected" : "") +
+        (item.room_id ? "" : " unnamed"),
+      "data-kind": kind,
+      "data-id": item.id,
+    });
   }
 
   function drawHandles(svg, rect) {
@@ -1468,6 +2226,8 @@
       if (hit && hit.kind && hit.kind !== "handle" && hit.kind !== "envelope") {
         selectItem(hit.kind, hit.id);
         deleteSelected();
+        state.tool = "select";
+        renderToolbar();
       }
       return;
     }
@@ -1923,6 +2683,7 @@
       renderSvg();
       renderProps();
       updateActionButtons();
+      clearTopoPreview();
       return;
     }
     const plan = await api(`/api/apartment/plans/${encodeURIComponent(id)}`);
@@ -1934,8 +2695,24 @@
     state.dirty = false;
     state.tool = "select";
     renderToolbar();
+    renderPlanSelect();
     renderSvg();
     setStatus(`Loaded “${plan.name}” (${plan.mode})`);
+  }
+
+  async function openActivePlanIfNeeded() {
+    if (!state) return;
+    if (state.dirty && state.plan) return;
+    const prefer = state.activePlanId;
+    if (!prefer) {
+      if (!state.plan) clearTopoPreview();
+      return;
+    }
+    if (state.plan && state.plan.id === prefer) {
+      scheduleTopoPreview();
+      return;
+    }
+    await loadPlan(prefer);
   }
 
   async function savePlan() {
@@ -2054,6 +2831,11 @@
         if (evt.button === 1) evt.preventDefault();
       });
     }
+    const canvas = document.querySelector(".plan-editor-canvas");
+    if (canvas && typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(() => positionToolbar());
+      ro.observe(canvas);
+    }
     const zoomIn = $("plan-zoom-in");
     if (zoomIn) {
       zoomIn.addEventListener("click", () => zoomBy(1 / 1.25));
@@ -2118,6 +2900,68 @@
         deletePlan().catch((err) => setStatus(String(err.message || err)))
       );
     }
+
+    const closeBtn = $("plan-editor-close");
+    if (closeBtn) {
+      closeBtn.addEventListener("click", () => closeModal());
+    }
+    const modal = $("plan-editor-modal");
+    if (modal) {
+      modal.querySelectorAll("[data-plan-editor-close]").forEach((el) => {
+        el.addEventListener("click", () => closeModal());
+      });
+    }
+    document.addEventListener("keydown", (evt) => {
+      if (evt.key !== "Escape") return;
+      const m = $("plan-editor-modal");
+      if (!m || m.hidden) return;
+      // Don't steal Escape from inputs' native clear if focused — still close modal.
+      closeModal();
+    });
+  }
+
+  function isModalOpen() {
+    const modal = $("plan-editor-modal");
+    return !!(modal && !modal.hidden);
+  }
+
+  async function openModal() {
+    const modal = $("plan-editor-modal");
+    if (!modal) return;
+    modal.hidden = false;
+    document.body.classList.add("plan-editor-modal-open");
+    try {
+      await refreshList();
+      await openActivePlanIfNeeded();
+    } catch (err) {
+      setStatus(String(err.message || err));
+    }
+    // Re-layout SVG now that the canvas has a real size.
+    if (state && state.plan) renderSvg();
+    else applyViewBox();
+  }
+
+  function closeModal() {
+    const modal = $("plan-editor-modal");
+    if (!modal || modal.hidden) return;
+    if (state && state.dirty) {
+      const t =
+        window.I18n && typeof window.I18n.t === "function"
+          ? window.I18n.t.bind(window.I18n)
+          : (k) => k;
+      const msg = t("map.plan.closeDirty");
+      if (
+        !window.confirm(
+          msg === "map.plan.closeDirty"
+            ? "Discard unsaved changes and close?"
+            : msg
+        )
+      ) {
+        return;
+      }
+    }
+    modal.hidden = true;
+    document.body.classList.remove("plan-editor-modal-open");
   }
 
   async function init(options) {
@@ -2126,11 +2970,16 @@
     bind();
     try {
       await refreshList();
-      setStatus("Create a plan or select one to edit");
+      await openActivePlanIfNeeded();
+      if (state.plan) {
+        setStatus(`Loaded “${state.plan.name}” (${state.plan.mode})`);
+      } else {
+        setStatus("Create a plan or select one to edit");
+      }
     } catch (err) {
       setStatus(String(err.message || err));
     }
   }
 
-  window.GoveePlanEditor = { init };
+  window.GoveePlanEditor = { init, open: openModal, close: closeModal, isOpen: isModalOpen };
 })();

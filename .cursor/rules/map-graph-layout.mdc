@@ -1,5 +1,5 @@
 ---
-description: Map topology graph spacing — min node gap and edge padding
+description: Map topology graph spacing — no overlap, no edge crossings
 globs: static/app.js
 alwaysApply: false
 ---
@@ -8,7 +8,9 @@ alwaysApply: false
 
 When changing the apartment **Map** (plan) force layout in `static/app.js`:
 
-1. **Minimum node gap** — room pills (and façade nodes) must stay far enough apart that **edges, padlocks, and ΔT labels remain readable**. `networkPlaceGraph` sets scale from `NETWORK_MIN_NODE_GAP_PX` / min layout distance (after `NETWORK_MIN_NODE_DIST` repulsion). Façades use a **pixel** offset (`NETWORK_FACADE_GAP_PX`), not a layout-unit offset that would force a tiny scale. Do not shrink the graph until connections disappear under the pills.
-2. **Keep off the viewBox edges** — `NETWORK_PAD_PX` plus pill/façade boxes; grow `networkLayoutVb` if needed rather than crushing gaps. Default desktop zoom is **1.0** so `centerNetworkPan` does not crop the top. Never increase scale or reduce pad in a way that clips nodes, locks, or temperature labels.
+1. **No node overlap** — room pills and façade nodes must not overlap. After placement, `networkSeparateBoxes` pushes AABB boxes apart with `NETWORK_NODE_GAP_PX`. Scale still uses `NETWORK_MIN_NODE_GAP_PX` / min layout distance. Do not shrink the graph until connections disappear under the pills.
+2. **No edge crossings** — straight connections (doors / partial walls / room↔façade) must not cross. `networkRelaxLayout` + `networkUntangleEdges` reduce crossings (room swaps + nudges). Prefer planar drawings for apartment graphs.
+3. **Keep off the viewBox edges** — `NETWORK_PAD_PX` plus pill/façade boxes; grow `networkLayoutVb` if needed rather than crushing gaps. Default desktop zoom is **1.0** so `centerNetworkPan` does not crop the top. Never increase scale or reduce pad in a way that clips nodes, locks, or temperature labels.
+4. **Exterior / façade nodes** — only rooms with an **exterior window** get a façade node (`has_window` from floor-plan window openings, or legacy exterior in config). Place each façade **beside its room(s)** on the compass side (fixed pixel gap). Blank exterior walls (no window) must not appear as façade nodes.
 
 The open-room cross-section SVG is a separate diagram; this rule is for the topology graph only.

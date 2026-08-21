@@ -122,11 +122,18 @@ def layout_connection_specs(
     hub_id = max(degree, key=degree.get) if degree else None
     outdoor_rooms = set()
     for rid, room in room_meta.items():
-        exterior = room.get("exterior") if isinstance(room, dict) else None
-        if exterior is None and not isinstance(room, dict):
+        if isinstance(room, dict):
+            exterior = room.get("exterior")
+            has_window = room.get("has_window")
+        else:
             exterior = getattr(room, "exterior", None)
-        if exterior:
-            outdoor_rooms.add(rid)
+            has_window = getattr(room, "has_window", None)
+        if not exterior:
+            continue
+        # Blank exterior walls (no window) do not get an outdoor connection.
+        if has_window is False:
+            continue
+        outdoor_rooms.add(rid)
     if hub_id:
         outdoor_rooms.add(hub_id)
 

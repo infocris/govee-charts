@@ -658,68 +658,105 @@
         </ul>
       </div>
 
-      <details class="compare-fold plan-editor-fold" id="fold-plan-editor" open>
-        <summary class="compare-fold-summary">
-          <span data-i18n="map.plan.title">Floor plan editor</span>
-          <span class="compare-fold-meta" id="plan-editor-meta" data-i18n="map.plan.metaHint">
-            Draw rooms · activate layout
-          </span>
-        </summary>
-        <div class="plan-editor" id="plan-editor">
-          <div class="plan-editor-bar">
-            <label class="plan-editor-field">
-              <span data-i18n="map.plan.select">Plan</span>
-              <select id="plan-editor-select">
-                <option value="" data-i18n="map.plan.selectPlaceholder">Select a plan…</option>
-              </select>
-            </label>
-            <label class="plan-editor-field">
-              <span data-i18n="map.plan.newName">Name</span>
-              <input
-                type="text"
-                id="plan-editor-new-name"
-                maxlength="120"
-                data-i18n-placeholder="map.plan.newNamePlaceholder"
-                placeholder="New plan"
-              />
-            </label>
-            <label class="plan-editor-field">
-              <span data-i18n="map.plan.mode">Mode</span>
-              <select id="plan-editor-new-mode">
-                <option value="free" data-i18n="map.plan.modeFree">Free shapes</option>
-                <option value="partition" data-i18n="map.plan.modePartition">Partition walls</option>
-              </select>
-            </label>
-            <button type="button" id="plan-editor-create" class="backfill-btn" data-i18n="map.plan.create">Create</button>
-            <button type="button" id="plan-editor-save" class="backfill-btn" disabled data-i18n="map.plan.save">Save</button>
-            <button type="button" id="plan-editor-activate" class="backfill-btn" disabled data-i18n="map.plan.activate">Activate</button>
-            <button type="button" id="plan-editor-deactivate" class="linkish" disabled data-i18n="map.plan.deactivate">Deactivate</button>
-            <button type="button" id="plan-editor-duplicate" class="linkish" disabled data-i18n="map.plan.duplicate">Duplicate</button>
-            <button type="button" id="plan-editor-delete" class="linkish" disabled data-i18n="map.plan.delete">Delete</button>
-            <span class="plan-editor-dirty" id="plan-editor-dirty" hidden data-i18n="map.plan.unsaved">Unsaved</span>
-          </div>
-          <div class="plan-editor-tools" id="plan-editor-tools" hidden></div>
-          <div class="plan-editor-body">
-            <div class="plan-editor-canvas">
-              <svg
-                id="plan-editor-svg"
-                class="plan-editor-svg"
-                role="img"
-                aria-label="Floor plan editor"
-              ></svg>
-              <div class="plan-zoom-bar" role="group" aria-label="Zoom">
-                <button type="button" id="plan-zoom-out" title="Zoom out" data-i18n-title="map.plan.zoomOut">−</button>
-                <button type="button" id="plan-zoom-reset" title="Reset zoom" data-i18n-title="map.plan.zoomReset">
-                  <span id="plan-zoom-label">100%</span>
-                </button>
-                <button type="button" id="plan-zoom-in" title="Zoom in" data-i18n-title="map.plan.zoomIn">+</button>
+      <div
+        id="plan-editor-modal"
+        class="plan-editor-modal"
+        hidden
+      >
+        <div class="plan-editor-modal-backdrop" data-plan-editor-close tabindex="-1"></div>
+        <div
+          class="plan-editor-modal-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="plan-editor-modal-title"
+        >
+          <header class="plan-editor-modal-head">
+            <div class="plan-editor-modal-titles">
+              <h2 id="plan-editor-modal-title" data-i18n="map.plan.title">Floor plan editor</h2>
+              <p class="plan-editor-modal-meta" id="plan-editor-meta" data-i18n="map.plan.metaHint">
+                Draw rooms · activate layout
+              </p>
+            </div>
+            <button
+              type="button"
+              id="plan-editor-close"
+              class="plan-editor-close"
+              data-i18n-aria-label="map.plan.close"
+              aria-label="Close"
+            >
+              ×
+            </button>
+          </header>
+          <div class="plan-editor" id="plan-editor">
+            <div class="plan-editor-bar">
+              <label class="plan-editor-field">
+                <span data-i18n="map.plan.select">Plan</span>
+                <select id="plan-editor-select">
+                  <option value="" data-i18n="map.plan.selectPlaceholder">Select a plan…</option>
+                </select>
+              </label>
+              <label class="plan-editor-field">
+                <span data-i18n="map.plan.newName">Name</span>
+                <input
+                  type="text"
+                  id="plan-editor-new-name"
+                  maxlength="120"
+                  data-i18n-placeholder="map.plan.newNamePlaceholder"
+                  placeholder="New plan"
+                />
+              </label>
+              <label class="plan-editor-field">
+                <span data-i18n="map.plan.mode">Mode</span>
+                <select id="plan-editor-new-mode">
+                  <option value="free" data-i18n="map.plan.modeFree">Free shapes</option>
+                  <option value="partition" data-i18n="map.plan.modePartition">Partition walls</option>
+                </select>
+              </label>
+              <button type="button" id="plan-editor-create" class="backfill-btn" data-i18n="map.plan.create">Create</button>
+              <button type="button" id="plan-editor-save" class="backfill-btn" disabled data-i18n="map.plan.save">Save</button>
+              <button type="button" id="plan-editor-activate" class="backfill-btn" disabled data-i18n="map.plan.activate">Activate</button>
+              <button type="button" id="plan-editor-deactivate" class="linkish" disabled data-i18n="map.plan.deactivate">Deactivate</button>
+              <button type="button" id="plan-editor-duplicate" class="linkish" disabled data-i18n="map.plan.duplicate">Duplicate</button>
+              <button type="button" id="plan-editor-delete" class="linkish" disabled data-i18n="map.plan.delete">Delete</button>
+              <span class="plan-editor-dirty" id="plan-editor-dirty" hidden data-i18n="map.plan.unsaved">Unsaved</span>
+            </div>
+            <div class="plan-editor-body">
+              <div class="plan-editor-canvas">
+                <svg
+                  id="plan-editor-svg"
+                  class="plan-editor-svg"
+                  role="img"
+                  aria-label="Floor plan editor"
+                ></svg>
+                <div class="plan-editor-tools" id="plan-editor-tools" hidden></div>
+                <div class="plan-zoom-bar" role="group" aria-label="Zoom">
+                  <button type="button" id="plan-zoom-out" title="Zoom out" data-i18n-title="map.plan.zoomOut">−</button>
+                  <button type="button" id="plan-zoom-reset" title="Reset zoom" data-i18n-title="map.plan.zoomReset">
+                    <span id="plan-zoom-label">100%</span>
+                  </button>
+                  <button type="button" id="plan-zoom-in" title="Zoom in" data-i18n-title="map.plan.zoomIn">+</button>
+                </div>
+              </div>
+              <div class="plan-editor-side">
+                <aside class="plan-editor-props" id="plan-editor-props" hidden></aside>
+                <section class="plan-editor-topo" id="plan-editor-topo" hidden>
+                  <h3 class="plan-editor-topo-title" data-i18n="map.plan.topologyPreview">
+                    Topology preview
+                  </h3>
+                  <svg
+                    id="plan-editor-topo-svg"
+                    class="plan-editor-topo-svg"
+                    role="img"
+                    aria-label="Topology preview"
+                  ></svg>
+                  <p class="plan-editor-topo-warn" id="plan-editor-topo-warn" hidden></p>
+                </section>
               </div>
             </div>
-            <aside class="plan-editor-props" id="plan-editor-props" hidden></aside>
+            <p class="status plan-editor-status" id="plan-editor-status" aria-live="polite"></p>
           </div>
-          <p class="status" id="plan-editor-status" aria-live="polite"></p>
         </div>
-      </details>
+      </div>
 
       <details class="compare-fold map-chat-fold" id="fold-map-chat">
         <summary class="compare-fold-summary">
@@ -782,16 +819,6 @@
           <button type="button" data-map-metric="humidity">Humidity</button>
           <button type="button" data-map-metric="both">Both</button>
         </div>
-        <button
-          type="button"
-          id="plan-editor-open-btn"
-          class="backfill-btn plan-editor-open-btn"
-          data-i18n="map.plan.openBtn"
-          data-i18n-title="map.plan.openBtnTitle"
-          title="Open floor plan editor"
-        >
-          Floor plan editor
-        </button>
       </div>
       <p class="network-meta" id="network-meta" aria-live="polite">Loading…</p>
 
@@ -822,9 +849,22 @@
         <p class="status" id="map-overview-charts-status" aria-live="polite"></p>
       </div>
 
+      <div class="map-diagrams-bar">
+        <button
+          type="button"
+          id="plan-editor-open-btn"
+          class="backfill-btn plan-editor-open-btn"
+          data-i18n="map.plan.openBtn"
+          data-i18n-title="map.plan.openBtnTitle"
+          title="Open floor plan editor"
+        >
+          Floor plan editor
+        </button>
+      </div>
+
       <div class="section-panel">
         <div class="section-head">
-          <h3>Open-room cross-section</h3>
+          <h3 data-i18n="map.section.title">Open-room cross-section</h3>
           <div class="section-head-right">
             <label class="section-toggle" title="Bathroom, WC, and other rooms under 3.5 m²">
               <input type="checkbox" id="section-show-small" />
@@ -874,43 +914,48 @@
         </div>
       </div>
 
-      <div class="network-toolbar">
-        <div class="network-legend" aria-hidden="true">
-          <span class="net-leg net-leg-open">Open / coupled</span>
-          <span class="net-leg net-leg-closed">Closed / isolated</span>
-          <span class="net-leg net-leg-locked">Locked</span>
-          <span class="net-leg net-leg-unknown">Uncertain</span>
-          <span class="net-leg net-leg-wall">Wall</span>
-          <span class="net-leg net-leg-partial">Partial wall</span>
-          <span class="net-leg net-leg-exterior">Exterior</span>
-          <span class="net-leg net-leg-presence">Person here</span>
-          <span class="net-leg net-leg-flow">Cooling draft</span>
-          <span class="net-leg net-leg-ac">AC running</span>
-          <span class="net-temp-scale" id="network-temp-scale" hidden>
-            <span class="net-temp-scale-lo" id="network-temp-scale-lo">—</span>
-            <span class="net-temp-scale-bar" aria-hidden="true"></span>
-            <span class="net-temp-scale-hi" id="network-temp-scale-hi">—</span>
-          </span>
-        </div>
-        <div class="ranges network-zoom" role="group" aria-label="Zoom">
-          <button type="button" id="network-zoom-out" title="Zoom out">−</button>
-          <button type="button" id="network-zoom-reset" title="Reset zoom">100%</button>
-          <button type="button" id="network-zoom-in" title="Zoom in">+</button>
-        </div>
-      </div>
-      <p class="network-airflow" id="network-airflow" aria-live="polite"></p>
-      <div class="network-canvas-wrap" id="network-canvas-wrap">
-        <svg id="network-svg" class="network-svg" role="img" aria-label="Apartment map"></svg>
-        <div class="network-edge-panel" id="network-edge-panel" hidden>
-          <div class="network-edge-panel-head">
-            <strong id="network-edge-panel-title">Connection</strong>
-            <button type="button" class="network-edge-panel-close" id="network-edge-panel-close" aria-label="Close">×</button>
+      <div class="network-panel">
+        <div class="network-head">
+          <h3 data-i18n="map.topology.title">Apartment topology</h3>
+          <div class="network-toolbar">
+            <div class="network-legend" aria-hidden="true">
+              <span class="net-leg net-leg-open">Open / coupled</span>
+              <span class="net-leg net-leg-closed">Closed / isolated</span>
+              <span class="net-leg net-leg-locked">Locked</span>
+              <span class="net-leg net-leg-unknown">Uncertain</span>
+              <span class="net-leg net-leg-wall">Wall</span>
+              <span class="net-leg net-leg-partial">Partial wall</span>
+              <span class="net-leg net-leg-exterior">Exterior</span>
+              <span class="net-leg net-leg-presence">Person here</span>
+              <span class="net-leg net-leg-flow">Cooling draft</span>
+              <span class="net-leg net-leg-ac">AC running</span>
+              <span class="net-temp-scale" id="network-temp-scale" hidden>
+                <span class="net-temp-scale-lo" id="network-temp-scale-lo">—</span>
+                <span class="net-temp-scale-bar" aria-hidden="true"></span>
+                <span class="net-temp-scale-hi" id="network-temp-scale-hi">—</span>
+              </span>
+            </div>
+            <div class="ranges network-zoom" role="group" aria-label="Zoom">
+              <button type="button" id="network-zoom-out" title="Zoom out">−</button>
+              <button type="button" id="network-zoom-reset" title="Reset zoom">100%</button>
+              <button type="button" id="network-zoom-in" title="Zoom in">+</button>
+            </div>
           </div>
-          <p class="network-edge-panel-meta" id="network-edge-panel-meta"></p>
-          <div class="network-edge-panel-actions" id="network-edge-panel-actions"></div>
         </div>
+        <p class="network-airflow" id="network-airflow" aria-live="polite"></p>
+        <div class="network-canvas-wrap" id="network-canvas-wrap">
+          <svg id="network-svg" class="network-svg" role="img" aria-label="Apartment topology"></svg>
+          <div class="network-edge-panel" id="network-edge-panel" hidden>
+            <div class="network-edge-panel-head">
+              <strong id="network-edge-panel-title">Connection</strong>
+              <button type="button" class="network-edge-panel-close" id="network-edge-panel-close" aria-label="Close">×</button>
+            </div>
+            <p class="network-edge-panel-meta" id="network-edge-panel-meta"></p>
+            <div class="network-edge-panel-actions" id="network-edge-panel-actions"></div>
+          </div>
+        </div>
+        <p class="status" id="network-status">Loading…</p>
       </div>
-      <p class="status" id="network-status">Loading…</p>
     </section>
 
     <section id="view-coverage" class="view" role="tabpanel" aria-label="Coverage" hidden>

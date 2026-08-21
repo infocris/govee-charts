@@ -4,6 +4,7 @@
   --bg: #0f1410;
   --bg-elev: #1a221c;
   --ink: #e8efe6;
+  --fg: var(--ink);
   --muted: #8a9a88;
   --line: #2a352c;
   --accent: #6fbf73;
@@ -3275,13 +3276,99 @@ main {
   margin: 0.35rem 0 0.25rem;
 }
 
+.map-diagrams-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0.85rem 0 0.45rem;
+}
+
 .plan-editor-open-btn {
   flex: 0 0 auto;
 }
 
-.plan-editor-fold {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
+body.plan-editor-modal-open {
+  overflow: hidden;
+}
+
+.plan-editor-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+}
+
+.plan-editor-modal[hidden] {
+  display: none !important;
+}
+
+.plan-editor-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, #000 55%, transparent);
+}
+
+.plan-editor-modal-panel {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: none;
+}
+
+.plan-editor-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex: 0 0 auto;
+  padding: 0.55rem 0.85rem 0.45rem;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-elev) 80%, transparent);
+}
+
+.plan-editor-modal-titles {
+  min-width: 0;
+}
+
+.plan-editor-modal-head h2 {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.plan-editor-modal-meta {
+  margin: 0.15rem 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.plan-editor-close {
+  flex: 0 0 auto;
+  width: 2rem;
+  height: 2rem;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.plan-editor-close:hover {
+  border-color: var(--accent);
 }
 
 .map-chat-fold {
@@ -3560,13 +3647,37 @@ main {
   gap: 0.65rem 1rem;
 }
 
+.network-panel {
+  margin: 0.75rem 0 1.1rem;
+  padding: 0.75rem 0.85rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg) 92%, #243040);
+}
+
+.network-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.35rem;
+}
+
+.network-head h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
 .network-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 0.65rem 1rem;
-  margin: 0 0 0.85rem;
+  margin: 0;
+  flex: 1 1 14rem;
 }
 
 .network-legend {
@@ -4049,8 +4160,12 @@ main {
 /* Floor plan editor ------------------------------------------------------- */
 
 .plan-editor {
-  margin: 0.35rem 0 1rem;
-  padding: 0.65rem 0.85rem 0.75rem;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+  padding: 0.55rem 0.85rem 0.55rem;
 }
 
 .plan-editor-bar {
@@ -4058,14 +4173,15 @@ main {
   flex-wrap: wrap;
   gap: 0.45rem 0.65rem;
   align-items: flex-end;
-  margin-bottom: 0.55rem;
+  flex: 0 0 auto;
+  margin-bottom: 0.45rem;
 }
 
 .plan-editor-field {
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   color: var(--muted);
 }
 
@@ -4073,6 +4189,7 @@ main {
 .plan-editor-field select {
   min-width: 8rem;
   font: inherit;
+  font-size: 0.82rem;
   color: var(--fg);
   background: var(--bg);
   border: 1px solid var(--line);
@@ -4081,72 +4198,131 @@ main {
 }
 
 .plan-editor-dirty {
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   color: #c4782a;
   align-self: center;
 }
 
 .plan-editor-tools {
+  position: absolute;
+  top: 0.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  margin-bottom: 0.5rem;
+  flex-wrap: nowrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.2rem;
+  margin: 0;
+  padding: 0.2rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--fg) 14%, transparent);
+  max-width: calc(100% - 1rem);
+  pointer-events: auto;
+}
+
+.plan-editor-tools[hidden] {
+  display: none !important;
+}
+
+.plan-editor-tools.is-anchored {
+  max-width: calc(100% - 1rem);
 }
 
 .plan-tool-btn {
-  font: inherit;
-  font-size: 0.82rem;
-  padding: 0.25rem 0.55rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 5px;
   background: var(--bg);
   color: var(--fg);
   cursor: pointer;
+  line-height: 0;
 }
 
-.plan-tool-btn.active {
+.plan-tool-btn:hover {
+  border-color: var(--accent);
+}
+
+.plan-tool-btn.active,
+.plan-tool-btn[aria-pressed="true"] {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+  color: var(--accent);
+}
+
+.plan-tool-icon {
+  display: block;
+  width: 1.1rem;
+  height: 1.1rem;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.plan-tool-icon.is-filled {
+  fill: currentColor;
+  stroke: none;
+}
+
+.plan-tool-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 0.15rem 0.15rem;
+  background: var(--line);
 }
 
 .plan-snap-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin-left: 0.35rem;
-  font-size: 0.82rem;
-  color: var(--muted);
-  cursor: pointer;
-  user-select: none;
-}
-
-.plan-snap-toggle input {
-  margin: 0;
+  display: none;
 }
 
 .plan-editor-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(14rem, 18rem);
   gap: 0.75rem;
-  align-items: start;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.plan-editor-side {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 @media (max-width: 800px) {
   .plan-editor-body {
     grid-template-columns: 1fr;
+    grid-template-rows: minmax(40vh, 1fr) auto;
   }
 }
 
 .plan-editor-canvas {
   position: relative;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
 }
 
 .plan-editor-svg {
   display: block;
   width: 100%;
-  min-height: 320px;
-  height: min(52vh, 480px);
+  height: 100%;
+  min-height: 280px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background:
@@ -4219,7 +4395,7 @@ main {
 
 .plan-envelope-dim {
   fill: var(--muted);
-  font-size: 10px;
+  font-size: 5px;
   font-weight: 500;
   text-anchor: middle;
   dominant-baseline: middle;
@@ -4228,37 +4404,47 @@ main {
 
 .plan-room {
   fill: color-mix(in srgb, var(--accent) 22%, var(--bg));
-  stroke: var(--fg);
-  stroke-width: 2.25;
-  stroke-linejoin: miter;
-  vector-effect: non-scaling-stroke;
+  stroke: none;
   cursor: default;
 }
 
 .plan-room.unnamed {
   fill: color-mix(in srgb, #c4782a 18%, var(--bg));
-  stroke: #c4782a;
-  stroke-width: 2.25;
-  stroke-dasharray: 5 3.5;
-  vector-effect: non-scaling-stroke;
 }
 
 .plan-room.selected {
-  stroke: var(--accent);
-  stroke-width: 3;
+  fill: color-mix(in srgb, var(--accent) 32%, var(--bg));
+}
+
+.plan-room-border {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2.5;
+  stroke-linejoin: miter;
   vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.plan-room-border.unnamed {
+  stroke: #c4782a;
+  stroke-dasharray: 5 3.5;
+}
+
+.plan-room-border.selected {
+  stroke: var(--accent);
+  stroke-width: 3.25;
 }
 
 .plan-room-label {
   fill: var(--fg);
-  font-size: 11px;
+  font-size: 5.5px;
   text-anchor: middle;
   dominant-baseline: middle;
   pointer-events: none;
 }
 
 .plan-room-area-label {
-  font-size: 9px;
+  font-size: 4.5px;
   font-weight: 500;
   fill: var(--muted);
 }
@@ -4276,7 +4462,7 @@ main {
 
 .plan-opening {
   stroke: #2b7bbf;
-  stroke-width: 5;
+  stroke-width: 1.25;
   stroke-linecap: butt;
   cursor: default;
 }
@@ -4293,7 +4479,7 @@ main {
 .plan-handle {
   fill: #fff;
   stroke: var(--accent);
-  stroke-width: 1.2;
+  stroke-width: 0.2;
   cursor: nwse-resize;
   pointer-events: all;
 }
@@ -4314,8 +4500,58 @@ main {
 
 .plan-north-label {
   fill: var(--muted);
-  font-size: 10px;
+  font-size: 5px;
   text-anchor: middle;
+}
+
+.plan-orient-root {
+  pointer-events: none;
+}
+
+.plan-orient-wedge {
+  stroke: none;
+}
+
+.plan-orient-wedge-a {
+  fill: color-mix(in srgb, #2b7bbf 10%, transparent);
+}
+
+.plan-orient-wedge-b {
+  fill: color-mix(in srgb, #c4782a 8%, transparent);
+}
+
+.plan-orient-ray {
+  stroke: color-mix(in srgb, var(--fg) 18%, transparent);
+  stroke-width: 0.75;
+}
+
+.plan-orient-label {
+  fill: color-mix(in srgb, var(--muted) 85%, var(--fg));
+  font-size: 7px;
+  font-weight: 600;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  letter-spacing: 0.02em;
+}
+
+.plan-orient-edge-badge {
+  fill: color-mix(in srgb, var(--bg) 88%, transparent);
+  stroke: color-mix(in srgb, var(--fg) 28%, transparent);
+  stroke-width: 0.6;
+}
+
+.plan-orient-edge-label {
+  fill: var(--fg);
+  font-size: 6px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+.plan-editor-status {
+  flex: 0 0 auto;
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
 }
 
 .plan-editor-props {
@@ -4323,9 +4559,94 @@ main {
   border-radius: 6px;
   padding: 0.55rem 0.65rem;
   background: color-mix(in srgb, var(--bg-elev) 60%, transparent);
-  font-size: 0.82rem;
-  max-height: min(52vh, 480px);
+  font-size: 0.78rem;
+  flex: 1 1 55%;
+  min-height: 0;
   overflow: auto;
+}
+
+.plan-editor-topo {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem 0.55rem;
+  background: color-mix(in srgb, var(--bg-elev) 55%, transparent);
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 12.5rem;
+}
+
+.plan-editor-topo-title {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.plan-editor-topo-svg {
+  display: block;
+  width: 100%;
+  height: 11.5rem;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.plan-editor-topo-warn {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.plan-topo-edge {
+  fill: none;
+  stroke: color-mix(in srgb, var(--fg) 40%, transparent);
+  stroke-linecap: round;
+}
+
+.plan-topo-edge-door {
+  stroke: var(--accent);
+}
+
+.plan-topo-edge-wall {
+  stroke-dasharray: 3 2.5;
+}
+
+.plan-topo-edge-wall_partial {
+  stroke: color-mix(in srgb, var(--accent) 55%, var(--fg));
+  stroke-dasharray: 4 2.5;
+}
+
+.plan-topo-edge-exterior {
+  stroke: color-mix(in srgb, #2b7bbf 75%, var(--fg));
+}
+
+.plan-topo-node-room {
+  fill: color-mix(in srgb, var(--accent) 32%, var(--bg));
+  stroke: var(--fg);
+  stroke-width: 1.25;
+}
+
+.plan-topo-node-exterior {
+  fill: color-mix(in srgb, #2b7bbf 28%, var(--bg));
+  stroke: #2b7bbf;
+  stroke-width: 1.1;
+}
+
+.plan-topo-label {
+  fill: var(--fg);
+  font-weight: 600;
+  text-anchor: middle;
+  dominant-baseline: alphabetic;
+  pointer-events: none;
+}
+
+.plan-topo-label-ext {
+  fill: #2b7bbf;
+  font-weight: 600;
+  dominant-baseline: middle;
 }
 
 .plan-props-block {
@@ -4350,6 +4671,28 @@ main {
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 0.2rem 0.35rem;
+}
+
+.plan-prop-north-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.plan-prop-north-row input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  accent-color: var(--accent);
+}
+
+.plan-prop-north-row output {
+  flex: 0 0 2.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  text-align: right;
 }
 
 .plan-props-mode {

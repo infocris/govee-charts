@@ -1126,6 +1126,10 @@ class RoomSpec:
     area_m2: float
     exterior: tuple[str, ...] = ()
     label: str = ""
+    # True when the room has an openable exterior window (graph façade node).
+    # Floor-plan compile sets this from window openings; config layouts default
+    # to True whenever ``exterior`` is non-empty.
+    has_window: bool = True
 
     @property
     def volume_m3(self) -> float:
@@ -1197,11 +1201,17 @@ class ApartmentLayout:
                 for o in ext_raw
                 if str(o).strip().lower() in ORIENTATIONS
             )
+            if "has_window" in item:
+                has_window = bool(item.get("has_window"))
+            else:
+                # Legacy config: listed façades are treated as windowed.
+                has_window = bool(exterior)
             rooms[rid] = RoomSpec(
                 id=rid,
                 area_m2=area,
                 exterior=exterior,
                 label=str(item.get("label") or rid),
+                has_window=has_window,
             )
 
         edges: list[EdgeSpec] = []
@@ -1276,6 +1286,7 @@ class ApartmentLayout:
                     "exterior": list(r.exterior),
                     "label": r.label or r.id,
                     "faces_exterior": r.faces_exterior,
+                    "has_window": bool(r.has_window),
                     "k_ext": round(self.k_ext.get(r.id, 0.0), 2),
                 }
                 for r in self.rooms.values()
@@ -1303,6 +1314,7 @@ class ApartmentLayout:
             area_m2=room.area_m2,
             exterior=cleaned,
             label=room.label,
+            has_window=room.has_window if cleaned else False,
         )
         self._rebuild_matrices()
         r = self.rooms[rid]

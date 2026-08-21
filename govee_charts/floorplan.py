@@ -31,6 +31,26 @@ OPENING_KINDS = frozenset({"door", "window"})
 WALL_PARTIAL_FRAC = 0.35
 # Coincidence / snap tolerance in canvas units.
 EDGE_EPS = 0.75
+_OUTDOOR_IDS = frozenset({"", "outdoor", "ext", "exterior", "outside"})
+
+
+def _is_outdoor_room_id(rid: str) -> bool:
+    return str(rid or "").strip().lower() in _OUTDOOR_IDS
+
+
+def _rooms_with_exterior_windows(openings: list[dict[str, Any]]) -> set[str]:
+    """Room ids that have a window opening onto outdoor."""
+    out: set[str] = set()
+    for op in openings or []:
+        if str(op.get("kind") or "").strip().lower() != "window":
+            continue
+        a = str(op.get("room_a") or "").strip().lower()
+        b = str(op.get("room_b") or "").strip().lower()
+        if _is_outdoor_room_id(a) and b and not _is_outdoor_room_id(b):
+            out.add(b)
+        elif _is_outdoor_room_id(b) and a and not _is_outdoor_room_id(a):
+            out.add(a)
+    return out
 
 
 def _now_iso() -> str:
@@ -478,6 +498,7 @@ def _rooms_from_rects(
         )
 
     rooms: dict[str, RoomSpec] = {}
+    windowed = _rooms_with_exterior_windows(openings)
     for rect in named:
         rid = str(rect.get("room_id") or "").strip().lower()
         if rid in rooms:
@@ -513,6 +534,7 @@ def _rooms_from_rects(
             area_m2=round(area, 3),
             exterior=exteriors_t,
             label=_label_for_room(rid, str(rect.get("label") or "").strip()),
+            has_window=rid in windowed,
         )
 
     edges: list[EdgeSpec] = []
@@ -752,6 +774,7 @@ def compile_plan(plan: dict[str, Any]) -> dict[str, Any]:
                 "area_m2": r.area_m2,
                 "exterior": list(r.exterior),
                 "label": r.label,
+                "has_window": bool(r.has_window),
             }
             for r in rooms.values()
         ],
@@ -786,6 +809,9 @@ def apply_compiled_to_layout(
             area_m2=float(item.get("area_m2") or 0),
             exterior=exterior,
             label=str(item.get("label") or rid),
+            has_window=bool(item.get("has_window"))
+            if "has_window" in item
+            else bool(exterior),
         )
     edges: list[EdgeSpec] = []
     for item in compiled.get("edges") or []:

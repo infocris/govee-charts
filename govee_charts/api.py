@@ -3249,6 +3249,16 @@ def create_app(
                         logger.warning("Connection sync after plan save failed: %s", exc)
         return updated
 
+    @app.post("/api/apartment/plans/compile-preview")
+    async def api_compile_plan_preview(payload: dict[str, Any]) -> dict[str, Any]:
+        """Compile an in-memory plan body (editor preview; does not persist)."""
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Expected JSON object")
+        try:
+            return compile_plan(payload)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/apartment/plans/{plan_id}/compile")
     async def api_compile_plan(plan_id: str) -> dict[str, Any]:
         plan = find_plan(_plans_store(), plan_id)

@@ -5673,12 +5673,58 @@
     return { x: p.x + dx * 0.38, y: p.y + dy * 0.38 };
   }
 
+  /**
+   * Unit vector for a façade key ("n", "e+n", "sw", …).
+   * Screen coords: +x right, +y down (north = up).
+   */
+  function networkCompassUnitFromKey(key) {
+    const tokens = String(key || "")
+      .toLowerCase()
+      .split("+")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    let dx = 0;
+    let dy = 0;
+    for (const t of tokens) {
+      if (t === "n" || t === "north") dy -= 1;
+      else if (t === "s" || t === "south") dy += 1;
+      else if (t === "e" || t === "east") dx += 1;
+      else if (t === "w" || t === "west") dx -= 1;
+      else {
+        if (t.includes("n")) dy -= 1;
+        if (t.includes("s")) dy += 1;
+        if (t.includes("e")) dx += 1;
+        if (t.includes("w")) dx -= 1;
+      }
+    }
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) return { x: 0, y: -1 };
+    return { x: dx / len, y: dy / len };
+  }
+
   /** Stable key for rooms that share the same exterior orientation(s). */
   function networkFacadeKey(room) {
     const orients = [...new Set((room.exterior || []).map((o) => String(o).toLowerCase()))]
       .filter(Boolean)
       .sort();
     return orients.join("+") || "";
+  }
+
+  /** Façade graph node only when the room has an exterior window. */
+  function roomShowsFacadeNode(room) {
+    if (!networkFacadeKey(room)) return false;
+    if (room.has_window === false) return false;
+    if (room.has_window === true) return true;
+    const contacts = room.contacts || [];
+    if (
+      contacts.some((c) => String(c.kind || "").toLowerCase() === "window")
+    ) {
+      return true;
+    }
+    const st = String(room.window_state || "").toLowerCase();
+    if (st === "open" || st === "closed" || st === "unknown") return true;
+    // Legacy payloads without has_window: keep exterior rooms visible.
+    return true;
   }
 
   /** High / low exterior sensors for a façade group (all rooms on that face). */
@@ -5861,8 +5907,12 @@
   const NETWORK_MIN_NODE_GAP_PX = 128;
   /** Room centre → façade centre (half-pill + half-façade + lock on the link). */
   const NETWORK_FACADE_GAP_PX = 118;
+  /** Extra padding between node bounding boxes (no overlap). */
+  const NETWORK_NODE_GAP_PX = 14;
 
   function networkFacadeDir(room, p) {
+    const key = networkFacadeKey(room);
+    if (key) return networkCompassUnitFromKey(key);
     const off = networkExteriorOffset(room, p);
     const dx = off.x - p.x;
     const dy = off.y - p.y;
@@ -5884,11 +5934,181 @@
     return min;
   }
 
+  function networkOrient2d(ax, ay, bx, by, cx, cy) {
+    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  }
+
+  /** Proper segment intersection (shared endpoints do not count). */
+  function networkSegmentsCross(a, b, c, d) {
+    const eps = 1e-7;
+    const near = (p, q) => Math.hypot(p.x - q.x, p.y - q.y) < 1e-4;
+    if (
+      near(a, c) ||
+      near(a, d) ||
+      near(b, c) ||
+      near(b, d)
+    ) {
+      return false;
+    }
+    const o1 = networkOrient2d(a.x, a.y, b.x, b.y, c.x, c.y);
+    const o2 = networkOrient2d(a.x, a.y, b.x, b.y, d.x, d.y);
+    const o3 = networkOrient2d(c.x, c.y, d.x, d.y, a.x, a.y);
+    const o4 = networkOrient2d(c.x, c.y, d.x, d.y, b.x, b.y);
+    return (
+      ((o1 > eps && o2 < -eps) || (o1 < -eps && o2 > eps)) &&
+      ((o3 > eps && o4 < -eps) || (o3 < -eps && o4 > eps))
+    );
+  }
+
   /**
-   * Scale rooms so connections stay visible, place façades at a fixed pixel
-   * gap, then grow/center the viewBox so nothing sits on the edges.
+   * Push axis-aligned node boxes apart so they do not overlap.
+   * Each node: { x, y, hw, hh }.
    */
-  function networkPlaceGraph(pos, rooms, baseW, baseH) {
+  function networkSeparateBoxes(nodes, gapPx) {
+    const gap = Math.max(0, Number(gapPx) || 0);
+    if (!nodes || nodes.length < 2) return;
+    for (let iter = 0; iter < 80; iter += 1) {
+      let moved = false;
+      for (let i = 0; i < nodes.length; i += 1) {
+        for (let j = i + 1; j < nodes.length; j += 1) {
+          const a = nodes[i];
+          const b = nodes[j];
+          const needX = a.hw + b.hw + gap;
+          const needY = a.hh + b.hh + gap;
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const ox = needX - Math.abs(dx);
+          const oy = needY - Math.abs(dy);
+          if (ox <= 0 || oy <= 0) continue;
+          if (ox < oy) {
+            const push = (dx >= 0 ? ox : -ox) / 2;
+            a.x -= push;
+            b.x += push;
+          } else {
+            const push = (dy >= 0 ? oy : -oy) / 2;
+            a.y -= push;
+            b.y += push;
+          }
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+  }
+
+  function networkEdgePairsShareVertex(e1, e2) {
+    return (
+      e1.a === e2.a ||
+      e1.a === e2.b ||
+      e1.b === e2.a ||
+      e1.b === e2.b
+    );
+  }
+
+  function networkCountCrossings(xyById, edgeList) {
+    let n = 0;
+    for (let i = 0; i < edgeList.length; i += 1) {
+      for (let j = i + 1; j < edgeList.length; j += 1) {
+        const e1 = edgeList[i];
+        const e2 = edgeList[j];
+        if (networkEdgePairsShareVertex(e1, e2)) continue;
+        const a = xyById[e1.a];
+        const b = xyById[e1.b];
+        const c = xyById[e2.a];
+        const d = xyById[e2.b];
+        if (!a || !b || !c || !d) continue;
+        if (networkSegmentsCross(a, b, c, d)) n += 1;
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Reduce straight-line edge crossings by swapping room positions and
+   * nudging endpoints. Mutates ``xyById`` in place.
+   */
+  function networkUntangleEdges(xyById, edgeList, roomIds) {
+    if (!edgeList || edgeList.length < 2) return;
+    const ids = (roomIds || Object.keys(xyById)).filter((id) => xyById[id]);
+    let best = networkCountCrossings(xyById, edgeList);
+    if (best === 0) return;
+
+    for (let pass = 0; pass < 36 && best > 0; pass += 1) {
+      let improved = false;
+      for (let i = 0; i < ids.length; i += 1) {
+        for (let j = i + 1; j < ids.length; j += 1) {
+          const idA = ids[i];
+          const idB = ids[j];
+          const pa = xyById[idA];
+          const pb = xyById[idB];
+          const tx = pa.x;
+          const ty = pa.y;
+          pa.x = pb.x;
+          pa.y = pb.y;
+          pb.x = tx;
+          pb.y = ty;
+          const n = networkCountCrossings(xyById, edgeList);
+          if (n < best) {
+            best = n;
+            improved = true;
+            if (best === 0) return;
+          } else {
+            pb.x = pa.x;
+            pb.y = pa.y;
+            pa.x = tx;
+            pa.y = ty;
+          }
+        }
+      }
+      if (improved) continue;
+
+      // Continuous nudge on remaining crossings.
+      for (let i = 0; i < edgeList.length; i += 1) {
+        for (let j = i + 1; j < edgeList.length; j += 1) {
+          const e1 = edgeList[i];
+          const e2 = edgeList[j];
+          if (networkEdgePairsShareVertex(e1, e2)) continue;
+          const a = xyById[e1.a];
+          const b = xyById[e1.b];
+          const c = xyById[e2.a];
+          const d = xyById[e2.b];
+          if (!a || !b || !c || !d) continue;
+          if (!networkSegmentsCross(a, b, c, d)) continue;
+          const mx1 = (a.x + b.x) / 2;
+          const my1 = (a.y + b.y) / 2;
+          const mx2 = (c.x + d.x) / 2;
+          const my2 = (c.y + d.y) / 2;
+          let vx = mx1 - mx2;
+          let vy = my1 - my2;
+          let len = Math.hypot(vx, vy);
+          if (len < 1e-6) {
+            vx = -(b.y - a.y);
+            vy = b.x - a.x;
+            len = Math.hypot(vx, vy) || 1;
+          }
+          const push = 6;
+          const ux = (vx / len) * push;
+          const uy = (vy / len) * push;
+          a.x += ux;
+          a.y += uy;
+          b.x += ux;
+          b.y += uy;
+          c.x -= ux;
+          c.y -= uy;
+          d.x -= ux;
+          d.y -= uy;
+        }
+      }
+      best = networkCountCrossings(xyById, edgeList);
+    }
+  }
+
+  /**
+   * Scale rooms so connections stay visible, place façades beside the
+   * windowed rooms (compass outward), separate nodes, untangle edges, then
+   * grow/center the viewBox.
+   */
+  function networkPlaceGraph(pos, rooms, edges, baseW, baseH) {
     const pad = NETWORK_PAD_PX;
     const roomHW = NETWORK_ROOM_W / 2 + 8;
     const roomHH = NETWORK_ROOM_H / 2 + 22;
@@ -5908,29 +6128,19 @@
     for (const room of rooms || []) {
       const p = pos[room.id];
       if (!p) continue;
+      if (!roomShowsFacadeNode(room)) continue;
       const key = networkFacadeKey(room);
       if (!key) continue;
       if (!seen.has(key)) {
-        const g = { key, rooms: [], dir: { x: 0, y: 0 } };
+        const g = {
+          key,
+          rooms: [],
+          dir: networkCompassUnitFromKey(key),
+        };
         seen.set(key, g);
         facadeGroups.push(g);
       }
       seen.get(key).rooms.push(room);
-    }
-    for (const g of facadeGroups) {
-      let dx = 0;
-      let dy = 0;
-      let n = 0;
-      for (const room of g.rooms) {
-        const p = pos[room.id];
-        if (!p) continue;
-        const d = networkFacadeDir(room, p);
-        dx += d.x;
-        dy += d.y;
-        n += 1;
-      }
-      const len = Math.hypot(dx, dy) || 1;
-      g.dir = { x: dx / len, y: dy / len };
     }
 
     function layoutAt(s, originX, originY) {
@@ -5943,6 +6153,7 @@
       }
       const facadeXY = {};
       for (const g of facadeGroups) {
+        const dir = g.dir;
         let sx = 0;
         let sy = 0;
         let n = 0;
@@ -5955,14 +6166,14 @@
         }
         if (!n) continue;
         facadeXY[g.key] = {
-          x: sx / n + g.dir.x * NETWORK_FACADE_GAP_PX,
-          y: sy / n + g.dir.y * NETWORK_FACADE_GAP_PX,
+          x: sx / n + dir.x * NETWORK_FACADE_GAP_PX,
+          y: sy / n + dir.y * NETWORK_FACADE_GAP_PX,
         };
       }
       return { roomXY, facadeXY };
     }
 
-    function contentBox(laid) {
+    function contentBox(roomXY, facadeXY) {
       let minX = Infinity;
       let minY = Infinity;
       let maxX = -Infinity;
@@ -5973,10 +6184,10 @@
         minY = Math.min(minY, y - hh);
         maxY = Math.max(maxY, y + hh);
       };
-      for (const xy of Object.values(laid.roomXY)) {
+      for (const xy of Object.values(roomXY)) {
         bump(xy.x, xy.y, roomHW, roomHH);
       }
-      for (const xy of Object.values(laid.facadeXY)) {
+      for (const xy of Object.values(facadeXY || {})) {
         bump(xy.x, xy.y, facHW, facHH);
       }
       if (!Number.isFinite(minX)) {
@@ -5985,31 +6196,128 @@
       return { minX, minY, maxX, maxY };
     }
 
+    function refineLayout(roomXY, facadeXY) {
+      const nodes = [];
+      const xyById = {};
+      for (const id of Object.keys(roomXY)) {
+        const n = {
+          id,
+          kind: "room",
+          x: roomXY[id].x,
+          y: roomXY[id].y,
+          hw: roomHW,
+          hh: roomHH,
+        };
+        nodes.push(n);
+        xyById[id] = n;
+      }
+      for (const key of Object.keys(facadeXY)) {
+        const fid = `fac:${key}`;
+        const n = {
+          id: fid,
+          kind: "facade",
+          key,
+          x: facadeXY[key].x,
+          y: facadeXY[key].y,
+          hw: facHW,
+          hh: facHH,
+        };
+        nodes.push(n);
+        xyById[fid] = n;
+      }
+
+      const edgeList = [];
+      for (const e of edges || []) {
+        const kind = e.kind || "door";
+        if (kind === "wall") continue;
+        if (!xyById[e.a] || !xyById[e.b]) continue;
+        edgeList.push({ a: e.a, b: e.b });
+      }
+      for (const g of facadeGroups) {
+        const fid = `fac:${g.key}`;
+        if (!xyById[fid]) continue;
+        for (const room of g.rooms) {
+          if (!xyById[room.id]) continue;
+          edgeList.push({ a: room.id, b: fid });
+        }
+      }
+
+      const roomIds = Object.keys(roomXY);
+      for (let round = 0; round < 5; round += 1) {
+        networkSeparateBoxes(nodes, NETWORK_NODE_GAP_PX);
+        networkUntangleEdges(xyById, edgeList, roomIds);
+        // Re-anchor façades beside their rooms after room moves.
+        for (const g of facadeGroups) {
+          const fid = `fac:${g.key}`;
+          const fn = xyById[fid];
+          if (!fn) continue;
+          let sx = 0;
+          let sy = 0;
+          let n = 0;
+          for (const room of g.rooms) {
+            const rn = xyById[room.id];
+            if (!rn) continue;
+            sx += rn.x;
+            sy += rn.y;
+            n += 1;
+          }
+          if (!n) continue;
+          fn.x = sx / n + g.dir.x * NETWORK_FACADE_GAP_PX;
+          fn.y = sy / n + g.dir.y * NETWORK_FACADE_GAP_PX;
+        }
+        networkSeparateBoxes(nodes, NETWORK_NODE_GAP_PX);
+        if (networkCountCrossings(xyById, edgeList) === 0) break;
+      }
+
+      for (const id of roomIds) {
+        roomXY[id].x = xyById[id].x;
+        roomXY[id].y = xyById[id].y;
+      }
+      for (const g of facadeGroups) {
+        const fid = `fac:${g.key}`;
+        if (!xyById[fid] || !facadeXY[g.key]) continue;
+        facadeXY[g.key].x = xyById[fid].x;
+        facadeXY[g.key].y = xyById[fid].y;
+      }
+    }
+
     let ox = baseW / 2;
     let oy = baseH / 2;
     let laid = layoutAt(scale, ox, oy);
-    let box = contentBox(laid);
+    refineLayout(laid.roomXY, laid.facadeXY);
+    let box = contentBox(laid.roomXY, laid.facadeXY);
     const w = Math.max(baseW, Math.ceil(box.maxX - box.minX + 2 * pad));
     const h = Math.max(baseH, Math.ceil(box.maxY - box.minY + 2 * pad));
-    ox = w / 2;
-    oy = h / 2;
-    laid = layoutAt(scale, ox, oy);
-    box = contentBox(laid);
+    // Re-center after refine without rebuilding façades from scratch (would
+    // reintroduce overlaps); translate as a rigid group.
     const dx = pad + (w - 2 * pad - (box.maxX - box.minX)) / 2 - box.minX;
     const dy = pad + (h - 2 * pad - (box.maxY - box.minY)) / 2 - box.minY;
+    const roomXY = {};
+    for (const id of Object.keys(laid.roomXY)) {
+      roomXY[id] = {
+        x: laid.roomXY[id].x + dx,
+        y: laid.roomXY[id].y + dy,
+      };
+    }
     const facadeXY = {};
     for (const key of Object.keys(laid.facadeXY)) {
-      const xy = laid.facadeXY[key];
-      facadeXY[key] = { x: xy.x + dx, y: xy.y + dy };
+      facadeXY[key] = {
+        x: laid.facadeXY[key].x + dx,
+        y: laid.facadeXY[key].y + dy,
+      };
     }
     return {
       w,
       h,
-      toXY: (p) => ({
-        x: ox + p.x * scale + dx,
-        y: oy + p.y * scale + dy,
-      }),
+      roomXY,
       facadeXY,
+      toXY: (p, id) => {
+        if (id && roomXY[id]) return { x: roomXY[id].x, y: roomXY[id].y };
+        return {
+          x: ox + p.x * scale + dx,
+          y: oy + p.y * scale + dy,
+        };
+      },
     };
   }
 
@@ -6047,6 +6355,47 @@
     }
   }
 
+  /** Attract along passable edges, then separate — improves planarity seed. */
+  function networkRelaxLayout(pos, edges) {
+    const ids = Object.keys(pos);
+    if (ids.length < 2) return;
+    const links = (edges || []).filter((e) => {
+      const kind = e.kind || "door";
+      return kind !== "wall" && pos[e.a] && pos[e.b];
+    });
+    const ideal = NETWORK_MIN_NODE_DIST * 1.2;
+    for (let iter = 0; iter < 60; iter += 1) {
+      for (const e of links) {
+        const a = pos[e.a];
+        const b = pos[e.b];
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let dist = Math.hypot(dx, dy);
+        if (dist < 1e-6) {
+          dx = 0.01;
+          dy = 0.01;
+          dist = Math.hypot(dx, dy);
+        }
+        const f = (dist - ideal) * 0.06;
+        const ux = dx / dist;
+        const uy = dy / dist;
+        a.x += ux * f;
+        a.y += uy * f;
+        b.x -= ux * f;
+        b.y -= uy * f;
+      }
+      separateNetworkPositions(pos, NETWORK_MIN_NODE_DIST);
+    }
+    // Swap-based uncross in layout units.
+    const xyById = {};
+    for (const id of ids) {
+      xyById[id] = pos[id];
+    }
+    const edgeList = links.map((e) => ({ a: e.a, b: e.b }));
+    networkUntangleEdges(xyById, edgeList, ids);
+    separateNetworkPositions(pos, NETWORK_MIN_NODE_DIST);
+  }
+
   function networkLayout(rooms, edges) {
     const ids = rooms.map((r) => r.id);
     const degree = Object.fromEntries(ids.map((id) => [id, 0]));
@@ -6077,7 +6426,7 @@
         pos[id] = { x: Math.cos(ang) * 1.0, y: Math.sin(ang) * 1.0 };
       });
     }
-    separateNetworkPositions(pos, NETWORK_MIN_NODE_DIST);
+    networkRelaxLayout(pos, edges);
     return { pos, hub };
   }
 
@@ -8148,9 +8497,20 @@
       sectionEdgeKeys.add(`${b}|${a}`);
     }
     const waypointSet = new Set(sectionWaypoints);
-    const placed = networkPlaceGraph(pos, rooms, NETWORK_VB_W, NETWORK_VB_H);
+    const placed = networkPlaceGraph(
+      pos,
+      rooms,
+      edges,
+      NETWORK_VB_W,
+      NETWORK_VB_H
+    );
     networkLayoutVb = { w: placed.w, h: placed.h };
-    const toXY = placed.toXY;
+    const roomPosXY = placed.roomXY || {};
+    const toXY = (id) => {
+      if (roomPosXY[id]) return roomPosXY[id];
+      const p = pos[id];
+      return p ? placed.toXY(p, id) : { x: 0, y: 0 };
+    };
 
     centerNetworkPan();
     applyNetworkViewBox();
@@ -8209,8 +8569,8 @@
       const pa = pos[edge.a];
       const pb = pos[edge.b];
       if (!pa || !pb) continue;
-      const a = toXY(pa);
-      const b = toXY(pb);
+      const a = toXY(edge.a);
+      const b = toXY(edge.b);
       const kind = edge.kind || "door";
       const opening = edge.opening || "unknown";
       const forced = !!edge.forced;
@@ -8388,6 +8748,7 @@
     for (const room of rooms) {
       const p = pos[room.id];
       if (!p) continue;
+      if (!roomShowsFacadeNode(room)) continue;
       const key = networkFacadeKey(room);
       if (!key) continue;
       if (!facadeGroups.has(key)) {
@@ -8403,7 +8764,7 @@
 
       for (const room of group.rooms) {
         extXY[room.id] = exy;
-        const xy = toXY(pos[room.id]);
+        const xy = toXY(room.id);
         const wState = room.window_state;
         const wForced = !!room.window_forced;
         const outdoorId =
@@ -8675,7 +9036,7 @@
     for (const room of rooms) {
       const p = pos[room.id];
       if (!p) continue;
-      const xy = toXY(p);
+      const xy = toXY(room.id);
       roomXY[room.id] = xy;
 
       const hasOpen =
@@ -16495,11 +16856,11 @@
   }
 
   const planEditorOpenBtn = document.getElementById("plan-editor-open-btn");
-  const foldPlanEditorEl = document.getElementById("fold-plan-editor");
-  if (planEditorOpenBtn && foldPlanEditorEl) {
+  if (planEditorOpenBtn) {
     planEditorOpenBtn.addEventListener("click", () => {
-      foldPlanEditorEl.open = true;
-      foldPlanEditorEl.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (window.GoveePlanEditor && typeof window.GoveePlanEditor.open === "function") {
+        window.GoveePlanEditor.open();
+      }
     });
   }
 })();
