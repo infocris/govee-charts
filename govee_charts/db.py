@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import sqlite3
 import time
@@ -20,6 +21,8 @@ from govee_charts.address import (
 )
 from govee_charts.decode import Reading
 from govee_charts.federation import source_bucket_sql
+
+logger = logging.getLogger(__name__)
 
 # SQLITE_LOCKED is not covered by busy_timeout; wait as long as PRAGMA busy_timeout.
 _HEARTBEAT_LOCK_WAIT_S = 15.0
@@ -229,6 +232,8 @@ class Database:
         )
         await self._migrate()
         await self._merge_alias_devices()
+        await self._merge_switchbot_uuid_devices()
+        await self._dedupe_all_overlapping_placements()
         await self._db.commit()
 
     async def _migrate(self) -> None:
@@ -390,6 +395,156 @@ class Database:
             if suffix and suffix in suffix_to_mac:
                 await self._rekey_device(addr, suffix_to_mac[suffix])
 
+    async def _merge_switchbot_uuid_devices(self) -> None:
+        """Merge macOS UUID SwitchBot rows onto the unique same-model MAC.
+
+        Federation peers may have ingested CoreBluetooth UUIDs before the Mac
+        node started publishing the embedded MAC. When a model has exactly one
+        UUID alias and one BLE MAC, fold history onto the MAC.
+        """
+        cursor = await self.db.execute(
+            "SELECT address, model, last_seen FROM devices"
+        )
+        rows = await cursor.fetchall()
+        by_model: dict[str, list[tuple[str, float | None]]] = {}
+        for row in rows:
+            addr = str(row[0] or "").strip().upper()
+            model = str(row[1] or "").strip().lower()
+            if not addr or not model.startswith("switchbot-"):
+                continue
+            if addr.startswith("HA:"):
+                continue
+            try:
+                last_seen = float(row[2]) if row[2] is not None else None
+            except (TypeError, ValueError):
+                last_seen = None
+            by_model.setdefault(model, []).append((addr, last_seen))
+
+        for model, entries in by_model.items():
+            macs = [(a, ts) for a, ts in entries if is_ble_mac(a)]
+            aliases = [(a, ts) for a, ts in entries if not is_ble_mac(a)]
+            if len(macs) != 1 or not aliases:
+                continue
+            canonical = macs[0][0]
+            for alias, _ts in aliases:
+                logger.info(
+                    "Merging SwitchBot UUID alias %s → %s (%s)",
+                    alias,
+                    canonical,
+                    model,
+                )
+                await self._rekey_device(alias, canonical)
+
+    async def _dedupe_all_overlapping_placements(self) -> None:
+        """Repair placement overlaps (e.g. after UUID→MAC rekeys)."""
+        cursor = await self.db.execute(
+            """
+            SELECT DISTINCT a.address
+            FROM device_placements AS a
+            JOIN device_placements AS b
+              ON a.address = b.address
+             AND a.id < b.id
+             AND a.valid_from < COALESCE(b.valid_until, 1e18)
+             AND (a.valid_until IS NULL OR a.valid_until > b.valid_from)
+            """
+        )
+        addresses = [str(row[0]).upper() for row in await cursor.fetchall()]
+        for addr in addresses:
+            await self._dedupe_overlapping_placements(addr)
+
+    async def _dedupe_overlapping_placements(self, address: str) -> None:
+        """Resolve overlapping intervals for one device address.
+
+        Prefers the row with more metadata; closes or deletes the other.
+        """
+        addr = address.strip().upper()
+        cursor = await self.db.execute(
+            "SELECT COUNT(*) FROM device_placements WHERE address = ?",
+            (addr,),
+        )
+        count_row = await cursor.fetchone()
+        if not count_row or int(count_row[0] or 0) < 2:
+            return
+
+        def richness(row: dict[str, Any]) -> int:
+            return sum(
+                1
+                for key in ("label", "zone", "height", "height_cm", "room")
+                if row.get(key) not in (None, "")
+            )
+
+        changed = True
+        while changed:
+            changed = False
+            cursor = await self.db.execute(
+                """
+                SELECT id, valid_from, valid_until, label, zone, height, height_cm, room
+                FROM device_placements
+                WHERE address = ?
+                ORDER BY valid_from ASC, id ASC
+                """,
+                (addr,),
+            )
+            rows = [
+                {
+                    "id": int(r[0]),
+                    "valid_from": float(r[1]),
+                    "valid_until": None if r[2] is None else float(r[2]),
+                    "label": r[3],
+                    "zone": r[4],
+                    "height": r[5],
+                    "height_cm": r[6],
+                    "room": r[7],
+                }
+                for r in await cursor.fetchall()
+            ]
+            for i, a in enumerate(rows):
+                for b in rows[i + 1 :]:
+                    a_end = a["valid_until"] if a["valid_until"] is not None else 1e18
+                    b_end = b["valid_until"] if b["valid_until"] is not None else 1e18
+                    if not (a["valid_from"] < b_end and b["valid_from"] < a_end):
+                        continue
+                    # Prefer the richer / earlier row; drop or close the other.
+                    keep, drop = (a, b) if (
+                        richness(a) > richness(b)
+                        or (richness(a) == richness(b) and a["id"] < b["id"])
+                    ) else (b, a)
+                    if drop["valid_until"] is None and keep["valid_until"] is None:
+                        # Two open intervals: close the earlier-starting keep? No —
+                        # delete the poorer open duplicate.
+                        await self.db.execute(
+                            "DELETE FROM device_placements WHERE id = ?",
+                            (drop["id"],),
+                        )
+                        changed = True
+                        break
+                    if drop["valid_from"] >= keep["valid_from"] and (
+                        keep["valid_until"] is None
+                        or drop["valid_from"] < keep["valid_until"]
+                    ):
+                        # drop starts inside keep → delete drop
+                        await self.db.execute(
+                            "DELETE FROM device_placements WHERE id = ?",
+                            (drop["id"],),
+                        )
+                        changed = True
+                        break
+                    # Trim keep so it ends when drop starts (keep precedes drop).
+                    earlier, later = (
+                        (keep, drop)
+                        if keep["valid_from"] <= drop["valid_from"]
+                        else (drop, keep)
+                    )
+                    if earlier["valid_until"] is None or earlier["valid_until"] > later["valid_from"]:
+                        await self.db.execute(
+                            "UPDATE device_placements SET valid_until = ? WHERE id = ?",
+                            (later["valid_from"], earlier["id"]),
+                        )
+                        changed = True
+                        break
+                if changed:
+                    break
+
     async def merge_device_alias(self, alias_address: str, canonical_address: str) -> bool:
         """Merge an alias row (e.g. macOS UUID) onto a canonical BLE MAC.
 
@@ -477,6 +632,7 @@ class Database:
             "UPDATE device_placements SET address = ? WHERE address = ?",
             (new_address, old_address),
         )
+        await self._dedupe_overlapping_placements(new_address)
         await self.db.execute("DELETE FROM ble_nearby WHERE address = ?", (old_address,))
         await self.db.execute(
             """
@@ -2671,12 +2827,20 @@ class Database:
             inferred = infer_from_label(str(device.get("name") or ""))
             if not any(inferred.values()):
                 continue
-            await self.update_device_categories(
-                device["address"],
-                zone=inferred["zone"],
-                height=inferred["height"],
-                room=inferred["room"],
-            )
+            try:
+                await self.update_device_categories(
+                    device["address"],
+                    zone=inferred["zone"],
+                    height=inferred["height"],
+                    room=inferred["room"],
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "Skipping category seed for %s: %s",
+                    device["address"],
+                    exc,
+                )
+                continue
             updated += 1
         return updated
 

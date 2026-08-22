@@ -15,6 +15,16 @@ def is_ble_mac(address: str) -> bool:
     return bool(BLE_MAC_RE.fullmatch(address.strip()))
 
 
+def is_ha_device_id(address: str) -> bool:
+    return address.strip().upper().startswith("HA:")
+
+
+def is_federated_device_address(address: str) -> bool:
+    """True for addresses peers may ingest (BLE MAC or HA:… synthetic ids)."""
+    addr = address.strip().upper()
+    return is_ble_mac(addr) or is_ha_device_id(addr)
+
+
 def name_mac_suffix(name: str) -> str | None:
     if not name:
         return None

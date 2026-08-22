@@ -20,7 +20,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.types import Scope
 
-from govee_charts.address import is_ble_mac, register_mac, resolve_device_address
+from govee_charts.address import (
+    is_ble_mac,
+    is_federated_device_address,
+    register_mac,
+    resolve_device_address,
+)
 from govee_charts.apartment import (
     TEMP_COUPLE_CLOSED_C,
     TEMP_COUPLE_OPEN_C,
@@ -3954,13 +3959,34 @@ def create_app(
         labels: dict[str, str] = app.state.labels
         suffix_map: dict[str, str] = app.state.suffix_map
         inserted = 0
+        skipped = 0
         for item in payload.readings:
             ble_name = item.name
+            raw_address = str(item.address or "").strip()
+            if not is_federated_device_address(raw_address):
+                # Refuse macOS CoreBluetooth UUIDs (and other non-MAC ids).
+                # Peers must publish the canonical BLE MAC (or HA:… ids).
+                skipped += 1
+                logger.warning(
+                    "Skipping ingest of non-MAC address %s from node %s",
+                    raw_address,
+                    payload.node_id,
+                )
+                continue
             address = resolve_device_address(
-                item.address,
+                raw_address,
                 ble_name,
                 suffix_map=suffix_map,
             )
+            if not is_federated_device_address(address):
+                skipped += 1
+                logger.warning(
+                    "Skipping ingest of unresolved address %s (from %s) node %s",
+                    address,
+                    raw_address,
+                    payload.node_id,
+                )
+                continue
             register_mac(suffix_map, address)
             existing = await db.get_device(address)
             display = device_display_name(
@@ -4003,6 +4029,7 @@ def create_app(
             "ok": True,
             "received": len(payload.readings),
             "inserted": inserted,
+            "skipped": skipped,
             "node_id": app.state.node_id,
         }
 

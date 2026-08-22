@@ -54,6 +54,8 @@ Chat replies to the repository owner may follow their preferred language; projec
 
 - Store and federate the **canonical MAC** only; never persist a Darwin UUID as the device primary key once a MAC is known.
 - On first sight of UUID → MAC, the scanner merges the alias row (`Database.merge_device_alias` / `_rekey_device`) so history follows the MAC.
+- Peers **reject** federation ingest of non-MAC addresses (except `HA:…`), so a macOS node that still publishes UUIDs cannot pollute another node's device list.
+- On peer startup, `_merge_switchbot_uuid_devices` folds leftover UUID rows onto the unique same-model SwitchBot MAC when the mapping is unambiguous.
 - GATT on macOS must reuse the cached `BLEDevice` from the scanner (or a MAC-aware scan), not `find_device_by_address(MAC)` alone — see `history_gatt.py` / `scanner.remember_ble_device`.
 - When adding a **new BLE brand**, assume macOS will hand you a UUID and plan an embedded-MAC or name-suffix path before shipping decode support. A Linux-only smoke test will miss this bug.
 
