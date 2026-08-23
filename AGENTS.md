@@ -34,6 +34,7 @@ Chat replies to the repository owner may follow their preferred language; projec
 - Device metadata (label, zone, height, height_cm, room) can be pushed to peers via Overview **Push meta** (`POST /api/devices/{address}/push-meta` → peer `POST /api/devices/meta`).
 - Before GATT, backfill may **GET** peer `/api/history` for the gap window (`backfill.federation_pull`); pulled samples keep peer provenance and are not re-published. Remaining holes still use BLE GATT.
 - GATT backfill prefers the federation node with the **best recent RSSI** for a device; weaker nodes defer and wait for ingested history.
+- **SwitchBot Meter family** (`switchbot-meter*`) uses the same backfill queue: federation pull first, then undocumented BLE history commands (`0x3A`/`0x3B`/`0x3C` in `switchbot_history.py`). Onboard span is ~36d (Meter) or ~68d (Plus / Outdoor / Pro). History packets carry temperature reliably; humidity may fall back to the latest live reading when not present in a record.
 
 ### Multi-adapter BLE
 

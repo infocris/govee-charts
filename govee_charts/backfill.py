@@ -13,8 +13,29 @@ from govee_charts.decode import Reading
 from govee_charts.federation import PeerPublisher, gatt_source
 from govee_charts.history_gatt import MAX_HISTORY_MINUTES, download_history
 from govee_charts.scanner import GoveeScanner
+from govee_charts.switchbot_history import (
+    is_switchbot_backfill_model,
+    max_history_minutes_for_model,
+    download_switchbot_history,
+)
 
 logger = logging.getLogger(__name__)
+
+BACKFILL_GOVEE_MODELS = frozenset({"h5075", "h5072", "h5179"})
+BACKFILL_SWITCHBOT_MODELS = frozenset(
+    {
+        "switchbot-meter",
+        "switchbot-meter-plus",
+        "switchbot-meter-pro",
+        "switchbot-meter-pro-co2",
+        "switchbot-meter-outdoor",
+    }
+)
+BACKFILL_MODELS = BACKFILL_GOVEE_MODELS | BACKFILL_SWITCHBOT_MODELS
+
+
+def _is_backfill_model(model: str | None) -> bool:
+    return str(model or "").lower() in BACKFILL_MODELS
 
 PHASE_PRIORITY = {
     "hour": 0,
@@ -115,12 +136,18 @@ def _missing_ranges(
     return ranges
 
 
-def _phase_bands(now: float, lookback_days: float) -> list[tuple[str, float, float]]:
+def _phase_bands(
+    now: float,
+    lookback_days: float,
+    *,
+    max_history_minutes: int | None = None,
+) -> list[tuple[str, float, float]]:
     """
     Exclusive time bands newest → oldest.
     Each tuple: (phase, band_start, band_end) with band_start < band_end ≤ now.
     """
-    lookback_min = min(int(lookback_days * 24 * 60), MAX_HISTORY_MINUTES)
+    cap = max_history_minutes if max_history_minutes is not None else MAX_HISTORY_MINUTES
+    lookback_min = min(int(lookback_days * 24 * 60), cap)
     lookback_start = now - lookback_min * 60.0
     # Leave the current incomplete minute alone.
     tip = now - 60.0
@@ -255,7 +282,7 @@ class BackfillService:
             if not addr:
                 continue
             model = str(device.get("model") or "").lower()
-            if model and model not in ("h5075", "h5072", "h5179"):
+            if model and not _is_backfill_model(model):
                 continue
             local = local_rssi.get(addr)
             peer = peer_rssi.get(addr)
@@ -388,7 +415,6 @@ class BackfillService:
 
             devices = await self.db.list_devices(include_stats=False)
             enqueued = 0
-            bands = _phase_bands(now_q, self.cfg.lookback_days)
             for device_i, device in enumerate(devices):
                 addr = str(device["address"]).upper()
                 if addr not in enabled_set:
@@ -396,8 +422,13 @@ class BackfillService:
                 if scope is not None and addr not in scope:
                     continue
                 model = str(device.get("model") or "").lower()
-                if model and model not in ("h5075", "h5072", "h5179"):
+                if model and not _is_backfill_model(model):
                     continue
+                bands = _phase_bands(
+                    now_q,
+                    self.cfg.lookback_days,
+                    max_history_minutes=max_history_minutes_for_model(model),
+                )
                 for phase, band_start, band_end in bands:
                     existing = await self.db.reading_minutes(
                         addr, band_start, band_end, cover_seconds=75.0
@@ -449,8 +480,8 @@ class BackfillService:
         if device is None:
             raise KeyError(f"Unknown device {address}")
         model = str(device.get("model") or "").lower()
-        if model and model not in ("h5075", "h5072", "h5179"):
-            raise ValueError(f"Model {model or '?'} does not support GATT history")
+        if model and not _is_backfill_model(model):
+            raise ValueError(f"Model {model or '?'} does not support history backfill")
 
         prev_enabled = await self.db.is_backfill_enabled(address)
         flags = await self.db.set_backfill_flags(
@@ -1066,7 +1097,21 @@ class BackfillService:
         end_min = max(1, int(round((now - eff_end) / 60.0)))
         if start_min < end_min:
             start_min, end_min = end_min, start_min
-        start_min = min(start_min, MAX_HISTORY_MINUTES)
+        hist_cap = (
+            max_history_minutes_for_model(model)
+            if is_switchbot_backfill_model(model)
+            else MAX_HISTORY_MINUTES
+        )
+        start_min = min(start_min, hist_cap)
+
+        fallback_humidity: float | None = None
+        if is_switchbot_backfill_model(model):
+            recent = await self.db.recent_readings(address, limit=1)
+            if recent and recent[0].get("humidity") is not None:
+                try:
+                    fallback_humidity = float(recent[0]["humidity"])
+                except (TypeError, ValueError):
+                    fallback_humidity = None
 
         inserted_count = 0
         done_samples = 0
@@ -1112,17 +1157,32 @@ class BackfillService:
                 return
             await self.scanner.pause_for_gatt()
         try:
-            result = await download_history(
-                address,
-                start_min=start_min,
-                end_min=end_min,
-                timeout=self.cfg.connect_timeout,
-                fallback_battery=fallback_battery,
-                on_sample=on_sample,
-                now=now,
-                device=cached_device,
-                suffix_map=suffix_map,
-            )
+            if is_switchbot_backfill_model(model):
+                result = await download_switchbot_history(
+                    address,
+                    start_min=start_min,
+                    end_min=end_min,
+                    timeout=self.cfg.connect_timeout,
+                    fallback_battery=fallback_battery,
+                    fallback_humidity=fallback_humidity,
+                    on_sample=on_sample,
+                    now=now,
+                    device=cached_device,
+                    suffix_map=suffix_map,
+                    model=model,
+                )
+            else:
+                result = await download_history(
+                    address,
+                    start_min=start_min,
+                    end_min=end_min,
+                    timeout=self.cfg.connect_timeout,
+                    fallback_battery=fallback_battery,
+                    on_sample=on_sample,
+                    now=now,
+                    device=cached_device,
+                    suffix_map=suffix_map,
+                )
         finally:
             if self.scanner is not None:
                 await self.scanner.resume_after_gatt()

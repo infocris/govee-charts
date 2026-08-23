@@ -2001,7 +2001,7 @@
     if (backfillSensorsHintEl) {
       if (!rows.length) {
         backfillSensorsHintEl.hidden = false;
-        backfillSensorsHintEl.textContent = "No eligible Govee sensors found.";
+        backfillSensorsHintEl.textContent = "No eligible sensors found.";
       } else if (!anyOn) {
         backfillSensorsHintEl.hidden = false;
         backfillSensorsHintEl.textContent =

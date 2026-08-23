@@ -722,7 +722,7 @@ class MailInboxSet(BaseModel):
     model_config = {"extra": "forbid"}
 
 
-_BACKFILL_MODELS = ("h5075", "h5072", "h5179")
+from govee_charts.backfill import BACKFILL_MODELS as _BACKFILL_MODELS
 
 
 def device_display_name(
@@ -1587,7 +1587,7 @@ def create_app(
         if model and model not in _BACKFILL_MODELS:
             raise HTTPException(
                 status_code=400,
-                detail=f"Model {model or '?'} does not support GATT history",
+                detail=f"Model {model or '?'} does not support history backfill",
             )
         try:
             flags = await db.set_backfill_flags(
