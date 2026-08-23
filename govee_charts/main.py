@@ -10,6 +10,8 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -49,6 +51,9 @@ CONFIG_PATH = ROOT / "config.toml"
 # SQLite watchdog (workers heartbeat loop)
 _HEARTBEAT_INTERVAL_S = 2.0
 _HEARTBEAT_FAIL_EXIT_S = 60.0
+# Thread watchdog: exits even when asyncio/aiosqlite are stuck inside SQLite C.
+_HARD_WATCHDOG_STALE_S = 90.0
+_HARD_WATCHDOG_POLL_S = 5.0
 _WAL_CHECKPOINT_INTERVAL_S = 60.0
 _WAL_TRUNCATE_BYTES = 64 * 1024 * 1024
 
@@ -598,6 +603,8 @@ async def _start_workers(
 
     await db.touch_runtime_heartbeat("workers")
     heartbeat_task = asyncio.create_task(_heartbeat(), name="workers-heartbeat")
+    hard_watchdog_stop = threading.Event()
+    hard_watchdog = _start_workers_hard_watchdog(db, hard_watchdog_stop)
 
     return {
         "stop_event": stop_event,
@@ -611,9 +618,49 @@ async def _start_workers(
         "backfill_task": backfill_task,
         "compaction_task": compaction_task,
         "heartbeat_task": heartbeat_task,
+        "hard_watchdog_stop": hard_watchdog_stop,
+        "hard_watchdog": hard_watchdog,
         "backfill": backfill,
         "hvac_cfg": hvac_cfg,
     }
+
+
+def _start_workers_hard_watchdog(
+    db: Database, stop: threading.Event
+) -> threading.Thread:
+    """Daemon thread: hard-exit if the workers sidecar heartbeat goes stale.
+
+    The asyncio heartbeat cannot recover when SQLite never returns from C
+    (e.g. Apple purgeableCacheShrink). Watching the sidecar file from another
+    thread still works because touch_runtime_heartbeat writes it before awaiting
+    SQL — once that loop stalls, the file ages out and we exit for relaunch.
+    """
+
+    def _run() -> None:
+        while not stop.wait(_HARD_WATCHDOG_POLL_S):
+            ts = db.read_workers_heartbeat_file()
+            if ts is None:
+                logging.error(
+                    "Workers heartbeat file missing — hard exit so supervisor can restart"
+                )
+                os._exit(1)
+            age = time.time() - ts
+            if age >= _HARD_WATCHDOG_STALE_S:
+                logging.error(
+                    "Workers heartbeat file stale for %.0fs — hard exit so supervisor can restart",
+                    age,
+                )
+                os._exit(1)
+
+    thread = threading.Thread(
+        target=_run, name="workers-hb-watchdog", daemon=True
+    )
+    thread.start()
+    logging.info(
+        "Workers hard watchdog started (stale after %.0fs)",
+        _HARD_WATCHDOG_STALE_S,
+    )
+    return thread
 
 
 async def _stop_workers(
@@ -622,6 +669,9 @@ async def _stop_workers(
     grace_seconds: float = 3.0,
 ) -> None:
     """Signal workers to stop, wait briefly, then cancel stragglers in parallel."""
+    hard_stop = runtime.get("hard_watchdog_stop")
+    if isinstance(hard_stop, threading.Event):
+        hard_stop.set()
     stop_event: asyncio.Event = runtime["stop_event"]
     stop_event.set()
     labeled = [

@@ -51,6 +51,9 @@ class Database:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA busy_timeout=15000")
+        # Cap page cache (~16 MiB). Unbounded growth has triggered Apple
+        # libsqlite3 purgeableCacheShrink hangs that freeze the event loop.
+        await self._db.execute("PRAGMA cache_size=-16384")
         await self._db.executescript(
             """
             CREATE TABLE IF NOT EXISTS devices (
@@ -628,11 +631,7 @@ class Database:
         await self.db.execute(
             "DELETE FROM compaction_state WHERE address = ?", (old_address,)
         )
-        await self.db.execute(
-            "UPDATE device_placements SET address = ? WHERE address = ?",
-            (new_address, old_address),
-        )
-        await self._dedupe_overlapping_placements(new_address)
+        await self._rekey_placements(old_address, new_address)
         await self.db.execute("DELETE FROM ble_nearby WHERE address = ?", (old_address,))
         await self.db.execute(
             """
@@ -654,6 +653,98 @@ class Database:
         )
         await self.db.execute("DELETE FROM devices WHERE address = ?", (old_address,))
         await self.db.commit()
+
+    async def _rekey_placements(self, old_address: str, new_address: str) -> None:
+        """Move placements from alias → MAC without leaving overlapping opens."""
+        old_cur = await self.db.execute(
+            """
+            SELECT id, valid_from, valid_until, label, zone, height, height_cm, room
+            FROM device_placements
+            WHERE address = ?
+            ORDER BY valid_from ASC, id ASC
+            """,
+            (old_address,),
+        )
+        old_rows = [dict(r) for r in await old_cur.fetchall()]
+        for row in old_rows:
+            pid = int(row["id"])
+            vfrom = float(row["valid_from"])
+            vuntil = (
+                float(row["valid_until"]) if row["valid_until"] is not None else None
+            )
+            overlap_cur = await self.db.execute(
+                """
+                SELECT id, valid_from, valid_until, label, zone, height, height_cm, room
+                FROM device_placements
+                WHERE address = ?
+                  AND id != ?
+                  AND valid_from < COALESCE(?, 1e18)
+                  AND (valid_until IS NULL OR valid_until > ?)
+                ORDER BY valid_from ASC, id ASC
+                """,
+                (new_address, pid, vuntil, vfrom),
+            )
+            overlaps = [dict(r) for r in await overlap_cur.fetchall()]
+            if not overlaps:
+                await self.db.execute(
+                    "UPDATE device_placements SET address = ? WHERE id = ?",
+                    (new_address, pid),
+                )
+                continue
+
+            # Fold alias interval into the earliest overlapping canonical row.
+            target = overlaps[0]
+            tid = int(target["id"])
+            new_from = min(vfrom, float(target["valid_from"]))
+            if vuntil is None or target["valid_until"] is None:
+                new_until: float | None = None
+            else:
+                new_until = max(vuntil, float(target["valid_until"]))
+
+            def _pick(primary: Any, secondary: Any) -> Any:
+                return primary if primary is not None else secondary
+
+            await self.db.execute(
+                """
+                UPDATE device_placements SET
+                    valid_from = ?,
+                    valid_until = ?,
+                    label = ?,
+                    zone = ?,
+                    height = ?,
+                    height_cm = ?,
+                    room = ?
+                WHERE id = ?
+                """,
+                (
+                    new_from,
+                    new_until,
+                    _pick(target.get("label"), row.get("label")),
+                    _pick(target.get("zone"), row.get("zone")),
+                    _pick(target.get("height"), row.get("height")),
+                    _pick(target.get("height_cm"), row.get("height_cm")),
+                    _pick(target.get("room"), row.get("room")),
+                    tid,
+                ),
+            )
+            await self.db.execute(
+                "DELETE FROM device_placements WHERE id = ?", (pid,)
+            )
+
+        # Safety net: at most one open placement per address.
+        open_cur = await self.db.execute(
+            """
+            SELECT id FROM device_placements
+            WHERE address = ? AND valid_until IS NULL
+            ORDER BY valid_from ASC, id ASC
+            """,
+            (new_address,),
+        )
+        open_ids = [int(r[0]) for r in await open_cur.fetchall()]
+        for extra_id in open_ids[1:]:
+            await self.db.execute(
+                "DELETE FROM device_placements WHERE id = ?", (extra_id,)
+            )
 
     async def _migrate_placements_from_devices(self) -> None:
         """One-shot copy of legacy device metadata into device_placements."""
