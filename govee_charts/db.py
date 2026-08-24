@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -51,9 +52,17 @@ class Database:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA busy_timeout=15000")
-        # Cap page cache (~16 MiB). Unbounded growth has triggered Apple
-        # libsqlite3 purgeableCacheShrink hangs that freeze the event loop.
-        await self._db.execute("PRAGMA cache_size=-16384")
+        # Cap page cache (~4 MiB) and disable mmap. Larger caches on Apple's
+        # libsqlite3 have hung for minutes inside purgeableCacheShrink during
+        # sqlite3_reset, freezing every await on this connection.
+        await self._db.execute("PRAGMA cache_size=-4096")
+        await self._db.execute("PRAGMA mmap_size=0")
+        await self._db.execute("PRAGMA temp_store=MEMORY")
+        await self._db.execute("PRAGMA wal_autocheckpoint=1000")
+        try:
+            self.write_workers_heartbeat_file()
+        except OSError:
+            pass
         await self._db.executescript(
             """
             CREATE TABLE IF NOT EXISTS devices (
@@ -1339,7 +1348,11 @@ class Database:
     def write_workers_heartbeat_file(self, ts: float | None = None) -> None:
         """Write the workers heartbeat timestamp to the sidecar file."""
         when = float(time.time() if ts is None else ts)
-        self.workers_heartbeat_path().write_text(f"{when:.6f}\n", encoding="ascii")
+        path = self.workers_heartbeat_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(f"{when:.6f}\n", encoding="ascii")
+        os.replace(tmp, path)
 
     def read_workers_heartbeat_file(self) -> float | None:
         """Return the sidecar workers heartbeat, or None if missing/invalid."""
@@ -4479,9 +4492,11 @@ class Database:
         live ads (e.g. every 90s) are not treated as endless one-minute GATT gaps.
         """
         pad = max(0.0, float(cover_seconds))
+        # Distinct minutes only — fetching every raw ts for a 20d lookback
+        # balloons Apple's page cache and has hung inside purgeableCacheShrink.
         cursor = await self.db.execute(
             """
-            SELECT ts
+            SELECT DISTINCT CAST(ts / 60 AS INTEGER) AS minute
             FROM readings
             WHERE address = ? AND ts >= ? AND ts < ?
             """,
@@ -4493,10 +4508,11 @@ class Database:
         end_m = int(end_ts // 60)
         if end_m <= start_m:
             return covered
+        pad_minutes = max(0, int(math.ceil(pad / 60.0)))
         for row in rows:
-            ts = float(row[0])
-            lo = int((ts - pad) // 60)
-            hi = int((ts + pad) // 60)
+            minute = int(row[0])
+            lo = minute - pad_minutes
+            hi = minute + pad_minutes
             for m in range(max(start_m, lo), min(end_m, hi + 1)):
                 covered.add(m)
         return covered

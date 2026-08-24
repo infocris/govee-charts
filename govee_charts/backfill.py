@@ -453,9 +453,9 @@ class BackfillService:
                         )
                         if job_id is not None:
                             enqueued += 1
-                # Yield so BLE ads / HTTP stay responsive during large refreshes.
+                # Yield so BLE ads / HTTP / heartbeat stay responsive.
                 if device_i % 2 == 1:
-                    await asyncio.sleep(0)
+                    await asyncio.sleep(0.01)
             if enqueued:
                 await self.db.commit()
                 logger.info(

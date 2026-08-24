@@ -54,6 +54,8 @@ _HEARTBEAT_FAIL_EXIT_S = 60.0
 # Thread watchdog: exits even when asyncio/aiosqlite are stuck inside SQLite C.
 _HARD_WATCHDOG_STALE_S = 90.0
 _HARD_WATCHDOG_POLL_S = 5.0
+_HARD_WATCHDOG_STARTUP_GRACE_S = 120.0
+_HARD_WATCHDOG_MISS_STREAK = 3
 _WAL_CHECKPOINT_INTERVAL_S = 60.0
 _WAL_TRUNCATE_BYTES = 64 * 1024 * 1024
 
@@ -381,9 +383,93 @@ async def _start_workers(
     backfill_task: asyncio.Task[None] | None = None
     compaction_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
+    # Assigned below; heartbeat may see None until scanner starts.
+    scanner: GoveeScanner | None = None
+
+    async def _heartbeat() -> None:
+        """Keep workers heartbeat alive; checkpoint WAL; exit if DB stuck."""
+        consecutive_fail_s = 0.0
+        last_checkpoint = 0.0
+        last_size_day = ""
+        while not stop_event.is_set():
+            try:
+                await db.touch_runtime_heartbeat("workers")
+                consecutive_fail_s = 0.0
+                if scanner is not None and await db.take_ble_discover_request():
+                    try:
+                        await _run_ble_discover_scan(db, scanner, cfg, suffix_map)
+                    except Exception:
+                        logging.exception("BLE discovery scan failed")
+                        await db.mark_ble_discover_done()
+            except Exception as exc:
+                consecutive_fail_s += _HEARTBEAT_INTERVAL_S
+                if is_db_locked(exc):
+                    logging.warning(
+                        "Workers heartbeat blocked (DB locked), %.0fs so far",
+                        consecutive_fail_s,
+                    )
+                else:
+                    logging.exception("Workers heartbeat failed")
+                if consecutive_fail_s >= _HEARTBEAT_FAIL_EXIT_S:
+                    logging.error(
+                        "SQLite write blocked for %.0fs — exiting so systemd can restart workers",
+                        consecutive_fail_s,
+                    )
+                    sys.exit(1)
+
+            today = Database.utc_day()
+            if today != last_size_day:
+                try:
+                    snap = await db.record_db_size_snapshot()
+                    last_size_day = today
+                    logging.info(
+                        "DB size snapshot %s: %.1f MiB total "
+                        "(%d readings, wal=%.1f MiB)",
+                        snap["day"],
+                        snap["total_bytes"] / (1024 * 1024),
+                        snap["readings_count"],
+                        snap["wal_bytes"] / (1024 * 1024),
+                    )
+                except Exception:
+                    logging.exception("DB size snapshot failed")
+
+            now = asyncio.get_running_loop().time()
+            if now - last_checkpoint >= _WAL_CHECKPOINT_INTERVAL_S:
+                last_checkpoint = now
+                try:
+                    busy, log_pages, checkpointed = await db.checkpoint_wal("PASSIVE")
+                    wal_bytes = db.wal_size_bytes()
+                    if wal_bytes >= _WAL_TRUNCATE_BYTES:
+                        logging.warning(
+                            "WAL is %.1f MiB (busy=%s log=%s ckpt=%s); trying TRUNCATE",
+                            wal_bytes / (1024 * 1024),
+                            busy,
+                            log_pages,
+                            checkpointed,
+                        )
+                        t_busy, t_log, t_ckpt = await db.checkpoint_wal("TRUNCATE")
+                        logging.warning(
+                            "WAL TRUNCATE done (busy=%s log=%s ckpt=%s, size=%.1f MiB)",
+                            t_busy,
+                            t_log,
+                            t_ckpt,
+                            db.wal_size_bytes() / (1024 * 1024),
+                        )
+                except Exception as exc:
+                    if is_db_locked(exc):
+                        logging.warning("WAL checkpoint skipped (DB locked)")
+                    else:
+                        logging.exception("WAL checkpoint failed")
+
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+
+    # Start before HA imports / backfill so a SQLite hang still ages the sidecar.
+    await db.touch_runtime_heartbeat("workers")
+    heartbeat_task = asyncio.create_task(_heartbeat(), name="workers-heartbeat")
+    hard_watchdog_stop = threading.Event()
+    hard_watchdog = _start_workers_hard_watchdog(db, hard_watchdog_stop)
 
     scanner_enabled = enable_scanner and bool(cfg["scanner"].get("enabled", True))
-    scanner: GoveeScanner | None = None
     if scanner_enabled:
         scanner = GoveeScanner(
             db,
@@ -527,85 +613,6 @@ async def _start_workers(
     else:
         logging.info("HA T/H poll disabled (set ha_th.enabled=true)")
 
-    async def _heartbeat() -> None:
-        """Keep workers heartbeat alive; checkpoint WAL; exit if DB stuck."""
-        consecutive_fail_s = 0.0
-        last_checkpoint = 0.0
-        last_size_day = ""
-        while not stop_event.is_set():
-            try:
-                await db.touch_runtime_heartbeat("workers")
-                consecutive_fail_s = 0.0
-                if scanner is not None and await db.take_ble_discover_request():
-                    try:
-                        await _run_ble_discover_scan(db, scanner, cfg, suffix_map)
-                    except Exception:
-                        logging.exception("BLE discovery scan failed")
-                        await db.mark_ble_discover_done()
-            except Exception as exc:
-                consecutive_fail_s += _HEARTBEAT_INTERVAL_S
-                if is_db_locked(exc):
-                    logging.warning(
-                        "Workers heartbeat blocked (DB locked), %.0fs so far",
-                        consecutive_fail_s,
-                    )
-                else:
-                    logging.exception("Workers heartbeat failed")
-                if consecutive_fail_s >= _HEARTBEAT_FAIL_EXIT_S:
-                    logging.error(
-                        "SQLite write blocked for %.0fs — exiting so systemd can restart workers",
-                        consecutive_fail_s,
-                    )
-                    sys.exit(1)
-
-            today = Database.utc_day()
-            if today != last_size_day:
-                try:
-                    snap = await db.record_db_size_snapshot()
-                    last_size_day = today
-                    logging.info(
-                        "DB size snapshot %s: %.1f MiB total "
-                        "(%d readings, wal=%.1f MiB)",
-                        snap["day"],
-                        snap["total_bytes"] / (1024 * 1024),
-                        snap["readings_count"],
-                        snap["wal_bytes"] / (1024 * 1024),
-                    )
-                except Exception:
-                    logging.exception("DB size snapshot failed")
-
-            now = asyncio.get_running_loop().time()
-            if now - last_checkpoint >= _WAL_CHECKPOINT_INTERVAL_S:
-                last_checkpoint = now
-                try:
-                    busy, log_pages, checkpointed = await db.checkpoint_wal("PASSIVE")
-                    wal_bytes = db.wal_size_bytes()
-                    if wal_bytes >= _WAL_TRUNCATE_BYTES:
-                        logging.warning(
-                            "WAL is %.1f MiB (busy=%s log=%s ckpt=%s); trying TRUNCATE",
-                            wal_bytes / (1024 * 1024),
-                            busy,
-                            log_pages,
-                            checkpointed,
-                        )
-                        t_busy, t_log, t_ckpt = await db.checkpoint_wal("TRUNCATE")
-                        logging.warning(
-                            "WAL TRUNCATE done (busy=%s log=%s ckpt=%s, size=%.1f MiB)",
-                            t_busy,
-                            t_log,
-                            t_ckpt,
-                            db.wal_size_bytes() / (1024 * 1024),
-                        )
-                except Exception:
-                    logging.exception("WAL checkpoint failed")
-
-            await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
-
-    await db.touch_runtime_heartbeat("workers")
-    heartbeat_task = asyncio.create_task(_heartbeat(), name="workers-heartbeat")
-    hard_watchdog_stop = threading.Event()
-    hard_watchdog = _start_workers_hard_watchdog(db, hard_watchdog_stop)
-
     return {
         "stop_event": stop_event,
         "publisher": publisher,
@@ -637,13 +644,48 @@ def _start_workers_hard_watchdog(
     """
 
     def _run() -> None:
-        while not stop.wait(_HARD_WATCHDOG_POLL_S):
+        started = time.monotonic()
+        seen_once = False
+        miss_streak = 0
+        while True:
+            wall_before = time.time()
+            mono_before = time.monotonic()
+            if stop.wait(_HARD_WATCHDOG_POLL_S):
+                return
+            wall_delta = time.time() - wall_before
+            mono_delta = time.monotonic() - mono_before
+            # System sleep: wall clock advances while monotonic (and the wait)
+            # barely does — refresh instead of treating it as a worker hang.
+            if (
+                wall_delta >= _HARD_WATCHDOG_STALE_S
+                and wall_delta > mono_delta + (_HARD_WATCHDOG_POLL_S * 2)
+            ):
+                logging.warning(
+                    "Workers hard watchdog resumed after suspend "
+                    "(wallΔ=%.0fs, monoΔ=%.1fs); refreshing sidecar",
+                    wall_delta,
+                    mono_delta,
+                )
+                try:
+                    db.write_workers_heartbeat_file()
+                except OSError:
+                    pass
+                continue
             ts = db.read_workers_heartbeat_file()
             if ts is None:
+                miss_streak += 1
+                if not seen_once:
+                    if time.monotonic() - started < _HARD_WATCHDOG_STARTUP_GRACE_S:
+                        continue
+                elif miss_streak < _HARD_WATCHDOG_MISS_STREAK:
+                    continue
                 logging.error(
-                    "Workers heartbeat file missing — hard exit so supervisor can restart"
+                    "Workers heartbeat file unreadable for %d poll(s) — hard exit so supervisor can restart",
+                    miss_streak,
                 )
                 os._exit(1)
+            seen_once = True
+            miss_streak = 0
             age = time.time() - ts
             if age >= _HARD_WATCHDOG_STALE_S:
                 logging.error(
