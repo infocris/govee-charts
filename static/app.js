@@ -8807,6 +8807,35 @@
     const gLabels = document.createElementNS(NS, "g");
     gLabels.setAttribute("class", "network-labels");
 
+    /**
+     * Draw a topology link: open → double solid rails; closed → dashed;
+     * unknown / plain wall → single stroke (CSS decides dash).
+     * @returns {SVGLineElement} Primary line (for optional title).
+     */
+    function appendNetworkEdgeStroke(parent, p1, p2, className, opening) {
+      const mk = (x1, y1, x2, y2) => {
+        const el = document.createElementNS(NS, "line");
+        el.setAttribute("x1", String(x1));
+        el.setAttribute("y1", String(y1));
+        el.setAttribute("x2", String(x2));
+        el.setAttribute("y2", String(y2));
+        el.setAttribute("class", className);
+        parent.appendChild(el);
+        return el;
+      };
+      if (opening === "open") {
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const off = 2.4;
+        const ox = (-dy / len) * off;
+        const oy = (dx / len) * off;
+        mk(p1.x + ox, p1.y + oy, p2.x + ox, p2.y + oy);
+        return mk(p1.x - ox, p1.y - oy, p2.x - ox, p2.y - oy);
+      }
+      return mk(p1.x, p1.y, p2.x, p2.y);
+    }
+
     /** @type {Record<string, {x:number,y:number}>} */
     const roomXY = {};
     /** @type {Record<string, {x:number,y:number}>} */
@@ -8848,20 +8877,19 @@
         gEdges.appendChild(hit);
       }
 
-      const line = document.createElementNS(NS, "line");
-      line.setAttribute("x1", String(a.x));
-      line.setAttribute("y1", String(a.y));
-      line.setAttribute("x2", String(b.x));
-      line.setAttribute("y2", String(b.y));
-      line.setAttribute(
-        "class",
-        `network-edge network-edge-${kind}${
-          kind === "door" || kind === "wall_partial" ? ` ${opening}` : ""
-        }${forced ? " is-locked" : ""}${
-          sectionEdgeKeys.has(`${edge.a}|${edge.b}`)
-            ? " is-section-path"
-            : ""
-        }`
+      const edgeClass =
+        `network-edge network-edge-${kind}` +
+        (kind === "door" || kind === "wall_partial" ? ` ${opening}` : "") +
+        (forced ? " is-locked" : "") +
+        (sectionEdgeKeys.has(`${edge.a}|${edge.b}`) ? " is-section-path" : "");
+      const strokeOpening =
+        kind === "door" || kind === "wall_partial" ? opening : "";
+      const line = appendNetworkEdgeStroke(
+        gEdges,
+        a,
+        b,
+        edgeClass,
+        strokeOpening
       );
       const title = document.createElementNS(NS, "title");
       const contactNames = (edge.contacts || [])
@@ -8882,7 +8910,6 @@
           ? " — click to set open/closed"
           : "");
       line.appendChild(title);
-      gEdges.appendChild(line);
 
       if (kind === "door" || kind === "wall_partial") {
         const midX = (a.x + b.x) / 2;
@@ -9037,16 +9064,15 @@
         });
         gEdges.appendChild(hit);
 
-        const line = document.createElementNS(NS, "line");
-        line.setAttribute("x1", String(xy.x));
-        line.setAttribute("y1", String(xy.y));
-        line.setAttribute("x2", String(exy.x));
-        line.setAttribute("y2", String(exy.y));
-        line.setAttribute(
-          "class",
-          `network-edge network-edge-exterior ${wState || "unknown"}${
+        const extOpening = wState || "unknown";
+        const line = appendNetworkEdgeStroke(
+          gEdges,
+          xy,
+          exy,
+          `network-edge network-edge-exterior ${extOpening}${
             wForced ? " is-locked" : ""
-          }`
+          }`,
+          extOpening
         );
         const title = document.createElementNS(NS, "title");
         title.textContent =
@@ -9055,7 +9081,6 @@
           (wForced ? " · locked" : "") +
           " — click to set open/closed";
         line.appendChild(title);
-        gEdges.appendChild(line);
 
         if (wForced || wState) {
           const midX = (xy.x + exy.x) / 2;
@@ -13227,58 +13252,55 @@
     return label === key ? id.toUpperCase() : label;
   }
 
+  /**
+   * Compass / wall orientation badges around a room rect (viewBox units).
+   * Returns the margin needed so labels stay inside the SVG viewBox.
+   */
   function appendOverviewPlanCompass(svg, rect, northDeg) {
-    const pad = Math.max(6, Math.min(rect.w, rect.h) * 0.08);
-    const fs = Math.max(8, Math.min(11, pad * 1.1));
+    const short = Math.min(rect.w, rect.h);
+    const badgeW = Math.max(18, Math.min(28, short * 0.28));
+    const badgeH = Math.max(11, Math.min(16, short * 0.16));
+    const gap = Math.max(2.5, short * 0.04);
+    const fs = Math.max(9, Math.min(13, badgeH * 0.72));
+    const arrowLen = Math.max(10, short * 0.14);
+    // Enough room for edge badges + north arrow in the NE corner.
+    const margin = Math.max(badgeW, badgeH) + gap + arrowLen * 0.65 + 4;
+
     const sides = [
-      {
-        side: "n",
-        x: rect.x + rect.w / 2,
-        y: rect.y - pad * 0.15,
-        anchor: "middle",
-        baseline: "auto",
-      },
-      {
-        side: "s",
-        x: rect.x + rect.w / 2,
-        y: rect.y + rect.h + pad * 0.85,
-        anchor: "middle",
-        baseline: "hanging",
-      },
-      {
-        side: "w",
-        x: rect.x - pad * 0.15,
-        y: rect.y + rect.h / 2,
-        anchor: "end",
-        baseline: "middle",
-      },
-      {
-        side: "e",
-        x: rect.x + rect.w + pad * 0.15,
-        y: rect.y + rect.h / 2,
-        anchor: "start",
-        baseline: "middle",
-      },
+      { side: "n", x: rect.x + rect.w / 2, y: rect.y - gap - badgeH / 2 },
+      { side: "s", x: rect.x + rect.w / 2, y: rect.y + rect.h + gap + badgeH / 2 },
+      { side: "w", x: rect.x - gap - badgeW / 2, y: rect.y + rect.h / 2 },
+      { side: "e", x: rect.x + rect.w + gap + badgeW / 2, y: rect.y + rect.h / 2 },
     ];
     const group = document.createElementNS(SVG_NS, "g");
     group.setAttribute("class", "overview-plan-compass");
     for (const spec of sides) {
       const orient = planSideToOrientation(spec.side, northDeg);
+      const badge = document.createElementNS(SVG_NS, "g");
+      badge.setAttribute("class", "overview-plan-compass-badge");
+      const bg = document.createElementNS(SVG_NS, "rect");
+      bg.setAttribute("class", "overview-plan-compass-badge-bg");
+      bg.setAttribute("x", String(spec.x - badgeW / 2));
+      bg.setAttribute("y", String(spec.y - badgeH / 2));
+      bg.setAttribute("width", String(badgeW));
+      bg.setAttribute("height", String(badgeH));
+      bg.setAttribute("rx", String(Math.min(3, badgeH * 0.28)));
       const text = document.createElementNS(SVG_NS, "text");
       text.setAttribute("class", "overview-plan-compass-label");
       text.setAttribute("x", String(spec.x));
       text.setAttribute("y", String(spec.y));
-      text.setAttribute("text-anchor", spec.anchor);
-      text.setAttribute("dominant-baseline", spec.baseline);
+      text.setAttribute("text-anchor", "middle");
+      text.setAttribute("dominant-baseline", "central");
       text.setAttribute("font-size", String(fs));
       text.textContent = planCompassLabel(orient);
-      group.appendChild(text);
+      badge.append(bg, text);
+      group.appendChild(badge);
     }
 
-    const nx = rect.x + rect.w + pad * 0.55;
-    const ny = rect.y - pad * 0.35;
+    // True-north marker in the NE corner of the margin.
+    const nx = rect.x + rect.w + gap + badgeW * 0.35;
+    const ny = rect.y - gap - badgeH * 0.15;
     const ang = ((Number(northDeg) || 0) * Math.PI) / 180;
-    const arrowLen = pad * 1.15;
     const ax = nx + Math.sin(ang) * arrowLen;
     const ay = ny - Math.cos(ang) * arrowLen;
     const arrow = document.createElementNS(SVG_NS, "line");
@@ -13291,30 +13313,25 @@
     const northMark = document.createElementNS(SVG_NS, "text");
     northMark.setAttribute("class", "overview-plan-north-label");
     northMark.setAttribute("x", String(nx));
-    northMark.setAttribute("y", String(ny + fs * 1.1));
+    northMark.setAttribute("y", String(ny + fs * 1.15));
     northMark.setAttribute("text-anchor", "middle");
+    northMark.setAttribute("dominant-baseline", "hanging");
     northMark.setAttribute("font-size", String(fs));
     northMark.textContent = planCompassLabel("n");
     group.appendChild(northMark);
 
     svg.appendChild(group);
+    return margin;
   }
 
   function renderOverviewPlanPositionEditor(stage, device, shape, plan) {
     stage.replaceChildren();
     stage.classList.add("is-ready");
-    const pad = 12;
     const rect = {
       x: Number(shape.x) || 0,
       y: Number(shape.y) || 0,
       w: Math.max(Number(shape.w) || 1, 1),
       h: Math.max(Number(shape.h) || 1, 1),
-    };
-    const vb = {
-      x: rect.x - pad,
-      y: rect.y - pad,
-      w: rect.w + pad * 2,
-      h: rect.h + pad * 2,
     };
     const markerR = Math.max(5, Math.min(rect.w, rect.h) * 0.055);
     const northDeg = plan && plan.north_deg != null ? Number(plan.north_deg) : 0;
@@ -13330,7 +13347,6 @@
 
     const svg = document.createElementNS(SVG_NS, "svg");
     svg.setAttribute("class", "overview-plan-position-svg");
-    svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
     svg.style.touchAction = "none";
     svg.setAttribute("role", "application");
     svg.setAttribute(
@@ -13345,7 +13361,14 @@
     room.setAttribute("height", String(rect.h));
     room.setAttribute("class", "overview-plan-room");
     svg.appendChild(room);
-    appendOverviewPlanCompass(svg, rect, northDeg);
+    const pad = appendOverviewPlanCompass(svg, rect, northDeg);
+    const vb = {
+      x: rect.x - pad,
+      y: rect.y - pad,
+      w: rect.w + pad * 2,
+      h: rect.h + pad * 2,
+    };
+    svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
 
     const hasPos =
       device.plan_wall &&

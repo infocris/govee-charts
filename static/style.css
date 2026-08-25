@@ -2234,7 +2234,7 @@ main {
 
 .overview-plan-position-stage {
   position: relative;
-  width: min(100%, 280px);
+  width: min(100%, 320px);
   aspect-ratio: 4 / 3;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -2323,15 +2323,20 @@ main {
   stroke-dasharray: 3 2;
 }
 
+.overview-plan-compass-badge-bg {
+  fill: color-mix(in srgb, var(--bg) 88%, var(--text) 12%);
+  stroke: color-mix(in srgb, var(--accent) 55%, var(--line));
+  stroke-width: 1;
+  pointer-events: none;
+}
+
 .overview-plan-compass-label,
 .overview-plan-north-label {
-  font-size: 9px;
   font-weight: 700;
-  fill: color-mix(in srgb, var(--text) 88%, var(--muted));
-  paint-order: stroke;
-  stroke: var(--bg);
-  stroke-width: 3px;
+  fill: var(--text);
+  letter-spacing: 0.02em;
   pointer-events: none;
+  /* Size comes from the SVG font-size attribute (viewBox units). */
 }
 
 .overview-plan-north-arrow {
@@ -3920,11 +3925,17 @@ body.plan-editor-modal-open {
 }
 
 .net-leg-open::before {
-  border-color: #2f9e6b;
+  height: 0.38rem;
+  width: 1.15rem;
+  border-top: 2px solid #2f9e6b;
+  border-bottom: 2px solid #2f9e6b;
+  box-sizing: border-box;
 }
 
 .net-leg-closed::before {
   border-color: #6b7280;
+  border-style: dashed;
+  border-width: 2.5px;
 }
 
 .net-leg-locked::before {
@@ -5314,17 +5325,25 @@ body.plan-editor-modal-open {
   gap: 0.3rem;
 }
 
-.network-edge-door.open {
+.network-edge-door.open,
+.network-edge-wall_partial.open,
+.network-edge-exterior.open {
   stroke: #2f9e6b;
-  stroke-width: 3.5;
+  stroke-width: 2.15;
+  stroke-dasharray: none;
 }
 
-.network-edge-door.closed {
+.network-edge-door.closed,
+.network-edge-wall_partial.closed,
+.network-edge-exterior.closed {
   stroke: #6b7280;
-  stroke-width: 3;
+  stroke-width: 2.75;
+  stroke-dasharray: 7 5;
 }
 
-.network-edge-door.unknown {
+.network-edge-door.unknown,
+.network-edge-wall_partial.unknown,
+.network-edge-exterior.unknown {
   stroke: #c4a35a;
   stroke-width: 2.5;
   stroke-dasharray: 6 5;
@@ -5339,7 +5358,6 @@ body.plan-editor-modal-open {
 .network-edge-wall_partial {
   stroke: #8a908c;
   stroke-width: 2.25;
-  stroke-dasharray: 5 4;
   opacity: 0.9;
 }
 
@@ -5348,17 +5366,8 @@ body.plan-editor-modal-open {
   stroke-width: 2.5;
 }
 
-.network-edge-exterior.open {
-  stroke: #2f9e6b;
-}
-
 .network-edge-exterior.closed {
   stroke: #5b8fd9;
-}
-
-.network-edge-exterior.unknown {
-  stroke: #c4a35a;
-  stroke-dasharray: 6 5;
 }
 
 .network-node-room {
