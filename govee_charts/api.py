@@ -54,6 +54,7 @@ from govee_charts.floorplan import (
 )
 from govee_charts.backfill import BackfillService
 from govee_charts.categories import normalize_door_patch, normalize_patch, taxonomy
+from govee_charts.plan_position import normalize_plan_patch
 from govee_charts.connections import (
     OUTDOOR,
     connection_id_for_rooms,
@@ -604,6 +605,9 @@ class PlacementPatch(BaseModel):
     height: str | None = None
     height_cm: float | None = None
     room: str | None = None
+    plan_wall: str | None = None
+    plan_u: float | None = None
+    plan_v: float | None = None
     valid_from: float | None = None
     valid_until: float | None = None
 
@@ -2372,6 +2376,14 @@ def create_app(
                 room=provided["room"] if "room" in provided else ...,
                 label=provided["label"] if "label" in provided else ...,
             )
+            plan_keys = ("plan_wall", "plan_u", "plan_v")
+            if any(k in provided for k in plan_keys):
+                plan_patch = normalize_plan_patch(
+                    plan_wall=provided["plan_wall"] if "plan_wall" in provided else ...,
+                    plan_u=provided["plan_u"] if "plan_u" in provided else ...,
+                    plan_v=provided["plan_v"] if "plan_v" in provided else ...,
+                )
+                patch.update(plan_patch)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2388,6 +2400,9 @@ def create_app(
                 height=patch["height"] if "height" in patch else ...,
                 height_cm=patch["height_cm"] if "height_cm" in patch else ...,
                 room=patch["room"] if "room" in patch else ...,
+                plan_wall=patch["plan_wall"] if "plan_wall" in patch else ...,
+                plan_u=patch["plan_u"] if "plan_u" in patch else ...,
+                plan_v=patch["plan_v"] if "plan_v" in patch else ...,
                 valid_from=provided["valid_from"] if "valid_from" in provided else ...,
                 valid_until=provided["valid_until"] if "valid_until" in provided else ...,
             )
@@ -2529,6 +2544,75 @@ def create_app(
     async def api_categories() -> dict[str, Any]:
         return taxonomy()
 
+    @app.get("/api/apartment/rooms/{room_id}/chart-sensors")
+    async def api_room_chart_sensors(
+        room_id: str,
+        hours: float = Query(24.0, gt=0, le=26280),
+        since: float | None = Query(default=None),
+        until: float | None = Query(default=None),
+        include_former: bool = Query(False),
+    ) -> dict[str, Any]:
+        """Sensors to chart in a room, optionally including former placements."""
+        weather_svc: WeatherService | None = app.state.weather
+        if weather_svc is None or weather_svc.apartment is None:
+            raise HTTPException(
+                status_code=503, detail="Apartment layout not available"
+            )
+        rid = room_id.strip().lower()
+        if rid not in weather_svc.apartment.rooms:
+            raise HTTPException(status_code=404, detail="Unknown room")
+        now = time.time()
+        if since is not None and until is not None:
+            when_lo = float(since)
+            when_hi = float(until)
+            if when_hi < when_lo:
+                when_lo, when_hi = when_hi, when_lo
+            hours_out = (when_hi - when_lo) / 3600.0
+        else:
+            when_hi = now
+            when_lo = now - float(hours) * 3600.0
+            hours_out = float(hours)
+        labels: dict[str, str] = app.state.labels
+        placements = await db.list_room_chart_sensors(
+            rid,
+            since=when_lo,
+            until=when_hi,
+            include_former=include_former,
+        )
+        sensors: list[dict[str, Any]] = []
+        for placement in placements:
+            dev = await db.get_device(placement["address"])
+            if dev is None:
+                continue
+            name = device_display_name(dev, labels)
+            if placement.get("label"):
+                name = str(placement["label"])
+            sensors.append(
+                {
+                    "address": placement["address"],
+                    "placement_id": placement["id"],
+                    "name": name,
+                    "zone": placement.get("zone"),
+                    "height": placement.get("height"),
+                    "height_cm": placement.get("height_cm"),
+                    "room": placement.get("room"),
+                    "current": placement["current"],
+                    "former": placement["former"],
+                    "valid_from": placement["valid_from"],
+                    "valid_until": placement["valid_until"],
+                    "chart_since": placement["chart_since"],
+                    "chart_until": placement["chart_until"],
+                }
+            )
+        return {
+            "room_id": rid,
+            "hours": hours_out,
+            "since": when_lo,
+            "until": when_hi,
+            "include_former": include_former,
+            "sensors": sensors,
+        }
+
     @app.get("/api/apartment")
     async def api_apartment(
         hours: float = Query(24.0, gt=0, le=26280),
@@ -2582,6 +2666,9 @@ def create_app(
                     "zone": d.get("zone"),
                     "height": d.get("height"),
                     "height_cm": d.get("height_cm"),
+                    "plan_wall": d.get("plan_wall"),
+                    "plan_u": d.get("plan_u"),
+                    "plan_v": d.get("plan_v"),
                     "temperature_c": d.get("temperature_c"),
                     "humidity": d.get("humidity"),
                     "last_reading_ts": last_f,

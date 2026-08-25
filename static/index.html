@@ -278,6 +278,11 @@
             <div class="filter-row" id="compare-zone-filters" role="group" data-i18n-aria-label="overview.zone" aria-label="Zone"></div>
             <div class="filter-row" id="compare-height-filters" role="group" data-i18n-aria-label="overview.height" aria-label="Height"></div>
             <div class="filter-row" id="compare-room-filters" role="group" data-i18n-aria-label="overview.room" aria-label="Room"></div>
+            <label class="compare-former-opt" id="compare-former-wrap" title="Show sensors that used to be in the filtered room(s)">
+              <input type="checkbox" id="compare-former" />
+              <span data-i18n="map.chartShowFormer">Former placements</span>
+            </label>
+            <p class="compare-former-hint" id="compare-former-hint" hidden data-i18n="compare.formerHint">Select a room filter to show sensors that used to be there.</p>
           </div>
           <div class="device-list-head">
             <div class="device-actions">
@@ -909,6 +914,10 @@
                 <button type="button" data-map-hours="24" class="active">24 h</button>
                 <button type="button" data-map-hours="168">7 d</button>
               </div>
+              <label class="map-room-former-opt" id="map-room-former-wrap" title="Show sensors that used to be in this room, limited to their past placement interval">
+                <input type="checkbox" id="map-room-former" />
+                <span data-i18n="map.chartShowFormer">Former placements</span>
+              </label>
               <button
                 type="button"
                 id="map-room-charts-close"

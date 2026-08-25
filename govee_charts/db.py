@@ -294,10 +294,31 @@ class Database:
                 height TEXT,
                 height_cm REAL,
                 room TEXT,
+                plan_wall TEXT,
+                plan_u REAL,
+                plan_v REAL,
                 FOREIGN KEY (address) REFERENCES devices(address)
             )
             """
         )
+        placement_cols = {
+            row[1]
+            for row in await (
+                await self.db.execute("PRAGMA table_info(device_placements)")
+            ).fetchall()
+        }
+        if "plan_wall" not in placement_cols:
+            await self.db.execute(
+                "ALTER TABLE device_placements ADD COLUMN plan_wall TEXT"
+            )
+        if "plan_u" not in placement_cols:
+            await self.db.execute(
+                "ALTER TABLE device_placements ADD COLUMN plan_u REAL"
+            )
+        if "plan_v" not in placement_cols:
+            await self.db.execute(
+                "ALTER TABLE device_placements ADD COLUMN plan_v REAL"
+            )
         await self.db.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_device_placements_address_from
@@ -810,6 +831,8 @@ class Database:
     @staticmethod
     def _placement_row(row: aiosqlite.Row | dict[str, Any]) -> dict[str, Any]:
         data = dict(row)
+        plan_u = data.get("plan_u")
+        plan_v = data.get("plan_v")
         return {
             "id": int(data["id"]),
             "address": str(data["address"]),
@@ -824,6 +847,9 @@ class Database:
             "height": data.get("height"),
             "height_cm": data.get("height_cm"),
             "room": data.get("room"),
+            "plan_wall": data.get("plan_wall"),
+            "plan_u": float(plan_u) if plan_u is not None else None,
+            "plan_v": float(plan_v) if plan_v is not None else None,
         }
 
     def _merge_placement_into_device(
@@ -847,7 +873,8 @@ class Database:
         cursor = await self.db.execute(
             """
             SELECT id, address, valid_from, valid_until,
-                   label, zone, height, height_cm, room
+                   label, zone, height, height_cm, room,
+                   plan_wall, plan_u, plan_v
             FROM device_placements
             WHERE address = ?
               AND valid_from <= ?
@@ -867,7 +894,8 @@ class Database:
         cursor = await self.db.execute(
             """
             SELECT id, address, valid_from, valid_until,
-                   label, zone, height, height_cm, room
+                   label, zone, height, height_cm, room,
+                   plan_wall, plan_u, plan_v
             FROM device_placements
             WHERE address = ? AND valid_until IS NULL
             ORDER BY valid_from DESC
@@ -883,7 +911,8 @@ class Database:
         cursor = await self.db.execute(
             """
             SELECT id, address, valid_from, valid_until,
-                   label, zone, height, height_cm, room
+                   label, zone, height, height_cm, room,
+                   plan_wall, plan_u, plan_v
             FROM device_placements
             WHERE address = ?
             ORDER BY valid_from DESC, id DESC
@@ -891,6 +920,58 @@ class Database:
             (addr,),
         )
         return [self._placement_row(row) for row in await cursor.fetchall()]
+
+    async def list_room_chart_sensors(
+        self,
+        room_id: str,
+        *,
+        since: float,
+        until: float,
+        include_former: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Placement intervals in ``room_id`` overlapping [since, until] for charts."""
+        rid = room_id.strip().lower()
+        when_lo = float(since)
+        when_hi = float(until)
+        if when_hi < when_lo:
+            when_lo, when_hi = when_hi, when_lo
+
+        cursor = await self.db.execute(
+            """
+            SELECT id, address, valid_from, valid_until,
+                   label, zone, height, height_cm, room,
+                   plan_wall, plan_u, plan_v
+            FROM device_placements
+            WHERE lower(trim(COALESCE(room, ''))) = ?
+              AND valid_from < ?
+              AND (valid_until IS NULL OR valid_until > ?)
+            ORDER BY valid_from DESC, id DESC
+            """,
+            (rid, when_hi, when_lo),
+        )
+        out: list[dict[str, Any]] = []
+        for row in await cursor.fetchall():
+            placement = self._placement_row(row)
+            is_current = placement["valid_until"] is None
+            is_former = not is_current
+            if is_former and not include_former:
+                continue
+            chart_since = max(when_lo, placement["valid_from"])
+            chart_until = min(
+                when_hi,
+                placement["valid_until"]
+                if placement["valid_until"] is not None
+                else when_hi,
+            )
+            if chart_until - chart_since < 60.0:
+                continue
+            item = dict(placement)
+            item["current"] = is_current
+            item["former"] = is_former
+            item["chart_since"] = chart_since
+            item["chart_until"] = chart_until
+            out.append(item)
+        return out
 
     async def _ensure_open_placement(
         self, address: str, *, valid_from: float | None = None
@@ -934,13 +1015,17 @@ class Database:
         height: str | None | object = ...,
         height_cm: float | None | object = ...,
         room: str | None | object = ...,
+        plan_wall: str | None | object = ...,
+        plan_u: float | None | object = ...,
+        plan_v: float | None | object = ...,
         valid_from: float | None | object = ...,
         valid_until: float | None | object = ...,
     ) -> dict[str, Any] | None:
         cursor = await self.db.execute(
             """
             SELECT id, address, valid_from, valid_until,
-                   label, zone, height, height_cm, room
+                   label, zone, height, height_cm, room,
+                   plan_wall, plan_u, plan_v
             FROM device_placements
             WHERE id = ?
             """,
@@ -969,6 +1054,15 @@ class Database:
         if room is not ...:
             fields.append("room = ?")
             values.append(room)
+        if plan_wall is not ...:
+            fields.append("plan_wall = ?")
+            values.append(plan_wall)
+        if plan_u is not ...:
+            fields.append("plan_u = ?")
+            values.append(plan_u)
+        if plan_v is not ...:
+            fields.append("plan_v = ?")
+            values.append(plan_v)
         new_from = current["valid_from"]
         new_until = current["valid_until"]
         if valid_from is not ...:
@@ -1016,6 +1110,9 @@ class Database:
         height: str | None | object = ...,
         height_cm: float | None | object = ...,
         room: str | None | object = ...,
+        plan_wall: str | None | object = ...,
+        plan_u: float | None | object = ...,
+        plan_v: float | None | object = ...,
         valid_from: float | None | object = ...,
         valid_until: float | None | object = ...,
     ) -> dict[str, Any] | None:
@@ -1027,6 +1124,9 @@ class Database:
             height=height,
             height_cm=height_cm,
             room=room,
+            plan_wall=plan_wall,
+            plan_u=plan_u,
+            plan_v=plan_v,
             valid_from=valid_from,
             valid_until=valid_until,
         )
@@ -1036,7 +1136,8 @@ class Database:
         cursor = await self.db.execute(
             """
             SELECT id, address, valid_from, valid_until,
-                   label, zone, height, height_cm, room
+                   label, zone, height, height_cm, room,
+                   plan_wall, plan_u, plan_v
             FROM device_placements
             WHERE id = ?
             """,
@@ -1105,9 +1206,10 @@ class Database:
             """
             INSERT INTO device_placements (
                 address, valid_from, valid_until,
-                label, zone, height, height_cm, room
+                label, zone, height, height_cm, room,
+                plan_wall, plan_u, plan_v
             )
-            VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL)
             """,
             (addr, ef, row_label, row_zone, row_height, row_height_cm, row_room),
         )
@@ -2741,6 +2843,9 @@ class Database:
             COALESCE(p.height, d.height) AS height,
             COALESCE(p.height_cm, d.height_cm) AS height_cm,
             COALESCE(p.room, d.room) AS room,
+            p.plan_wall AS plan_wall,
+            p.plan_u AS plan_u,
+            p.plan_v AS plan_v,
             d.archived_at AS archived_at,
             p.id AS placement_id,
             p.valid_from AS placement_valid_from
@@ -2845,6 +2950,9 @@ class Database:
                 COALESCE(p.height, d.height) AS height,
                 COALESCE(p.height_cm, d.height_cm) AS height_cm,
                 COALESCE(p.room, d.room) AS room,
+                p.plan_wall AS plan_wall,
+                p.plan_u AS plan_u,
+                p.plan_v AS plan_v,
                 d.archived_at AS archived_at,
                 p.id AS placement_id,
                 p.valid_from AS placement_valid_from,

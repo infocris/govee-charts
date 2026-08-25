@@ -103,6 +103,7 @@
   /** @type {Set<string>} */
   let systemSelectedAddresses = new Set();
   let systemDeviceFilter = "";
+  const SVG_NS = "http://www.w3.org/2000/svg";
   const networkSvgEl = document.getElementById("network-svg");
   const networkCanvasWrapEl = document.getElementById("network-canvas-wrap");
   const networkMetaEl = document.getElementById("network-meta");
@@ -137,6 +138,16 @@
   const mapRoomChartsMetaEl = document.getElementById("map-room-charts-meta");
   const mapRoomChartsStatusEl = document.getElementById("map-room-charts-status");
   const mapRoomChartsCloseBtn = document.getElementById("map-room-charts-close");
+  const mapRoomFormerEl = document.getElementById("map-room-former");
+  const mapRoomFormerWrapEl = document.getElementById("map-room-former-wrap");
+  const compareFormerEl = document.getElementById("compare-former");
+  const compareFormerWrapEl = document.getElementById("compare-former-wrap");
+  const compareFormerHintEl = document.getElementById("compare-former-hint");
+  const FORMER_PLACEMENTS_KEY = "govee-charts.showFormerPlacements";
+  const LEGACY_MAP_FORMER_KEY = "govee-charts.mapRoomFormer";
+  let showFormerPlacements =
+    localStorage.getItem(FORMER_PLACEMENTS_KEY) === "1" ||
+    localStorage.getItem(LEGACY_MAP_FORMER_KEY) === "1";
   const mapRoomTempCanvas = document.getElementById("map-room-temp-chart");
   const mapRoomChartCaptionEl = document.getElementById("map-room-chart-caption");
   const mapRoomRangeButtons = [
@@ -4700,6 +4711,7 @@
     renderCategoryFilterRow(compareZoneFiltersEl, "zone", taxonomyData.zones);
     renderCategoryFilterRow(compareHeightFiltersEl, "height", taxonomyData.heights);
     renderCategoryFilterRow(compareRoomFiltersEl, "room", taxonomyData.rooms);
+    syncFormerPlacementCheckboxes();
   }
 
   function connectionKindLabel(kind) {
@@ -7355,6 +7367,8 @@
 
   function paintMapRoomChartDatasets(series) {
     const multi = series.length > 1;
+    const lineExtras = (s) =>
+      s.former ? { borderDash: [6, 4], borderWidth: 1.75 } : {};
     const build = () => {
       if (!networkShowsBothMetrics()) {
         const field = networkMetricField();
@@ -7363,19 +7377,21 @@
             s.label,
             s.color,
             mapRoomPointSeries(s.points, field),
-            !multi
+            !multi,
+            lineExtras(s)
           )
         );
       }
       const out = [];
       for (const s of series) {
+        const dash = lineExtras(s);
         out.push(
           makeDataset(
             `${s.label} °C`,
             s.color,
             mapRoomPointSeries(s.points, "temperature_c"),
             false,
-            { yAxisID: "y" }
+            { yAxisID: "y", ...dash }
           )
         );
         out.push(
@@ -7386,8 +7402,8 @@
             false,
             {
               yAxisID: "y1",
-              borderDash: [5, 3],
-              borderWidth: 1.5,
+              borderDash: dash.borderDash || [5, 3],
+              borderWidth: dash.borderWidth || 1.5,
             }
           )
         );
@@ -7455,6 +7471,140 @@
     };
   }
 
+  function syncFormerPlacementCheckboxes() {
+    if (mapRoomFormerEl) mapRoomFormerEl.checked = showFormerPlacements;
+    if (compareFormerEl) compareFormerEl.checked = showFormerPlacements;
+    if (compareFormerHintEl) {
+      const roomList =
+        typeof catFilters !== "undefined" ? catFilters.room : [];
+      const rooms = (roomList || []).filter(Boolean);
+      compareFormerHintEl.hidden =
+        !showFormerPlacements || rooms.length > 0;
+    }
+  }
+
+  function setShowFormerPlacements(on) {
+    showFormerPlacements = !!on;
+    localStorage.setItem(FORMER_PLACEMENTS_KEY, showFormerPlacements ? "1" : "0");
+    syncFormerPlacementCheckboxes();
+  }
+
+  function appendHistoryWindowParams(params) {
+    if (isCustomRange()) {
+      params.set("since", String(customSince));
+      params.set("until", String(customUntil));
+    } else {
+      params.set("hours", String(hours));
+    }
+    return params;
+  }
+
+  async function fetchRoomChartSensors(roomId, { includeFormer = false } = {}) {
+    const params = new URLSearchParams({
+      include_former: includeFormer ? "1" : "0",
+    });
+    const useMapHours =
+      currentView !== "compare" &&
+      String(selectedMapRoomId || "") === String(roomId) &&
+      !isCustomRange();
+    if (useMapHours) {
+      params.set("hours", String(mapRoomHours));
+    } else {
+      appendHistoryWindowParams(params);
+    }
+    const res = await fetch(
+      `/api/apartment/rooms/${encodeURIComponent(roomId)}/chart-sensors?${params}`
+    );
+    if (!res.ok) throw new Error(`chart-sensors HTTP ${res.status}`);
+    const payload = await res.json();
+    return payload.sensors || [];
+  }
+
+  async function loadFormerPlacementChartRows() {
+    if (!showFormerPlacements) return [];
+    const rooms = (catFilters.room || []).filter(Boolean);
+    if (!rooms.length) return [];
+    const pickedAddresses = new Set(
+      selectedDevices().map((d) => String(d.address || "").toUpperCase())
+    );
+    const rows = [];
+    for (const roomId of rooms) {
+      let sensors = [];
+      try {
+        sensors = await fetchRoomChartSensors(roomId, { includeFormer: true });
+      } catch (err) {
+        console.warn("former placement sensors", roomId, err);
+        continue;
+      }
+      for (const sensor of sensors) {
+        if (!sensor.former) continue;
+        const address = String(sensor.address || "").toUpperCase();
+        if (!address || pickedAddresses.has(address)) continue;
+        const params = new URLSearchParams({ address });
+        if (
+          sensor.chart_since != null &&
+          sensor.chart_until != null &&
+          Number.isFinite(Number(sensor.chart_since)) &&
+          Number.isFinite(Number(sensor.chart_until))
+        ) {
+          params.set("since", String(sensor.chart_since));
+          params.set("until", String(sensor.chart_until));
+        } else {
+          appendHistoryWindowParams(params);
+        }
+        const res = await fetch(`/api/history?${params}`);
+        if (!res.ok) throw new Error(`history HTTP ${res.status}`);
+        const payload = await res.json();
+        rows.push({
+          label: mapRoomSensorChartLabel(sensor),
+          address,
+          points: payload.points || [],
+          former: true,
+          placement_id: sensor.placement_id,
+        });
+      }
+    }
+    return rows;
+  }
+
+  function formerDatasetExtras() {
+    return { borderDash: [6, 4], borderWidth: 1.75 };
+  }
+
+  function mapRoomSensorChartLabel(sensor) {
+    const height = String(sensor.height || "").trim();
+    const cm =
+      sensor.height_cm != null && Number.isFinite(Number(sensor.height_cm))
+        ? `${Math.round(Number(sensor.height_cm))} cm`
+        : "";
+    const heightBit = [height, cm].filter(Boolean).join(" · ");
+    const name = sensor.name || sensor.address;
+    let label = heightBit ? `${name} (${heightBit})` : name;
+    if (sensor.former) {
+      const until =
+        sensor.valid_until != null ? fmtTime(sensor.valid_until) : "";
+      label += until
+        ? ` · ${t("map.chartFormerUntil", { until })}`
+        : ` · ${t("map.chartFormer")}`;
+    }
+    return label;
+  }
+
+  async function resolveMapChartSensors(target) {
+    if (target.kind !== "room") {
+      return (target.sensors || []).map((sensor) => ({
+        ...sensor,
+        current: true,
+        former: false,
+        chart_since: null,
+        chart_until: null,
+      }));
+    }
+    return fetchRoomChartSensors(target.id, {
+      includeFormer: showFormerPlacements,
+    });
+  }
+
   async function loadMapRoomCharts() {
     if (!selectedMapRoomId || !mapRoomChartsEl) return;
     const target = resolveMapChartTarget();
@@ -7466,13 +7616,38 @@
     if (mapRoomChartsTitleEl) {
       mapRoomChartsTitleEl.textContent = target.label;
     }
-    const sensors = target.sensors || [];
     const kindLabel =
       target.sensorKind === "exterior" ? "exterior" : "indoor";
+    syncFormerPlacementCheckboxes();
+    if (mapRoomFormerWrapEl) {
+      mapRoomFormerWrapEl.hidden = target.kind !== "room";
+    }
+    let sensors = [];
+    try {
+      sensors = await resolveMapChartSensors(target);
+    } catch (err) {
+      if (mapRoomChartsStatusEl) {
+        mapRoomChartsStatusEl.textContent = `Error: ${err.message}`;
+      }
+      return;
+    }
+    const formerCount = sensors.filter((s) => s.former).length;
+    const currentCount = sensors.filter((s) => !s.former).length;
     if (mapRoomChartsMetaEl) {
-      mapRoomChartsMetaEl.textContent = sensors.length
-        ? `${sensors.length} ${kindLabel} sensor(s) · last ${mapRoomHours} h`
-        : `No ${kindLabel} sensors on this ${target.kind === "facade" ? "façade" : "room"}`;
+      if (!sensors.length) {
+        mapRoomChartsMetaEl.textContent = `No ${kindLabel} sensors to chart.`;
+      } else {
+        const bits = [`${sensors.length} series · last ${mapRoomHours} h`];
+        if (showFormerPlacements && formerCount) {
+          bits.push(
+            t("map.chartFormerMeta", {
+              current: currentCount,
+              former: formerCount,
+            })
+          );
+        }
+        mapRoomChartsMetaEl.textContent = bits.join(" · ");
+      }
     }
     if (!sensors.length) {
       mapRoomChartSeriesCache = { roomId: target.id, series: [] };
@@ -7489,24 +7664,29 @@
         sensors.map(async (sensor, idx) => {
           const address = String(sensor.address || "").toUpperCase();
           if (!address) return null;
-          const params = new URLSearchParams({
-            address,
-            hours: String(mapRoomHours),
-          });
+          const params = new URLSearchParams({ address });
+          if (
+            sensor.chart_since != null &&
+            sensor.chart_until != null &&
+            Number.isFinite(Number(sensor.chart_since)) &&
+            Number.isFinite(Number(sensor.chart_until))
+          ) {
+            params.set("since", String(sensor.chart_since));
+            params.set("until", String(sensor.chart_until));
+          } else {
+            params.set("hours", String(mapRoomHours));
+          }
           const res = await fetch(`/api/history?${params}`);
           if (!res.ok) throw new Error(`history HTTP ${res.status}`);
           const payload = await res.json();
-          const height = String(sensor.height || "").trim();
-          const cm =
-            sensor.height_cm != null && Number.isFinite(Number(sensor.height_cm))
-              ? `${Math.round(Number(sensor.height_cm))} cm`
-              : "";
-          const heightBit = [height, cm].filter(Boolean).join(" · ");
-          const name = sensor.name || address;
           return {
-            label: heightBit ? `${name} (${heightBit})` : name,
-            color: roomColor(`${target.id}-${address}`, idx),
+            label: mapRoomSensorChartLabel(sensor),
+            color: roomColor(
+              `${target.id}-${address}-${sensor.placement_id || "cur"}`,
+              idx
+            ),
             points: payload.points || [],
+            former: Boolean(sensor.former),
           };
         })
       );
@@ -8198,11 +8378,20 @@
       roomGroup.appendChild(rect);
 
       if (!isMapSelected) {
-        for (const s of col.sensors || []) {
+        const sectionSensors = (col.sensors || []).filter((s) => {
+          const cm = sensorHeightCm(s, geom);
+          return cm != null;
+        });
+        for (let si = 0; si < sectionSensors.length; si += 1) {
+          const s = sectionSensors[si];
           const cm = sensorHeightCm(s, geom);
           if (cm == null) continue;
           const y = sectionYFromCm(cm, geom, padT, plotH);
-          const cx = x + w * 0.5;
+          const planFrac = sectionSensorPlanXFraction(s);
+          const cx = sectionSensorCx(x, w, s, {
+            index: si,
+            total: sectionSensors.length,
+          });
           const stale = networkSensorIsStale(s);
           const t = networkShowsBothMetrics()
             ? networkSensorFieldValue(s, "temperature_c")
@@ -8243,8 +8432,10 @@
           roomGroup.appendChild(dot);
 
           const lab = document.createElementNS(NS, "text");
-          lab.setAttribute("x", String(cx + 8));
+          const labelRight = planFrac == null ? true : planFrac <= 0.55;
+          lab.setAttribute("x", String(labelRight ? cx + 8 : cx - 8));
           lab.setAttribute("y", String(y + 4));
+          lab.setAttribute("text-anchor", labelRight ? "start" : "end");
           lab.setAttribute(
             "class",
             `section-sensor-label${stale ? " is-stale" : ""}`
@@ -8301,6 +8492,34 @@
           "div"
         );
         toolbar.className = "section-room-chart-toolbar";
+        if (col.kind === "room") {
+          const formerLab = document.createElementNS(
+            "http://www.w3.org/1999/xhtml",
+            "label"
+          );
+          formerLab.className = "section-room-former-opt";
+          formerLab.title = t("map.chartShowFormerTitle");
+          const formerCb = document.createElementNS(
+            "http://www.w3.org/1999/xhtml",
+            "input"
+          );
+          formerCb.type = "checkbox";
+          formerCb.checked = showFormerPlacements;
+          formerCb.addEventListener("change", () => {
+            setShowFormerPlacements(formerCb.checked);
+            if (selectedMapRoomId) {
+              loadMapRoomCharts().catch(() => {});
+            }
+          });
+          const formerSpan = document.createElementNS(
+            "http://www.w3.org/1999/xhtml",
+            "span"
+          );
+          formerSpan.textContent = t("map.chartShowFormer");
+          formerLab.appendChild(formerCb);
+          formerLab.appendChild(formerSpan);
+          toolbar.appendChild(formerLab);
+        }
         const closeBtn = document.createElementNS(
           "http://www.w3.org/1999/xhtml",
           "button"
@@ -12856,6 +13075,552 @@
     return li;
   }
 
+  let activeFloorPlanPromise = null;
+
+  function invalidateActiveFloorPlanCache() {
+    activeFloorPlanPromise = null;
+  }
+
+  function findPlanRoomShape(plan, roomId) {
+    if (!plan || !roomId) return null;
+    const rid = String(roomId).trim().toLowerCase();
+    const shapes = (plan.shapes || []).filter(
+      (s) => String(s.room_id || "").trim().toLowerCase() === rid
+    );
+    if (!shapes.length) return null;
+    return shapes.reduce((best, shape) => {
+      const area =
+        Math.max(0, Number(shape.w) || 0) * Math.max(0, Number(shape.h) || 0);
+      const bestArea =
+        Math.max(0, Number(best.w) || 0) * Math.max(0, Number(best.h) || 0);
+      return area > bestArea ? shape : best;
+    }, shapes[0]);
+  }
+
+  function planPosFromPoint(rect, px, py) {
+    const rx = Number(rect.x) || 0;
+    const ry = Number(rect.y) || 0;
+    const rw = Math.max(Number(rect.w) || 0, 1e-6);
+    const rh = Math.max(Number(rect.h) || 0, 1e-6);
+    const dN = py - ry;
+    const dS = ry + rh - py;
+    const dW = px - rx;
+    const dE = rx + rw - px;
+    let wall = "n";
+    let best = dN;
+    if (dS < best) {
+      best = dS;
+      wall = "s";
+    }
+    if (dW < best) {
+      best = dW;
+      wall = "w";
+    }
+    if (dE < best) {
+      wall = "e";
+    }
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    let u = 0.5;
+    let v = 0.5;
+    if (wall === "n") {
+      u = (px - rx) / rw;
+      v = dN / rh;
+    } else if (wall === "s") {
+      u = (px - rx) / rw;
+      v = dS / rh;
+    } else if (wall === "w") {
+      u = (py - ry) / rh;
+      v = dW / rw;
+    } else {
+      u = (py - ry) / rh;
+      v = dE / rw;
+    }
+    return {
+      plan_wall: wall,
+      plan_u: Math.round(clamp01(u) * 10000) / 10000,
+      plan_v: Math.round(clamp01(v) * 10000) / 10000,
+    };
+  }
+
+  function planPointFromPos(rect, wall, u, v) {
+    const rx = Number(rect.x) || 0;
+    const ry = Number(rect.y) || 0;
+    const rw = Math.max(Number(rect.w) || 0, 1e-6);
+    const rh = Math.max(Number(rect.h) || 0, 1e-6);
+    const clamp01 = (value) => Math.max(0, Math.min(1, Number(value) || 0));
+    const uu = clamp01(u);
+    const vv = clamp01(v);
+    const side = String(wall || "n").toLowerCase();
+    if (side === "s") {
+      return { x: rx + uu * rw, y: ry + rh - vv * rh };
+    }
+    if (side === "w") {
+      return { x: rx + vv * rw, y: ry + uu * rh };
+    }
+    if (side === "e") {
+      return { x: rx + rw - vv * rw, y: ry + uu * rh };
+    }
+    return { x: rx + uu * rw, y: ry + vv * rh };
+  }
+
+  /** Horizontal fraction (0–1) in a room cross-section from plan placement. */
+  function sectionSensorPlanXFraction(sensor) {
+    const wall = String(sensor?.plan_wall || "").toLowerCase();
+    const u = Number(sensor?.plan_u);
+    const v = Number(sensor?.plan_v);
+    if (!wall || !Number.isFinite(u) || !Number.isFinite(v)) return null;
+    const clamp01 = (value) => Math.max(0, Math.min(1, value));
+    if (wall === "n" || wall === "s") return clamp01(u);
+    if (wall === "w") return clamp01(v);
+    if (wall === "e") return clamp01(1 - v);
+    return null;
+  }
+
+  function sectionSensorCx(x, w, sensor, { index = 0, total = 1 } = {}) {
+    const inset = 0.1;
+    let frac = sectionSensorPlanXFraction(sensor);
+    if (frac == null) {
+      if (total <= 1) {
+        frac = 0.5;
+      } else {
+        frac = inset + ((index + 0.5) / total) * (1 - 2 * inset);
+      }
+    }
+    return x + w * (inset + frac * (1 - 2 * inset));
+  }
+
+  function ensureActiveFloorPlan() {
+    if (!activeFloorPlanPromise) {
+      activeFloorPlanPromise = (async () => {
+        try {
+          const listRes = await fetch("/api/apartment/plans");
+          if (!listRes.ok) return null;
+          const listing = await listRes.json();
+          const planId = listing.active_plan_id;
+          if (!planId) return null;
+          const planRes = await fetch(
+            `/api/apartment/plans/${encodeURIComponent(planId)}`
+          );
+          if (!planRes.ok) return null;
+          return await planRes.json();
+        } catch (_) {
+          return null;
+        }
+      })();
+    }
+    return activeFloorPlanPromise;
+  }
+
+  function planSideToOrientation(side, northDeg) {
+    const base = { n: 0, e: 90, s: 180, w: 270 }[side] ?? 0;
+    const idx =
+      Math.floor(
+        (((base + (Number(northDeg) || 0)) % 360) + 360 + 22.5) / 45
+      ) % 8;
+    return ["n", "ne", "e", "se", "s", "sw", "w", "nw"][idx];
+  }
+
+  function planCompassLabel(orientId) {
+    const id = String(orientId || "n").toLowerCase();
+    const key = `overview.planCompass.${id}`;
+    const label = t(key);
+    return label === key ? id.toUpperCase() : label;
+  }
+
+  function appendOverviewPlanCompass(svg, rect, northDeg) {
+    const pad = Math.max(6, Math.min(rect.w, rect.h) * 0.08);
+    const fs = Math.max(8, Math.min(11, pad * 1.1));
+    const sides = [
+      {
+        side: "n",
+        x: rect.x + rect.w / 2,
+        y: rect.y - pad * 0.15,
+        anchor: "middle",
+        baseline: "auto",
+      },
+      {
+        side: "s",
+        x: rect.x + rect.w / 2,
+        y: rect.y + rect.h + pad * 0.85,
+        anchor: "middle",
+        baseline: "hanging",
+      },
+      {
+        side: "w",
+        x: rect.x - pad * 0.15,
+        y: rect.y + rect.h / 2,
+        anchor: "end",
+        baseline: "middle",
+      },
+      {
+        side: "e",
+        x: rect.x + rect.w + pad * 0.15,
+        y: rect.y + rect.h / 2,
+        anchor: "start",
+        baseline: "middle",
+      },
+    ];
+    const group = document.createElementNS(SVG_NS, "g");
+    group.setAttribute("class", "overview-plan-compass");
+    for (const spec of sides) {
+      const orient = planSideToOrientation(spec.side, northDeg);
+      const text = document.createElementNS(SVG_NS, "text");
+      text.setAttribute("class", "overview-plan-compass-label");
+      text.setAttribute("x", String(spec.x));
+      text.setAttribute("y", String(spec.y));
+      text.setAttribute("text-anchor", spec.anchor);
+      text.setAttribute("dominant-baseline", spec.baseline);
+      text.setAttribute("font-size", String(fs));
+      text.textContent = planCompassLabel(orient);
+      group.appendChild(text);
+    }
+
+    const nx = rect.x + rect.w + pad * 0.55;
+    const ny = rect.y - pad * 0.35;
+    const ang = ((Number(northDeg) || 0) * Math.PI) / 180;
+    const arrowLen = pad * 1.15;
+    const ax = nx + Math.sin(ang) * arrowLen;
+    const ay = ny - Math.cos(ang) * arrowLen;
+    const arrow = document.createElementNS(SVG_NS, "line");
+    arrow.setAttribute("class", "overview-plan-north-arrow");
+    arrow.setAttribute("x1", String(nx));
+    arrow.setAttribute("y1", String(ny));
+    arrow.setAttribute("x2", String(ax));
+    arrow.setAttribute("y2", String(ay));
+    group.appendChild(arrow);
+    const northMark = document.createElementNS(SVG_NS, "text");
+    northMark.setAttribute("class", "overview-plan-north-label");
+    northMark.setAttribute("x", String(nx));
+    northMark.setAttribute("y", String(ny + fs * 1.1));
+    northMark.setAttribute("text-anchor", "middle");
+    northMark.setAttribute("font-size", String(fs));
+    northMark.textContent = planCompassLabel("n");
+    group.appendChild(northMark);
+
+    svg.appendChild(group);
+  }
+
+  function renderOverviewPlanPositionEditor(stage, device, shape, plan) {
+    stage.replaceChildren();
+    stage.classList.add("is-ready");
+    const pad = 12;
+    const rect = {
+      x: Number(shape.x) || 0,
+      y: Number(shape.y) || 0,
+      w: Math.max(Number(shape.w) || 1, 1),
+      h: Math.max(Number(shape.h) || 1, 1),
+    };
+    const vb = {
+      x: rect.x - pad,
+      y: rect.y - pad,
+      w: rect.w + pad * 2,
+      h: rect.h + pad * 2,
+    };
+    const markerR = Math.max(5, Math.min(rect.w, rect.h) * 0.055);
+    const northDeg = plan && plan.north_deg != null ? Number(plan.north_deg) : 0;
+
+    const overlay = document.createElement("div");
+    overlay.className = "overview-plan-position-overlay";
+    overlay.textContent = t("overview.planPositionTap");
+    stage.appendChild(overlay);
+
+    const statusEl = document.createElement("p");
+    statusEl.className = "overview-plan-position-status";
+    statusEl.setAttribute("aria-live", "polite");
+
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "overview-plan-position-svg");
+    svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    svg.style.touchAction = "none";
+    svg.setAttribute("role", "application");
+    svg.setAttribute(
+      "aria-label",
+      t("overview.planPositionAria", { name: device.name || device.address })
+    );
+
+    const room = document.createElementNS(SVG_NS, "rect");
+    room.setAttribute("x", String(rect.x));
+    room.setAttribute("y", String(rect.y));
+    room.setAttribute("width", String(rect.w));
+    room.setAttribute("height", String(rect.h));
+    room.setAttribute("class", "overview-plan-room");
+    svg.appendChild(room);
+    appendOverviewPlanCompass(svg, rect, northDeg);
+
+    const hasPos =
+      device.plan_wall &&
+      device.plan_u != null &&
+      device.plan_v != null &&
+      Number.isFinite(Number(device.plan_u)) &&
+      Number.isFinite(Number(device.plan_v));
+    const pos = hasPos
+      ? planPointFromPos(
+          rect,
+          device.plan_wall,
+          Number(device.plan_u),
+          Number(device.plan_v)
+        )
+      : planPointFromPos(rect, "n", 0.5, 0.12);
+
+    const markerGroup = document.createElementNS(SVG_NS, "g");
+    markerGroup.setAttribute("class", "overview-plan-sensor-group");
+
+    const halo = document.createElementNS(SVG_NS, "circle");
+    halo.setAttribute("class", "overview-plan-sensor-halo");
+    halo.setAttribute("r", String(markerR * 1.85));
+    halo.setAttribute("fill", colorFor(device.address));
+    halo.setAttribute("fill-opacity", "0.22");
+
+    const marker = document.createElementNS(SVG_NS, "circle");
+    marker.setAttribute("class", "overview-plan-sensor");
+    marker.setAttribute("r", String(markerR));
+    marker.setAttribute("fill", colorFor(device.address));
+    marker.setAttribute("stroke", "#fff");
+    marker.setAttribute("stroke-width", String(Math.max(1.5, markerR * 0.22)));
+    if (!hasPos) marker.classList.add("is-prompt");
+
+    markerGroup.append(halo, marker);
+
+    const labelGroup = document.createElementNS(SVG_NS, "g");
+    labelGroup.setAttribute("class", "overview-plan-sensor-label-wrap");
+
+    const labelBg = document.createElementNS(SVG_NS, "rect");
+    labelBg.setAttribute("class", "overview-plan-sensor-label-bg");
+    labelBg.setAttribute("rx", "3");
+
+    const label = document.createElementNS(SVG_NS, "text");
+    label.setAttribute("class", "overview-plan-sensor-label");
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("dominant-baseline", "middle");
+    const fullName = String(device.name || device.address || "");
+    label.textContent =
+      fullName.length > 16 ? `${fullName.slice(0, 15)}…` : fullName;
+
+    labelGroup.append(labelBg, label);
+
+    function layoutLabelBadge() {
+      const cx = Number(marker.getAttribute("cx"));
+      const cy = Number(marker.getAttribute("cy"));
+      const y = cy - markerR * 2.1;
+      label.setAttribute("x", String(cx));
+      label.setAttribute("y", String(y));
+      labelGroup.setAttribute("transform", `translate(0 0)`);
+      try {
+        const box = label.getBBox();
+        const padX = 3;
+        const padY = 1.5;
+        labelBg.setAttribute("x", String(box.x - padX));
+        labelBg.setAttribute("y", String(box.y - padY));
+        labelBg.setAttribute("width", String(box.width + padX * 2));
+        labelBg.setAttribute("height", String(box.height + padY * 2));
+      } catch (_) {
+        labelBg.setAttribute("x", String(cx - 20));
+        labelBg.setAttribute("y", String(y - 6));
+        labelBg.setAttribute("width", "40");
+        labelBg.setAttribute("height", "12");
+      }
+    }
+
+    function setMarkerAt(x, y) {
+      marker.setAttribute("cx", String(x));
+      marker.setAttribute("cy", String(y));
+      halo.setAttribute("cx", String(x));
+      halo.setAttribute("cy", String(y));
+    }
+    setMarkerAt(pos.x, pos.y);
+
+    function positionLabel() {
+      layoutLabelBadge();
+    }
+
+    function updateStatus(encoded) {
+      if (!encoded) {
+        statusEl.textContent = hasPos
+          ? t("overview.planPositionStatusSet")
+          : t("overview.planPositionStatusUnset");
+        return;
+      }
+      statusEl.textContent = t("overview.planPositionStatusWall", {
+        wall: t(`overview.planWall.${encoded.plan_wall}`),
+        u: Math.round(Number(encoded.plan_u) * 100),
+        v: Math.round(Number(encoded.plan_v) * 100),
+      });
+    }
+    updateStatus(
+      hasPos
+        ? {
+            plan_wall: device.plan_wall,
+            plan_u: device.plan_u,
+            plan_v: device.plan_v,
+          }
+        : null
+    );
+
+    svg.append(markerGroup, labelGroup);
+    stage.appendChild(svg);
+    layoutLabelBadge();
+    stage.appendChild(statusEl);
+
+    if (!device.placement_id) {
+      overlay.textContent = t("overview.planPositionNoPlacement");
+      stage.classList.add("is-readonly");
+      return;
+    }
+
+    let dragging = false;
+    let saveTimer = null;
+
+    function hideOverlay() {
+      overlay.classList.add("is-hidden");
+    }
+
+    function svgPoint(clientX, clientY) {
+      const pt = svg.createSVGPoint();
+      pt.x = clientX;
+      pt.y = clientY;
+      const ctm = svg.getScreenCTM();
+      if (!ctm) return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+      const p = pt.matrixTransform(ctm.inverse());
+      return { x: p.x, y: p.y };
+    }
+
+    function clampToRoom(px, py) {
+      return {
+        x: Math.max(rect.x, Math.min(rect.x + rect.w, px)),
+        y: Math.max(rect.y, Math.min(rect.y + rect.h, py)),
+      };
+    }
+
+    async function savePosition(encoded) {
+      statusEl.textContent = t("overview.planPositionSaving");
+      try {
+        const res = await fetch(
+          `/api/devices/${encodeURIComponent(device.address)}/placements/${device.placement_id}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(encoded),
+          }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(
+            typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`
+          );
+        }
+        device.plan_wall = encoded.plan_wall;
+        device.plan_u = encoded.plan_u;
+        device.plan_v = encoded.plan_v;
+        marker.classList.remove("is-unsaved", "is-prompt");
+        updateStatus(encoded);
+        overviewStatus.textContent = t("overview.planPositionSaved");
+      } catch (err) {
+        statusEl.textContent = t("overview.planPositionFailed", {
+          error: err.message,
+        });
+      }
+    }
+
+    function moveTo(clientX, clientY, { save = false } = {}) {
+      const raw = svgPoint(clientX, clientY);
+      const p = clampToRoom(raw.x, raw.y);
+      setMarkerAt(p.x, p.y);
+      positionLabel();
+      hideOverlay();
+      marker.classList.remove("is-prompt");
+      const encoded = planPosFromPoint(rect, p.x, p.y);
+      marker.classList.add("is-unsaved");
+      updateStatus(encoded);
+      if (save) {
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => savePosition(encoded), 120);
+      }
+    }
+
+    svg.addEventListener("pointerdown", (ev) => {
+      dragging = true;
+      stage.classList.add("is-dragging");
+      svg.setPointerCapture(ev.pointerId);
+      moveTo(ev.clientX, ev.clientY);
+      ev.preventDefault();
+    });
+    svg.addEventListener("pointermove", (ev) => {
+      if (!dragging) return;
+      moveTo(ev.clientX, ev.clientY);
+    });
+    svg.addEventListener("pointerup", (ev) => {
+      if (!dragging) return;
+      dragging = false;
+      stage.classList.remove("is-dragging");
+      moveTo(ev.clientX, ev.clientY, { save: true });
+      try {
+        svg.releasePointerCapture(ev.pointerId);
+      } catch (_) {
+        /* ignore */
+      }
+    });
+    svg.addEventListener("pointercancel", () => {
+      dragging = false;
+      stage.classList.remove("is-dragging");
+    });
+  }
+
+  function makePlanPositionEditor(device) {
+    const wrap = document.createElement("div");
+    wrap.className = "overview-plan-position";
+    if (device.archived_at) return wrap;
+
+    const title = document.createElement("span");
+    title.className = "overview-plan-position-title";
+    title.textContent = t("overview.planPosition");
+    wrap.appendChild(title);
+
+    const hint = document.createElement("p");
+    hint.className = "overview-hint overview-plan-position-hint";
+    hint.textContent = t("overview.planPositionHint");
+    wrap.appendChild(hint);
+
+    const stage = document.createElement("div");
+    stage.className = "overview-plan-position-stage";
+    stage.innerHTML = `<p class="overview-plan-position-empty">${escapeHtml(
+      t("overview.planPositionLoading")
+    )}</p>`;
+    wrap.appendChild(stage);
+
+    if (!device.room) {
+      hint.textContent = t("overview.planPositionNoRoom");
+      stage.hidden = true;
+      return wrap;
+    }
+
+    ensureActiveFloorPlan()
+      .then((plan) => {
+        if (!wrap.isConnected) return;
+        if (!plan) {
+          stage.innerHTML = `<p class="overview-plan-position-empty">${escapeHtml(
+            t("overview.planPositionNoPlan")
+          )}</p>`;
+          return;
+        }
+        const shape = findPlanRoomShape(plan, device.room);
+        if (!shape) {
+          stage.innerHTML = `<p class="overview-plan-position-empty">${escapeHtml(
+            t("overview.planPositionNoShape")
+          )}</p>`;
+          return;
+        }
+        renderOverviewPlanPositionEditor(stage, device, shape, plan);
+      })
+      .catch((err) => {
+        if (!wrap.isConnected) return;
+        stage.innerHTML = `<p class="overview-plan-position-empty">${escapeHtml(
+          t("overview.planPositionFailed", { error: err.message })
+        )}</p>`;
+      });
+
+    return wrap;
+  }
+
   function makePlacementsPanel(device) {
     const details = document.createElement("details");
     details.className = "overview-placements";
@@ -13308,6 +14073,7 @@
           t("overview.room")
         )
       );
+      place.appendChild(makePlanPositionEditor(device));
       const fedPush = makeFedPushMetaBtn(device);
       if (fedPush) {
         const pushWrap = document.createElement("div");
@@ -13778,23 +14544,28 @@
   async function loadHistory() {
     ensureCharts();
     const picked = selectedDevices();
+    const formerRowsPromise = loadFormerPlacementChartRows();
     if (!picked.length) {
-      tempChart.data.datasets = [];
-      humChart.data.datasets = [];
-      dewChart.data.datasets = [];
-      setTempWindowBands([]);
-      setTempHvacBands([]);
-      setTempPowerScale(false);
-      renderHvacStatus(null);
-      tempChart.update();
-      humChart.update();
-      dewChart.update();
-      clearProjections();
-      const spreadSec = document.getElementById("spread-section");
-      if (spreadSec) spreadSec.hidden = true;
-      statusEl.textContent = t("compare.selectDevice");
-      historyLoaded = true;
-      return;
+      const formerOnly = await formerRowsPromise;
+      if (!formerOnly.length) {
+        tempChart.data.datasets = [];
+        humChart.data.datasets = [];
+        dewChart.data.datasets = [];
+        setTempWindowBands([]);
+        setTempHvacBands([]);
+        setTempPowerScale(false);
+        renderHvacStatus(null);
+        tempChart.update();
+        humChart.update();
+        dewChart.update();
+        clearProjections();
+        const spreadSec = document.getElementById("spread-section");
+        if (spreadSec) spreadSec.hidden = true;
+        statusEl.textContent = t("compare.selectDevice");
+        historyLoaded = true;
+        syncFormerPlacementCheckboxes();
+        return;
+      }
     }
 
     const overlayHours = rangeOverlayHours();
@@ -13823,7 +14594,7 @@
         })
       : Promise.resolve(null);
 
-    const [results, forecast, hvacBundle] = await Promise.all([
+    const [results, forecast, hvacBundle, formerRows] = await Promise.all([
       Promise.all(
         picked.map(async (device) => {
           const payload = await fetchHistory(device.address);
@@ -13835,9 +14606,11 @@
         return { enabled: false, outdoor: [], projections: {}, error: err.message };
       }),
       hvacPromise,
+      formerRowsPromise,
     ]);
 
-    const multi = results.length > 1;
+    const multi = results.length + formerRows.length > 1;
+    const dash = formerDatasetExtras();
     const tempDatasets = results.map(({ device, points }) => {
       const color = colorFor(device.address);
       return makeDataset(
@@ -13867,6 +14640,38 @@
         !multi
       );
     });
+    for (const row of formerRows) {
+      const color = colorFor(row.address);
+      tempDatasets.push(
+        makeDataset(
+          row.label,
+          color,
+          row.points.map((p) => ({ x: p.ts * 1000, y: p.temperature_c })),
+          false,
+          dash
+        )
+      );
+      humDatasets.push(
+        makeDataset(
+          row.label,
+          color,
+          row.points.map((p) => ({ x: p.ts * 1000, y: p.humidity })),
+          false,
+          dash
+        )
+      );
+      dewDatasets.push(
+        makeDataset(
+          row.label,
+          color,
+          row.points
+            .filter((p) => p.temperature_c != null && p.humidity != null && p.humidity > 0)
+            .map((p) => ({ x: p.ts * 1000, y: dewPoint(p.temperature_c, p.humidity) })),
+          false,
+          dash
+        )
+      );
+    }
 
     if (
       (forecast && forecast.enabled) ||
@@ -14237,11 +15042,16 @@
     dewChart.update();
     renderProjections(forecast);
     historyLoaded = true;
+    syncFormerPlacementCheckboxes();
     evaluateWindowNotifications(forecast).catch((err) => console.warn(err));
     updateWindowBanner(forecast).catch((err) => console.warn(err));
 
-    const totalPoints = results.reduce((n, r) => n + r.points.length, 0);
-    const names = results.map((r) => deviceLabel(r.device)).join(", ");
+    const totalPoints =
+      results.reduce((n, r) => n + r.points.length, 0) +
+      formerRows.reduce((n, r) => n + r.points.length, 0);
+    const nameParts = results.map((r) => deviceLabel(r.device));
+    for (const row of formerRows) nameParts.push(row.label);
+    const names = nameParts.join(", ");
     let extra = "";
     if (forecast && forecast.enabled && forecast.location) {
       const src =
@@ -15107,6 +15917,36 @@
   if (mapRoomChartsCloseBtn) {
     mapRoomChartsCloseBtn.addEventListener("click", () => {
       clearMapRoomSelection();
+    });
+  }
+  if (mapRoomFormerEl) {
+    mapRoomFormerEl.addEventListener("change", () => {
+      setShowFormerPlacements(mapRoomFormerEl.checked);
+      if (selectedMapRoomId) {
+        loadMapRoomCharts().catch((err) => {
+          if (mapRoomChartsStatusEl) {
+            mapRoomChartsStatusEl.textContent = `Error: ${err.message}`;
+          }
+        });
+      }
+      if (currentView === "compare" && historyLoaded) {
+        loadHistory().catch((err) => {
+          if (statusEl) statusEl.textContent = t("compare.error", { error: err.message });
+        });
+      }
+    });
+  }
+  if (compareFormerEl) {
+    compareFormerEl.addEventListener("change", () => {
+      setShowFormerPlacements(compareFormerEl.checked);
+      if (selectedMapRoomId) {
+        loadMapRoomCharts().catch(() => {});
+      }
+      if (currentView === "compare" && historyLoaded) {
+        loadHistory().catch((err) => {
+          if (statusEl) statusEl.textContent = t("compare.error", { error: err.message });
+        });
+      }
     });
   }
   if (networkCanvasWrapEl && networkSvgEl) {

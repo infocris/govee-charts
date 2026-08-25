@@ -2218,6 +2218,154 @@ main {
   gap: 0.35rem;
 }
 
+.overview-plan-position {
+  margin-top: 0.65rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 0.35rem;
+}
+
+.overview-plan-position-title {
+  font-size: 0.88rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.overview-plan-position-stage {
+  position: relative;
+  width: min(100%, 280px);
+  aspect-ratio: 4 / 3;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg) 92%, var(--text) 8%);
+  overflow: hidden;
+}
+
+.overview-plan-position-stage.is-ready {
+  cursor: crosshair;
+}
+
+.overview-plan-position-stage.is-dragging {
+  cursor: grabbing;
+}
+
+.overview-plan-position-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem;
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.overview-plan-position-overlay.is-hidden {
+  opacity: 0;
+}
+
+.overview-plan-position-status {
+  margin: 0;
+  padding: 0.35rem 0.5rem 0.45rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 96%, var(--text) 4%);
+}
+
+.overview-plan-position-svg {
+  display: block;
+  width: 100%;
+  height: calc(100% - 1.6rem);
+}
+
+.overview-plan-room {
+  fill: color-mix(in srgb, var(--accent) 14%, transparent);
+  stroke: color-mix(in srgb, var(--accent) 65%, var(--line));
+  stroke-width: 2;
+}
+
+.overview-plan-sensor-group {
+  pointer-events: none;
+}
+
+.overview-plan-sensor-halo {
+  pointer-events: none;
+}
+
+.overview-plan-sensor {
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.45));
+  pointer-events: none;
+}
+
+.overview-plan-sensor.is-prompt {
+  animation: overview-plan-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes overview-plan-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.overview-plan-sensor.is-unsaved {
+  stroke-dasharray: 3 2;
+}
+
+.overview-plan-compass-label,
+.overview-plan-north-label {
+  font-size: 9px;
+  font-weight: 700;
+  fill: color-mix(in srgb, var(--text) 88%, var(--muted));
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+  pointer-events: none;
+}
+
+.overview-plan-north-arrow {
+  stroke: color-mix(in srgb, var(--accent) 80%, var(--text));
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.overview-plan-sensor-label-wrap {
+  pointer-events: none;
+}
+
+.overview-plan-sensor-label-bg {
+  fill: color-mix(in srgb, var(--bg) 18%, #000 82%);
+  stroke: color-mix(in srgb, var(--line) 40%, #fff 20%);
+  stroke-width: 0.75;
+}
+
+.overview-plan-sensor-label {
+  font-size: 8px;
+  font-weight: 700;
+  fill: #fff;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+}
+
+.overview-plan-position-empty {
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
 .overview-placement-move label {
   display: flex;
   flex-direction: column;
@@ -4977,6 +5125,56 @@ body.plan-editor-modal-open {
   flex-wrap: wrap;
   gap: 0.45rem 0.65rem;
   align-items: center;
+}
+
+.compare-former-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  margin-top: 0.35rem;
+}
+
+.compare-former-opt input {
+  margin: 0;
+}
+
+.compare-former-hint {
+  margin: 0.25rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.map-room-former-opt input {
+  margin: 0;
+}
+
+.section-room-former-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.82);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  margin-right: 0.35rem;
+}
+
+.section-room-former-opt input {
+  margin: 0;
 }
 
 .map-room-charts-close {
