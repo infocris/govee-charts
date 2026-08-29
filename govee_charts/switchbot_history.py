@@ -308,7 +308,7 @@ async def download_switchbot_history(
             current_min = end_min
             wait_s = max(
                 20.0,
-                min(600.0, (start_min - end_min + 1) * 0.25 + 15.0),
+                min(90.0, (start_min - end_min + 1) * 0.25 + 15.0),
             )
             deadline = time.perf_counter() + wait_s
 

@@ -5117,7 +5117,7 @@ class Database:
         cursor = await self.db.execute("SELECT address FROM devices")
         addresses = [str(row[0]).upper() for row in await cursor.fetchall() if row[0]]
         out: dict[str, int] = {}
-        for address in addresses:
+        for i, address in enumerate(addresses):
             cur = await self.db.execute(
                 """
                 SELECT rssi FROM readings
@@ -5130,12 +5130,13 @@ class Database:
                 (address, node_id, gatt),
             )
             row = await cur.fetchone()
-            if not row:
-                continue
-            try:
-                out[address] = int(row[0])
-            except (TypeError, ValueError):
-                continue
+            if row:
+                try:
+                    out[address] = int(row[0])
+                except (TypeError, ValueError):
+                    pass
+            if i % 4 == 3:
+                await asyncio.sleep(0)
         cursor = await self.db.execute(
             """
             SELECT address, last_rssi FROM backfill_state
@@ -5376,6 +5377,123 @@ class Database:
         )
         await self.db.commit()
 
+    async def insert_history_readings(
+        self,
+        *,
+        address: str,
+        display_name: str,
+        model: str,
+        samples: list[tuple[float, float, float, int, int | None, str]],
+        overwrite: bool = False,
+        eps_temp: float = 0.05,
+        eps_hum: float = 0.05,
+    ) -> dict[str, int]:
+        """
+        Bulk insert history samples with per-row battery/rssi/source.
+
+        ``samples``: ``(ts, temperature_c, humidity, battery, rssi, source)``.
+
+        Returns ``{"inserted": n, "overwritten": m}``.
+        With ``overwrite=False`` (default), existing minutes are skipped
+        (``INSERT OR IGNORE`` on exact ``ts``).
+        With ``overwrite=True``, conflicting minutes are updated in place (matched
+        by unix minute even if the stored ``ts`` is not minute-aligned);
+        ``overwritten`` counts minutes whose temp/humidity changed beyond epsilon.
+        """
+        address = address.upper()
+        if not samples:
+            return {"inserted": 0, "overwritten": 0}
+        now = time.time()
+        first_ts = min(float(ts) for ts, _, _, _, _, _ in samples)
+        last_ts = max(float(ts) for ts, _, _, _, _, _ in samples)
+        await self.db.execute(
+            """
+            INSERT INTO devices (address, name, model, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                name = excluded.name,
+                model = excluded.model,
+                last_seen = MAX(devices.last_seen, excluded.last_seen),
+                first_seen = MIN(devices.first_seen, excluded.first_seen)
+            """,
+            (address, display_name, model, first_ts, max(last_ts, now)),
+        )
+
+        # Deduplicate by minute (last sample wins); keep full row for inserts.
+        by_minute: dict[
+            int, tuple[float, float, float, int, int | None, str]
+        ] = {}
+        for ts, temp, hum, batt, rssi, source in samples:
+            minute = int(float(ts) // 60)
+            by_minute[minute] = (
+                float(ts),
+                float(temp),
+                float(hum),
+                int(batt),
+                rssi if rssi is None else int(rssi),
+                str(source),
+            )
+
+        floored = [float(m * 60) for m in by_minute]
+        win_start = min(first_ts, min(floored)) - 1.0
+        win_end = max(last_ts, max(floored)) + 61.0
+
+        if not overwrite:
+            before = await self.reading_exact_minutes(address, win_start, win_end)
+            await self.db.executemany(
+                """
+                INSERT OR IGNORE INTO readings
+                    (address, ts, temperature_c, humidity, battery, rssi, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (address, ts, temp, hum, batt, rssi, source)
+                    for ts, temp, hum, batt, rssi, source in by_minute.values()
+                ],
+            )
+            await self.db.commit()
+            after = await self.reading_exact_minutes(address, win_start, win_end)
+            return {
+                "inserted": max(0, len(after) - len(before)),
+                "overwritten": 0,
+            }
+
+        before_values = await self.reading_values_by_minute(address, win_start, win_end)
+        inserted = 0
+        overwritten = 0
+        insert_rows: list[tuple] = []
+        for minute, (ts, temp, hum, batt, rssi, source) in by_minute.items():
+            old = before_values.get(minute)
+            if old is None:
+                inserted += 1
+                insert_rows.append(
+                    (address, ts, temp, hum, batt, rssi, source)
+                )
+            else:
+                old_ts, old_temp, old_hum = old
+                if abs(old_temp - temp) > eps_temp or abs(old_hum - hum) > eps_hum:
+                    overwritten += 1
+                await self.db.execute(
+                    """
+                    UPDATE readings
+                    SET temperature_c = ?, humidity = ?, battery = ?, rssi = ?, source = ?
+                    WHERE address = ? AND ts = ?
+                    """,
+                    (temp, hum, batt, rssi, source, address, old_ts),
+                )
+
+        if insert_rows:
+            await self.db.executemany(
+                """
+                INSERT INTO readings
+                    (address, ts, temperature_c, humidity, battery, rssi, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                insert_rows,
+            )
+        await self.db.commit()
+        return {"inserted": inserted, "overwritten": overwritten}
+
     async def insert_gatt_readings(
         self,
         *,
@@ -5393,97 +5511,23 @@ class Database:
         """
         Bulk insert GATT/CSV history samples. samples: (ts, temp, humidity).
 
-        Returns ``{"inserted": n, "overwritten": m}``.
-        With ``overwrite=False`` (default), existing minutes are skipped
-        (``INSERT OR IGNORE`` on exact ``ts``).
-        With ``overwrite=True``, conflicting minutes are updated in place (matched
-        by unix minute even if the stored ``ts`` is not minute-aligned);
-        ``overwritten`` counts minutes whose temp/humidity changed beyond epsilon.
+        Thin wrapper around :meth:`insert_history_readings` with fixed
+        battery/rssi/source for every sample.
         """
-        address = address.upper()
-        if not samples:
-            return {"inserted": 0, "overwritten": 0}
-        now = time.time()
-        first_ts = min(ts for ts, _, _ in samples)
-        last_ts = max(ts for ts, _, _ in samples)
-        await self.db.execute(
-            """
-            INSERT INTO devices (address, name, model, first_seen, last_seen)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(address) DO UPDATE SET
-                name = excluded.name,
-                model = excluded.model,
-                last_seen = MAX(devices.last_seen, excluded.last_seen),
-                first_seen = MIN(devices.first_seen, excluded.first_seen)
-            """,
-            (address, display_name, model, first_ts, max(last_ts, now)),
+        batt = int(battery)
+        rows = [
+            (float(ts), float(temp), float(hum), batt, rssi, source)
+            for ts, temp, hum in samples
+        ]
+        return await self.insert_history_readings(
+            address=address,
+            display_name=display_name,
+            model=model,
+            samples=rows,
+            overwrite=overwrite,
+            eps_temp=eps_temp,
+            eps_hum=eps_hum,
         )
-
-        # Deduplicate by minute (last sample wins); keep sample ts for inserts.
-        by_minute: dict[int, tuple[float, float, float]] = {}
-        for ts, temp, hum in samples:
-            minute = int(float(ts) // 60)
-            by_minute[minute] = (float(ts), float(temp), float(hum))
-
-        floored = [float(m * 60) for m in by_minute]
-        win_start = min(first_ts, min(floored)) - 1.0
-        win_end = max(last_ts, max(floored)) + 61.0
-
-        if not overwrite:
-            before = await self.reading_exact_minutes(address, win_start, win_end)
-            await self.db.executemany(
-                """
-                INSERT OR IGNORE INTO readings
-                    (address, ts, temperature_c, humidity, battery, rssi, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (address, ts, temp, hum, int(battery), rssi, source)
-                    for ts, temp, hum in by_minute.values()
-                ],
-            )
-            await self.db.commit()
-            after = await self.reading_exact_minutes(address, win_start, win_end)
-            return {
-                "inserted": max(0, len(after) - len(before)),
-                "overwritten": 0,
-            }
-
-        before_values = await self.reading_values_by_minute(address, win_start, win_end)
-        inserted = 0
-        overwritten = 0
-        insert_rows: list[tuple] = []
-        for minute, (ts, temp, hum) in by_minute.items():
-            old = before_values.get(minute)
-            if old is None:
-                inserted += 1
-                insert_rows.append(
-                    (address, ts, temp, hum, int(battery), rssi, source)
-                )
-            else:
-                old_ts, old_temp, old_hum = old
-                if abs(old_temp - temp) > eps_temp or abs(old_hum - hum) > eps_hum:
-                    overwritten += 1
-                await self.db.execute(
-                    """
-                    UPDATE readings
-                    SET temperature_c = ?, humidity = ?, battery = ?, rssi = ?, source = ?
-                    WHERE address = ? AND ts = ?
-                    """,
-                    (temp, hum, int(battery), rssi, source, address, old_ts),
-                )
-
-        if insert_rows:
-            await self.db.executemany(
-                """
-                INSERT INTO readings
-                    (address, ts, temperature_c, humidity, battery, rssi, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                insert_rows,
-            )
-        await self.db.commit()
-        return {"inserted": inserted, "overwritten": overwritten}
 
 COVERAGE_FULL_THRESHOLD = 0.90
 

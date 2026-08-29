@@ -376,7 +376,7 @@ async def download_history(
                 logger.debug("No 33 01 ack from %s", address)
 
             ka_task = asyncio.create_task(keepalive_loop(client))
-            wait_s = max(20.0, min(600.0, (start_min - end_min) * 0.35 + 25.0))
+            wait_s = max(20.0, min(90.0, (start_min - end_min) * 0.35 + 25.0))
             try:
                 await asyncio.wait_for(done.wait(), timeout=wait_s)
             except asyncio.TimeoutError:

@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from govee_charts.db import Database
-from govee_charts.decode import Reading
 from govee_charts.federation import PeerPublisher, gatt_source
-from govee_charts.history_gatt import MAX_HISTORY_MINUTES, download_history
+from govee_charts.history_gatt import (
+    MAX_HISTORY_MINUTES,
+    HistoryDownloadResult,
+    download_history,
+)
 from govee_charts.scanner import GoveeScanner
 from govee_charts.switchbot_history import (
     is_switchbot_backfill_model,
@@ -204,9 +208,19 @@ class BackfillService:
         self._live = LiveJobProgress()
         self._refresh_lock = asyncio.Lock()
         self._last_refresh_ts = 0.0
-        self._last_rebuild_ts = 0.0
+        # Defer full clear+rebuild after process start: incremental enqueue
+        # fills gaps, and a forced rebuild on every watchdog restart was
+        # saturating SQLite in a crash loop.
+        self._last_rebuild_ts = time.time()
         self._rr_cursor = 0
         self._weak_backoff: dict[str, float] = {}
+
+    def _touch_workers_heartbeat(self) -> None:
+        """Keep the workers sidecar fresh while refresh monopolizes aiosqlite."""
+        try:
+            self.db.write_workers_heartbeat_file()
+        except OSError:
+            pass
 
     @property
     def enabled(self) -> bool:
@@ -405,6 +419,7 @@ class BackfillService:
             if rebuild:
                 cleared = await self.db.clear_open_backfill_jobs()
                 self._last_rebuild_ts = now
+                self._touch_workers_heartbeat()
                 if cleared:
                     logger.info(
                         "Cleared %d open backfill job(s) before rebuild", cleared
@@ -415,7 +430,7 @@ class BackfillService:
 
             devices = await self.db.list_devices(include_stats=False)
             enqueued = 0
-            for device_i, device in enumerate(devices):
+            for device in devices:
                 addr = str(device["address"]).upper()
                 if addr not in enabled_set:
                     continue
@@ -453,9 +468,13 @@ class BackfillService:
                         )
                         if job_id is not None:
                             enqueued += 1
-                # Yield so BLE ads / HTTP / heartbeat stay responsive.
-                if device_i % 2 == 1:
-                    await asyncio.sleep(0.01)
+                    # Yield + sidecar touch: long reading_minutes queues block
+                    # the asyncio heartbeat's next file write via aiosqlite.
+                    self._touch_workers_heartbeat()
+                    await asyncio.sleep(0)
+                # Yield after every device during rebuild/enqueue.
+                self._touch_workers_heartbeat()
+                await asyncio.sleep(0.01)
             if enqueued:
                 await self.db.commit()
                 logger.info(
@@ -809,7 +828,7 @@ class BackfillService:
             points = bundle.get("points") or []
             if not points:
                 continue
-            got = 0
+            rows: list[tuple[float, float, float, int, int | None, str]] = []
             for p in points:
                 try:
                     ts = float(p["ts"])
@@ -839,22 +858,18 @@ class BackfillService:
                 src = str(p.get("source") or "").strip() or peer_id
                 if src == self.node_id or src.startswith(f"{self.node_id}/"):
                     continue
-                reading = Reading(
-                    temperature_c=temp,
-                    humidity=humidity,
-                    battery=batt_i,
-                    address=address,
-                    name=name,
-                    model=model,
-                    rssi=rssi_i,
-                )
-                ok = await self.db.upsert_reading(
-                    reading, name, ts=ts, source=src
-                )
-                if ok:
-                    inserted += 1
-                    got += 1
+                rows.append((ts, temp, humidity, batt_i, rssi_i, src))
+            if not rows:
+                continue
+            result = await self.db.insert_history_readings(
+                address=address,
+                display_name=name,
+                model=model,
+                samples=rows,
+            )
+            got = int(result.get("inserted") or 0)
             if got:
+                inserted += got
                 contributors.append(peer_id)
         return inserted, contributors
 
@@ -918,6 +933,7 @@ class BackfillService:
             return
 
         # Prefer federation history over GATT when peers already have the gap.
+        self._touch_workers_heartbeat()
         fed_inserted, fed_peers = await self._fill_from_peers(
             address=address,
             name=name,
@@ -926,6 +942,7 @@ class BackfillService:
             window_end=window_end,
             battery=None,
         )
+        self._touch_workers_heartbeat()
         if fed_inserted:
             self._live.samples_done = fed_inserted
             logger.info(
@@ -1133,7 +1150,10 @@ class BackfillService:
             suffix_map = self.scanner.suffix_map
             cached_device = self.scanner.get_ble_device(address)
             if cached_device is None:
-                for _ in range(15):
+                # Brief settle only — a long poll thrash starved the worker and
+                # let CoreBluetooth hangs push the hard watchdog over the edge.
+                for _ in range(2):
+                    self._touch_workers_heartbeat()
                     await asyncio.sleep(1.0)
                     cached_device = self.scanner.get_ble_device(address)
                     if cached_device is not None:
@@ -1146,7 +1166,7 @@ class BackfillService:
                     error="no recent BLE advertisement (scanner still running)",
                 )
                 self._weak_backoff[address] = time.time() + max(
-                    60.0, self.cfg.poll_seconds * 2.0
+                    60.0, self.cfg.weak_rssi_backoff_seconds
                 )
                 logger.warning(
                     "Backfill job %s %s [%s] deferred: no cached BLEDevice",
@@ -1156,9 +1176,40 @@ class BackfillService:
                 )
                 return
             await self.scanner.pause_for_gatt()
+
+        # Hard cap the whole Bleak session (connect + transfer + disconnect).
+        # macOS CoreBluetooth can freeze the asyncio loop; a thread pulse keeps
+        # the workers sidecar fresh so the hard watchdog does not kill us mid-GATT.
+        session_cap = max(
+            45.0,
+            float(self.cfg.connect_timeout) + 90.0 + 15.0,
+        )
+        hb_stop = threading.Event()
+
+        def _gatt_heartbeat_pulse() -> None:
+            while not hb_stop.wait(2.0):
+                self._touch_workers_heartbeat()
+
+        pulse_thread = threading.Thread(
+            target=_gatt_heartbeat_pulse,
+            name=f"gatt-hb-{address[-5:]}",
+            daemon=True,
+        )
+        pulse_thread.start()
+        result: HistoryDownloadResult
         try:
+            logger.info(
+                "Backfill job %s %s [%s] GATT connect (cap=%.0fs, %d→%d min ago)",
+                job_id,
+                name,
+                phase,
+                session_cap,
+                start_min,
+                end_min,
+            )
+            self._touch_workers_heartbeat()
             if is_switchbot_backfill_model(model):
-                result = await download_switchbot_history(
+                download = download_switchbot_history(
                     address,
                     start_min=start_min,
                     end_min=end_min,
@@ -1172,7 +1223,7 @@ class BackfillService:
                     model=model,
                 )
             else:
-                result = await download_history(
+                download = download_history(
                     address,
                     start_min=start_min,
                     end_min=end_min,
@@ -1183,9 +1234,27 @@ class BackfillService:
                     device=cached_device,
                     suffix_map=suffix_map,
                 )
+            try:
+                result = await asyncio.wait_for(download, timeout=session_cap)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Backfill job %s %s [%s] GATT session timed out after %.0fs",
+                    job_id,
+                    name,
+                    phase,
+                    session_cap,
+                )
+                result = HistoryDownloadResult(
+                    address=address,
+                    error=f"gatt session timed out after {session_cap:.0f}s",
+                    duration_s=session_cap,
+                )
         finally:
+            hb_stop.set()
+            pulse_thread.join(timeout=3.0)
             if self.scanner is not None:
                 await self.scanner.resume_after_gatt()
+            self._touch_workers_heartbeat()
 
         if not await self.db.is_backfill_enabled(address):
             await self.db.update_backfill_job(
@@ -1333,12 +1402,25 @@ class BackfillService:
                 pruned,
             )
 
-        logger.info(
-            "GATT history backfill started (lookback=%.0fd, max_job=%dm, min_rssi=%d)",
-            self.cfg.lookback_days,
-            self.cfg.max_job_minutes,
-            self.cfg.min_rssi,
-        )
+        counts = await self.db.backfill_job_counts()
+        open_n = int(counts.get("pending") or 0) + int(counts.get("deferred") or 0)
+        if open_n:
+            logger.info(
+                "GATT history backfill started (lookback=%.0fd, max_job=%dm, "
+                "min_rssi=%d); keeping %d open job(s), next full rebuild in %.0fs",
+                self.cfg.lookback_days,
+                self.cfg.max_job_minutes,
+                self.cfg.min_rssi,
+                open_n,
+                self.cfg.rebuild_seconds,
+            )
+        else:
+            logger.info(
+                "GATT history backfill started (lookback=%.0fd, max_job=%dm, min_rssi=%d)",
+                self.cfg.lookback_days,
+                self.cfg.max_job_minutes,
+                self.cfg.min_rssi,
+            )
         try:
             while not stop_event.is_set():
                 if self._paused:
@@ -1352,10 +1434,12 @@ class BackfillService:
                     continue
 
                 try:
+                    self._touch_workers_heartbeat()
                     await self.refresh_gaps()
                 except Exception:
                     logger.exception("Backfill gap refresh failed")
 
+                self._touch_workers_heartbeat()
                 job = await self._pick_job()
                 if job is None:
                     self._worker = "idle"
@@ -1369,6 +1453,7 @@ class BackfillService:
                     continue
 
                 try:
+                    self._touch_workers_heartbeat()
                     await self._run_job(job)
                 except Exception as exc:
                     logger.exception("Backfill job crashed")

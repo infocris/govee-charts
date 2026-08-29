@@ -52,7 +52,9 @@ CONFIG_PATH = ROOT / "config.toml"
 _HEARTBEAT_INTERVAL_S = 2.0
 _HEARTBEAT_FAIL_EXIT_S = 60.0
 # Thread watchdog: exits even when asyncio/aiosqlite are stuck inside SQLite C.
-_HARD_WATCHDOG_STALE_S = 90.0
+# 180s leaves room for macOS page-cache stalls on a ~200 MiB readings DB without
+# treating every congested refresh as a hard hang (90s caused restart loops).
+_HARD_WATCHDOG_STALE_S = 180.0
 _HARD_WATCHDOG_POLL_S = 5.0
 _HARD_WATCHDOG_STARTUP_GRACE_S = 120.0
 _HARD_WATCHDOG_MISS_STREAK = 3
