@@ -19,6 +19,7 @@ from govee_charts.history_gatt import (
     HistorySample,
     _find_device_resolved,
 )
+from govee_charts.switchbot_decode import decode_temp_humidity
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,12 @@ CMD_EXTEND = 0x0F
 CMD_HISTORY_INIT = 0x3A
 CMD_HISTORY_META = 0x3B
 CMD_HISTORY_FETCH = 0x3C
+
+# Issue #37 Android logs used mode 0x01; current Meter / Meter Plus firmwares
+# reject that with status 0x02 and only answer mode 0x00.
+HISTORY_FETCH_MODE = 0x00
+# count=10 timed out on live devices; keep batches small.
+MAX_HISTORY_FETCH_COUNT = 6
 
 # Onboard span (minutes): Meter 36d; Plus / Outdoor / Pro 68d.
 MAX_HISTORY_MINUTES_METER = 36 * 1440
@@ -111,12 +118,16 @@ def _history_humidity_byte(raw: int) -> float | None:
     return None
 
 
-def decode_history_payload(
+def _plausible_history_sample(temp_c: float, humidity: float) -> bool:
+    return 5.0 <= temp_c <= 45.0 and 15.0 <= humidity <= 90.0
+
+
+def _decode_history_milli(
     payload: bytes,
     *,
     fallback_humidity: float | None = None,
 ) -> list[tuple[float, float]]:
-    """Parse a history-fetch notification payload (status byte already stripped)."""
+    """Legacy LE milli-°C + humidity packing from SwitchBotAPI-BLE issue #37."""
     out: list[tuple[float, float]] = []
     i = 0
     if payload and payload[0] in (0x97, 0x52):
@@ -139,6 +150,59 @@ def decode_history_payload(
                 break
         out.append((temp_c, hum))
     return out
+
+
+def _decode_history_ad(payload: bytes) -> list[tuple[float, float]]:
+    """Decode using the same 3-byte block as live SwitchBot advertisements."""
+    best: list[tuple[float, float]] = []
+    best_score = -1
+    for align in range(3):
+        out: list[tuple[float, float]] = []
+        i = align
+        while i + 2 < len(payload):
+            parsed = decode_temp_humidity(payload[i : i + 3])
+            if parsed is None:
+                i += 1
+                continue
+            temp_c, humidity = parsed
+            if _plausible_history_sample(temp_c, humidity):
+                out.append((temp_c, humidity))
+            i += 3
+        score = len(out)
+        if score > best_score:
+            best_score = score
+            best = out
+    return best
+
+
+def _filter_temp_outliers(
+    rows: list[tuple[float, float]],
+    *,
+    max_delta_c: float = 8.0,
+) -> list[tuple[float, float]]:
+    """Drop sparse misaligned temps that sit far from the batch median."""
+    if len(rows) < 3:
+        return rows
+    temps = sorted(t for t, _h in rows)
+    median = temps[len(temps) // 2]
+    filtered = [(t, h) for t, h in rows if abs(t - median) <= max_delta_c]
+    return filtered or rows
+
+
+def decode_history_payload(
+    payload: bytes,
+    *,
+    fallback_humidity: float | None = None,
+) -> list[tuple[float, float]]:
+    """Parse a history-fetch notification payload (status byte already stripped).
+
+    Current firmwares answering mode 0x00 use the live advertisement temp/humidity
+    packing. Older issue #37 captures used LE milli-°C; keep that as a fallback.
+    """
+    ad = _filter_temp_outliers(_decode_history_ad(payload))
+    if ad:
+        return ad
+    return _decode_history_milli(payload, fallback_humidity=fallback_humidity)
 
 
 def parse_history_meta(payload: bytes) -> dict[str, int]:
@@ -303,19 +367,19 @@ async def download_switchbot_history(
                 result.duration_s = time.perf_counter() - t0
                 return result
 
-            batch = meta["batch"]
-            offset_base = 0
+            batch = max(1, min(int(meta["batch"]), MAX_HISTORY_FETCH_COUNT))
             current_min = end_min
             wait_s = max(
                 20.0,
                 min(90.0, (start_min - end_min + 1) * 0.25 + 15.0),
             )
             deadline = time.perf_counter() + wait_s
+            reject_skips = 0
 
             while current_min <= start_min and time.perf_counter() < deadline:
                 offset = current_min - end_min
                 count = min(batch, start_min - current_min + 1)
-                cmd = build_history_fetch(0x01, offset, count)
+                cmd = build_history_fetch(HISTORY_FETCH_MODE, offset, count)
                 try:
                     fetch_resp = await _exchange(client, cmd, wait_s=10.0)
                 except asyncio.TimeoutError:
@@ -332,7 +396,20 @@ async def download_switchbot_history(
                     )
                     break
 
-                if len(fetch_resp) < 2 or not _response_ok(fetch_resp[0]):
+                if not fetch_resp:
+                    break
+                if not _response_ok(fetch_resp[0]):
+                    # Some firmwares reject odd offsets with status 0x02.
+                    if fetch_resp[0] == 0x02 and current_min < start_min:
+                        reject_skips += 1
+                        if reject_skips > 8:
+                            break
+                        current_min += 1
+                        continue
+                    break
+                reject_skips = 0
+
+                if len(fetch_resp) < 2:
                     break
 
                 records = decode_history_payload(
@@ -359,9 +436,9 @@ async def download_switchbot_history(
                         except Exception:
                             logger.exception("switchbot on_sample callback failed")
 
-                if len(records) < count:
-                    break
-                current_min += len(records)
+                # Advance by the requested count so the next offset stays aligned
+                # with the device window (filtered decode may return fewer rows).
+                current_min += count
 
     except Exception as exc:
         detail = str(exc).strip() or repr(exc)
