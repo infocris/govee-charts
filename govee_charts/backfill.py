@@ -193,6 +193,25 @@ class LiveJobProgress:
     started_at: float | None = None
 
 
+def peer_can_run_gatt(peer: dict[str, Any], address: str) -> bool:
+    """
+    Whether ``peer`` (from peer_device_signals) is expected to run GATT backfill.
+
+    Uses /api/backfill device flags when present. Missing backfill payload keeps
+    legacy RSSI-only behaviour (assume yes). Explicit gatt_enabled=false → no.
+    """
+    if "backfill" not in peer:
+        return True
+    flags = (peer.get("backfill") or {}).get(str(address).upper())
+    if not flags:
+        return False
+    if not flags.get("enabled"):
+        return False
+    if flags.get("gatt_enabled") is False:
+        return False
+    return True
+
+
 @dataclass
 class BackfillService:
     db: Database
@@ -569,6 +588,8 @@ class BackfillService:
                 addr = str(device.get("address") or "").upper()
                 if not addr:
                     continue
+                if not peer_can_run_gatt(peer, addr):
+                    continue
                 last_seen = float(device.get("last_seen") or 0.0)
                 if not last_seen or now - last_seen > max_age:
                     continue
@@ -718,6 +739,8 @@ class BackfillService:
                 continue
             peer_id = str(peer.get("node_id") or "").strip()
             if not peer_id or peer_id == self.node_id:
+                continue
+            if not peer_can_run_gatt(peer, address):
                 continue
             for device in peer.get("devices") or []:
                 if str(device.get("address") or "").upper() != address:

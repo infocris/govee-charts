@@ -195,6 +195,7 @@ class PeerPublisher:
 
             node_id = peer
             devices: list[dict[str, Any]] = []
+            backfill: dict[str, dict[str, bool]] = {}
             ok = False
             try:
                 assert self._client is not None
@@ -210,6 +211,29 @@ class PeerPublisher:
                     elif isinstance(raw, dict):
                         devices = list(raw.get("devices") or [])
                     ok = True
+                # Backfill GATT flags (enabled / gatt_enabled) so RSSI election
+                # does not yield to a peer that will not run GATT for the sensor.
+                try:
+                    bf_res = await self._client.get(
+                        f"{peer}/api/backfill",
+                        params={"recent_limit": 1, "job_limit": 1},
+                    )
+                    if bf_res.status_code < 400:
+                        bf_raw = bf_res.json()
+                        for row in bf_raw.get("devices") or []:
+                            addr = str(row.get("address") or "").upper()
+                            if not addr:
+                                continue
+                            backfill[addr] = {
+                                "enabled": bool(row.get("enabled")),
+                                "gatt_enabled": bool(
+                                    row.get("gatt_enabled", True)
+                                ),
+                            }
+                except Exception as exc:
+                    logger.debug(
+                        "Peer backfill flags %s failed: %s", peer, exc
+                    )
             except Exception as exc:
                 logger.debug("Peer signal fetch %s failed: %s", peer, exc)
                 ok = False
@@ -218,6 +242,7 @@ class PeerPublisher:
                 "url": peer,
                 "node_id": node_id,
                 "devices": devices,
+                "backfill": backfill,
                 "ok": ok,
                 "fetched_at": now,
             }
