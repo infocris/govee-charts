@@ -224,7 +224,8 @@ See `config.example.toml`:
 - `scanner.sample_interval` — minimum seconds between stored samples (default 60)
 - `scanner.retention_days` — history retention (default 30)
 - `scanner.adapters` — BlueZ adapters (`["hci0", "hci1"]`)
-- `federation.peers` — URLs of other instances
+- `federation.peers` — URLs of other instances (also editable in Settings →
+  Federation nodes; runtime list lives in `data/federation_peers.json`)
 - `federation.token` — shared secret for `POST /api/ingest`
 - `[weather]` — Open-Meteo hourly forecast + sensor projections (`place` or lat/lon)
 - `[cursor_chat]` — Map-view chat via local Cursor Agent CLI (`agent login`, ask mode)
@@ -401,6 +402,11 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `POST /api/backfill/devices` — opt a sensor in/out and/or toggle GATT (`{address, enabled?, gatt_enabled?}`; persisted even if the worker is offline)
 - `POST /api/backfill/import/preview` — parse Govee Home CSV/ZIP and compare to existing readings (form: `address`, `file`, optional `overwrite`); includes would_insert / would_overwrite + sample diffs
 - `POST /api/backfill/import` — confirm ingest (same form fields); with `overwrite=true`, updates conflicting minutes
+- `GET /api/federation` — local `node_id` + peers with health probes
+- `POST /api/federation/peers` — add a peer `{url}` (persisted; workers reload within seconds)
+- `PUT /api/federation/peers` — replace peer list `{peers:[…]}`
+- `DELETE /api/federation/peers?url=…` — remove a peer
+- `POST /api/federation/peers/probe` — health-check a URL without adding it
 - `POST /api/ingest` — accept peer readings (`X-Govee-Token` header)
 - `POST /api/restart?target=ui|workers` — restart UI or workers (when available)
 - `GET /widget?metric=temp&addr=…&past=24&future=24&transparent=0|1` — standalone embeddable chart (iframe / share link)

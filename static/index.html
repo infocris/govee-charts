@@ -1522,7 +1522,7 @@
     <section id="view-settings" class="view" role="tabpanel" data-i18n-aria-label="nav.settings" aria-label="Settings" hidden>
       <div class="overview-head">
         <h2 data-i18n="settings.title">Settings</h2>
-        <p class="overview-hint" data-i18n="settings.hint">Language, window advice, voice, and weather station preferences are stored in this browser.</p>
+        <p class="overview-hint" data-i18n="settings.hint">Language, window advice, voice, and weather stations stay in this browser. Federation peers are saved on the server.</p>
       </div>
       <form class="settings-form" id="settings-form" onsubmit="return false;">
         <label class="settings-field" for="settings-locale">
@@ -1587,6 +1587,53 @@
           <div class="settings-service-actions" id="settings-notify-actions"></div>
           <span class="settings-field-help" data-i18n="settings.notifyHelp">
             Diagnoses browser permission issues (especially Safari standalone) and offers fixes.
+          </span>
+        </fieldset>
+        <fieldset class="settings-field settings-federation-field">
+          <legend class="settings-field-label" data-i18n="settings.federation">Federation nodes</legend>
+          <p class="settings-field-help settings-federation-local">
+            <span data-i18n="settings.federationLocal">This node</span>:
+            <code id="settings-federation-node">—</code>
+          </p>
+          <div
+            id="settings-federation-peers"
+            class="settings-federation-list"
+            role="list"
+            data-i18n-aria-label="settings.federationHelp"
+            aria-label="Federation peer nodes"
+          ></div>
+          <p
+            id="settings-federation-empty"
+            class="settings-field-help"
+            data-i18n="settings.federationEmpty"
+            hidden
+          >
+            No peers configured yet.
+          </p>
+          <div class="settings-federation-add">
+            <input
+              id="settings-federation-url"
+              type="url"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="https://host.example:8082"
+              data-i18n-placeholder="settings.federationUrlPlaceholder"
+              data-i18n-aria-label="settings.federationUrlLabel"
+              aria-label="Peer base URL"
+            />
+            <button
+              type="button"
+              id="settings-federation-add-btn"
+              class="backfill-btn"
+              data-i18n="settings.federationAdd"
+            >
+              Add
+            </button>
+          </div>
+          <p id="settings-federation-status" class="settings-federation-status" aria-live="polite"></p>
+          <span class="settings-field-help" data-i18n="settings.federationHelp">
+            Peer base URLs for ingest and history pull. Saved on this node and applied to workers within a few seconds.
           </span>
         </fieldset>
         <fieldset class="settings-field settings-stations-field">

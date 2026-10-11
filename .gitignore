@@ -13,6 +13,8 @@ data/apartment_overrides.json
 data/apartment_overrides.tmp
 data/apartment_plans.json
 data/apartment_plans.tmp
+data/federation_peers.json
+data/federation_peers.tmp
 data/secrets/
 data/mail_inbox.json
 data/mail_inbox.tmp

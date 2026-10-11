@@ -111,8 +111,13 @@ disable_selected() {
 
 case "$ACTION" in
   install)
+    # Prefer the login user who invoked sudo. Nested `sudo make …` sets
+    # SUDO_USER=root — fall back to the project directory owner.
     RUN_USER="${SUDO_USER:-$USER}"
     if [[ "$RUN_USER" == "root" ]]; then
+      RUN_USER="$(stat -c '%U' "$ROOT" 2>/dev/null || true)"
+    fi
+    if [[ -z "$RUN_USER" || "$RUN_USER" == "root" ]]; then
       echo "Run with sudo from your login user, e.g. sudo ./scripts/install-systemd.sh install" >&2
       exit 1
     fi

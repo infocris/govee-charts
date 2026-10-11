@@ -31,6 +31,7 @@ from govee_charts.db import Database, is_db_locked
 from govee_charts.decode import Reading
 from govee_charts.doors import DoorHaPoller, DoorMqttListener, DoorsConfig, import_ha_door_history
 from govee_charts.federation import PeerPublisher
+from govee_charts.federation_store import DEFAULT_PEERS_PATH, resolve_peers
 from govee_charts.ha_th import HaThConfig, HaThPoller
 from govee_charts.map_chat_store import MapChatStore
 from govee_charts.presence import PresenceConfig, PresenceService
@@ -242,9 +243,8 @@ def load_config() -> dict[str, Any]:
     peers_raw = cfg.get("federation", {}).get("peers") or []
     if isinstance(peers_raw, str):
         peers_raw = [peers_raw]
-    cfg["federation"]["peers"] = [
-        str(p).strip().rstrip("/") for p in peers_raw if str(p).strip()
-    ]
+    # data/federation_peers.json (UI-managed) wins over config.toml when present.
+    cfg["federation"]["peers"] = resolve_peers(peers_raw)
     node_id = str(cfg["federation"].get("node_id") or "").strip()
     if not node_id:
         node_id = socket.gethostname() or "local"
@@ -373,6 +373,7 @@ async def _start_workers(
         fed["peers"],
         node_id=fed["node_id"],
         token=fed["token"] or None,
+        peers_path=DEFAULT_PEERS_PATH,
     )
     await publisher.start()
     stop_event = asyncio.Event()

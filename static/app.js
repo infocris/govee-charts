@@ -1693,6 +1693,18 @@
     }
   }
 
+  function normalizeFederationPeer(p) {
+    if (p && typeof p === "object" && p.url) {
+      return {
+        url: p.url,
+        browse_url: p.browse_url || null,
+        node_id: p.node_id || peerHostLabel(p.url),
+        online: Boolean(p.online),
+      };
+    }
+    return null;
+  }
+
   async function loadFederation() {
     const res = await fetch("/api/federation");
     if (!res.ok) throw new Error(`federation HTTP ${res.status}`);
@@ -1703,19 +1715,126 @@
     // Fall back to client probe only if peers are plain URL strings.
     const normalized = await Promise.all(
       peers.map(async (p) => {
-        if (p && typeof p === "object" && p.url) {
-          return {
-            url: p.url,
-            browse_url: p.browse_url || null,
-            node_id: p.node_id || peerHostLabel(p.url),
-            online: Boolean(p.online),
-          };
-        }
-        const url = String(p || "");
-        return probePeer(url);
+        const obj = normalizeFederationPeer(p);
+        if (obj) return obj;
+        return probePeer(String(p || ""));
       })
     );
     renderPeers(normalized);
+    return { data, peers: normalized };
+  }
+
+  function setFederationSettingsStatus(message, tone) {
+    const el = document.getElementById("settings-federation-status");
+    if (!el) return;
+    el.textContent = message || "";
+    if (tone) el.dataset.tone = tone;
+    else delete el.dataset.tone;
+  }
+
+  function renderFederationSettings(peers) {
+    const listEl = document.getElementById("settings-federation-peers");
+    const emptyEl = document.getElementById("settings-federation-empty");
+    const nodeEl = document.getElementById("settings-federation-node");
+    if (nodeEl) nodeEl.textContent = localNodeId || "—";
+    if (!listEl) return;
+    listEl.replaceChildren();
+    const rows = Array.isArray(peers) ? peers : [];
+    if (emptyEl) emptyEl.hidden = rows.length > 0;
+    for (const peer of rows) {
+      const row = document.createElement("div");
+      row.className = "settings-federation-row";
+      row.setAttribute("role", "listitem");
+
+      const main = document.createElement("div");
+      main.className = "settings-federation-row-main";
+
+      const title = document.createElement("strong");
+      const dot = document.createElement("span");
+      dot.className =
+        "settings-federation-dot" + (peer.online ? " online" : "");
+      dot.title = peer.online
+        ? t("settings.federationOnline")
+        : t("settings.federationOffline");
+      title.appendChild(dot);
+      title.appendChild(
+        document.createTextNode(peer.node_id || peerHostLabel(peer.url))
+      );
+
+      const link = document.createElement("a");
+      const href = peerLinkUrl(peer);
+      link.href = href;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = peer.url || href;
+      link.title = t("settings.federationOpen");
+
+      main.appendChild(title);
+      main.appendChild(link);
+
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "backfill-btn";
+      removeBtn.textContent = t("settings.federationRemove");
+      removeBtn.addEventListener("click", () => {
+        removeFederationPeer(peer.url).catch((err) => {
+          setFederationSettingsStatus(
+            t("settings.federationError", { error: err.message }),
+            "bad"
+          );
+        });
+      });
+
+      row.appendChild(main);
+      row.appendChild(removeBtn);
+      listEl.appendChild(row);
+    }
+  }
+
+  async function refreshFederationSettings() {
+    const { peers } = await loadFederation();
+    renderFederationSettings(peers);
+    return peers;
+  }
+
+  async function addFederationPeer(url) {
+    const trimmed = String(url || "").trim();
+    if (!/^https?:\/\//i.test(trimmed)) {
+      setFederationSettingsStatus(t("settings.federationInvalid"), "bad");
+      return;
+    }
+    const addBtn = document.getElementById("settings-federation-add-btn");
+    const input = document.getElementById("settings-federation-url");
+    if (addBtn) addBtn.disabled = true;
+    try {
+      const res = await fetch("/api/federation/peers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: trimmed }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || `HTTP ${res.status}`);
+      }
+      if (input) input.value = "";
+      setFederationSettingsStatus(t("settings.federationAdded"), "ok");
+      await refreshFederationSettings();
+    } finally {
+      if (addBtn) addBtn.disabled = false;
+    }
+  }
+
+  async function removeFederationPeer(url) {
+    const res = await fetch(
+      `/api/federation/peers?url=${encodeURIComponent(url)}`,
+      { method: "DELETE" }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.detail || `HTTP ${res.status}`);
+    }
+    setFederationSettingsStatus(t("settings.federationRemoved"), "ok");
+    await refreshFederationSettings();
   }
 
   function sourceHtml(source) {
@@ -5471,6 +5590,14 @@
       else btn.removeAttribute("aria-current");
     });
     syncDataMega(view);
+    if (view === "settings") {
+      refreshFederationSettings().catch((err) => {
+        setFederationSettingsStatus(
+          t("settings.federationError", { error: err.message }),
+          "bad"
+        );
+      });
+    }
     if (view === "compare" && !historyLoaded) {
       loadHistory().catch((err) => {
         statusEl.textContent = t("compare.error", { error: err.message });
@@ -8836,6 +8963,62 @@
       return mk(p1.x, p1.y, p2.x, p2.y);
     }
 
+    function appendNetworkEdgeLockIcon(parent, midX, midY, { tip = "locked" } = {}) {
+      const lockG = document.createElementNS(NS, "g");
+      lockG.setAttribute("class", "network-edge-lock is-locked");
+      lockG.setAttribute("pointer-events", "none");
+      const lockTip = document.createElementNS(NS, "title");
+      lockTip.textContent = tip;
+      lockG.appendChild(lockTip);
+      const bx = midX;
+      const by = midY - 2;
+      const shackle = document.createElementNS(NS, "path");
+      shackle.setAttribute(
+        "d",
+        `M ${bx - 4} ${by - 1} V ${by - 5.5} A 4 4 0 0 1 ${bx + 4} ${by - 5.5} V ${by - 1}`
+      );
+      shackle.setAttribute("class", "network-edge-lock-shackle");
+      lockG.appendChild(shackle);
+      const body = document.createElementNS(NS, "rect");
+      body.setAttribute("x", String(bx - 5.5));
+      body.setAttribute("y", String(by - 1));
+      body.setAttribute("width", "11");
+      body.setAttribute("height", "9");
+      body.setAttribute("rx", "1.6");
+      body.setAttribute("ry", "1.6");
+      body.setAttribute("class", "network-edge-lock-body");
+      lockG.appendChild(body);
+      const keyhole = document.createElementNS(NS, "circle");
+      keyhole.setAttribute("cx", String(bx));
+      keyhole.setAttribute("cy", String(by + 2.2));
+      keyhole.setAttribute("r", "1.15");
+      keyhole.setAttribute("class", "network-edge-lock-key");
+      lockG.appendChild(keyhole);
+      parent.appendChild(lockG);
+    }
+
+    function appendNetworkEdgeClosedIcon(parent, midX, midY, { tip = "closed" } = {}) {
+      const g = document.createElementNS(NS, "g");
+      g.setAttribute("class", "network-edge-closed");
+      g.setAttribute("pointer-events", "none");
+      const markTip = document.createElementNS(NS, "title");
+      markTip.textContent = tip;
+      g.appendChild(markTip);
+      const r = 5.5;
+      const mkLine = (x1, y1, x2, y2) => {
+        const line = document.createElementNS(NS, "line");
+        line.setAttribute("x1", String(x1));
+        line.setAttribute("y1", String(y1));
+        line.setAttribute("x2", String(x2));
+        line.setAttribute("y2", String(y2));
+        line.setAttribute("class", "network-edge-closed-line");
+        g.appendChild(line);
+      };
+      mkLine(midX - r, midY - r, midX + r, midY + r);
+      mkLine(midX + r, midY - r, midX - r, midY + r);
+      parent.appendChild(g);
+    }
+
     /** @type {Record<string, {x:number,y:number}>} */
     const roomXY = {};
     /** @type {Record<string, {x:number,y:number}>} */
@@ -8914,57 +9097,21 @@
       if (kind === "door" || kind === "wall_partial") {
         const midX = (a.x + b.x) / 2;
         const midY = (a.y + b.y) / 2;
-        // Closed openings use a padlock; sticky manual overrides keep amber cue.
-        if (opening === "closed") {
-          const lockG = document.createElementNS(NS, "g");
-          lockG.setAttribute(
-            "class",
-            `network-edge-lock${forced ? " is-locked" : ""}`
-          );
-          lockG.setAttribute("pointer-events", "none");
-          const lockTip = document.createElementNS(NS, "title");
-          let tip =
+        if (forced) {
+          appendNetworkEdgeLockIcon(gLabels, midX, midY, {
+            tip: `locked · ${opening}${src ? ` · ${src}` : ""}`,
+          });
+        } else if (opening === "closed") {
+          const tip =
             src === "temp_coupling" && edge.temp_delta_max_c != null
               ? `isolated ${edge.temp_delta_max_c}° (closed)`
               : "closed";
-          if (forced) tip += " · locked";
-          lockTip.textContent = tip;
-          lockG.appendChild(lockTip);
-          const bx = midX;
-          const by = midY - 2;
-          const shackle = document.createElementNS(NS, "path");
-          shackle.setAttribute(
-            "d",
-            `M ${bx - 4} ${by - 1} V ${by - 5.5} A 4 4 0 0 1 ${bx + 4} ${by - 5.5} V ${by - 1}`
-          );
-          shackle.setAttribute("class", "network-edge-lock-shackle");
-          lockG.appendChild(shackle);
-          const body = document.createElementNS(NS, "rect");
-          body.setAttribute("x", String(bx - 5.5));
-          body.setAttribute("y", String(by - 1));
-          body.setAttribute("width", "11");
-          body.setAttribute("height", "9");
-          body.setAttribute("rx", "1.6");
-          body.setAttribute("ry", "1.6");
-          body.setAttribute("class", "network-edge-lock-body");
-          lockG.appendChild(body);
-          const keyhole = document.createElementNS(NS, "circle");
-          keyhole.setAttribute("cx", String(bx));
-          keyhole.setAttribute("cy", String(by + 2.2));
-          keyhole.setAttribute("r", "1.15");
-          keyhole.setAttribute("class", "network-edge-lock-key");
-          lockG.appendChild(keyhole);
-          gLabels.appendChild(lockG);
+          appendNetworkEdgeClosedIcon(gLabels, midX, midY, { tip });
           if (src === "temp_coupling" && edge.temp_delta_max_c != null) {
             const lab = document.createElementNS(NS, "text");
             lab.setAttribute("x", String(midX + 11));
             lab.setAttribute("y", String(midY + 3));
-            lab.setAttribute(
-              "class",
-              `network-edge-label network-edge-lock-delta${
-                forced ? " is-locked" : ""
-              }`
-            );
+            lab.setAttribute("class", "network-edge-label network-edge-lock-delta");
             lab.setAttribute("text-anchor", "start");
             lab.textContent = `${edge.temp_delta_max_c}°`;
             gLabels.appendChild(lab);
@@ -9085,41 +9232,12 @@
         if (wForced || wState) {
           const midX = (xy.x + exy.x) / 2;
           const midY = (xy.y + exy.y) / 2;
-          if (wState === "closed") {
-            const lockG = document.createElementNS(NS, "g");
-            lockG.setAttribute(
-              "class",
-              `network-edge-lock${wForced ? " is-locked" : ""}`
-            );
-            lockG.setAttribute("pointer-events", "none");
-            const lockTip = document.createElementNS(NS, "title");
-            lockTip.textContent = wForced ? "closed · locked" : "closed";
-            lockG.appendChild(lockTip);
-            const bx = midX;
-            const by = midY - 2;
-            const shackle = document.createElementNS(NS, "path");
-            shackle.setAttribute(
-              "d",
-              `M ${bx - 4} ${by - 1} V ${by - 5.5} A 4 4 0 0 1 ${bx + 4} ${by - 5.5} V ${by - 1}`
-            );
-            shackle.setAttribute("class", "network-edge-lock-shackle");
-            lockG.appendChild(shackle);
-            const body = document.createElementNS(NS, "rect");
-            body.setAttribute("x", String(bx - 5.5));
-            body.setAttribute("y", String(by - 1));
-            body.setAttribute("width", "11");
-            body.setAttribute("height", "9");
-            body.setAttribute("rx", "1.6");
-            body.setAttribute("ry", "1.6");
-            body.setAttribute("class", "network-edge-lock-body");
-            lockG.appendChild(body);
-            const keyhole = document.createElementNS(NS, "circle");
-            keyhole.setAttribute("cx", String(bx));
-            keyhole.setAttribute("cy", String(by + 2.2));
-            keyhole.setAttribute("r", "1.15");
-            keyhole.setAttribute("class", "network-edge-lock-key");
-            lockG.appendChild(keyhole);
-            gLabels.appendChild(lockG);
+          if (wForced) {
+            appendNetworkEdgeLockIcon(gLabels, midX, midY, {
+              tip: wState ? `${wState} · locked` : "locked",
+            });
+          } else if (wState === "closed") {
+            appendNetworkEdgeClosedIcon(gLabels, midX, midY, { tip: "closed" });
           } else {
             const lab = document.createElementNS(NS, "text");
             lab.setAttribute("x", String(midX));
@@ -17664,6 +17782,37 @@
     });
   }
 
+  const settingsFederationAddBtn = document.getElementById(
+    "settings-federation-add-btn"
+  );
+  const settingsFederationUrlEl = document.getElementById(
+    "settings-federation-url"
+  );
+  if (settingsFederationAddBtn) {
+    settingsFederationAddBtn.addEventListener("click", () => {
+      addFederationPeer(
+        settingsFederationUrlEl ? settingsFederationUrlEl.value : ""
+      ).catch((err) => {
+        setFederationSettingsStatus(
+          t("settings.federationError", { error: err.message }),
+          "bad"
+        );
+      });
+    });
+  }
+  if (settingsFederationUrlEl) {
+    settingsFederationUrlEl.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter") return;
+      ev.preventDefault();
+      addFederationPeer(settingsFederationUrlEl.value).catch((err) => {
+        setFederationSettingsStatus(
+          t("settings.federationError", { error: err.message }),
+          "bad"
+        );
+      });
+    });
+  }
+
   if (settingsAdviceModelEl) {
     settingsAdviceModelEl.value = getAdviceModel();
     settingsAdviceModelEl.addEventListener("change", () => {
@@ -17702,6 +17851,7 @@
     edgeVoicesLang = "";
     populateTtsVoiceOptions();
     renderSettingsStations();
+    renderFederationSettings(federationPeers);
     updateOverview();
     updateDoorsTable();
     fillDeviceList();

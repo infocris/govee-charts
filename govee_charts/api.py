@@ -84,6 +84,12 @@ from govee_charts.db import (
 )
 from govee_charts.decode import Reading
 from govee_charts.federation import csv_source
+from govee_charts.federation_store import (
+    load_peers_file,
+    normalize_peer_url,
+    normalize_peers,
+    save_peers,
+)
 from govee_charts.energy import build_energy_summary, estimate_live_ac_watts
 from govee_charts.map_chat_store import MapChatStore
 from govee_charts.tts import (
@@ -716,6 +722,18 @@ class CompactionPatch(BaseModel):
     policy: str = Field(..., min_length=1, max_length=32)
 
     model_config = {"extra": "forbid"}
+
+
+class FederationPeerAdd(BaseModel):
+    url: str = Field(..., min_length=1)
+
+
+class FederationPeersReplace(BaseModel):
+    peers: list[str] = Field(default_factory=list)
+
+
+class FederationPeerProbe(BaseModel):
+    url: str = Field(..., min_length=1)
 
 
 class MailInboxSet(BaseModel):
@@ -2160,10 +2178,20 @@ def create_app(
             ),
         }
 
+    def _apply_federation_peers(peers: list[str]) -> list[str]:
+        """Persist peers and update in-memory state (workers reload from disk)."""
+        normalized = save_peers(peers)
+        app.state.peers = list(normalized)
+        return normalized
+
     @app.get("/api/federation")
     async def api_federation() -> dict[str, Any]:
         """Local node id + peers with server-side health probes."""
         ssl_port = app.state.ssl_port
+        # Prefer live file so Settings edits show without restarting UI.
+        file_peers = load_peers_file()
+        if file_peers is not None:
+            app.state.peers = list(file_peers)
         peers_cfg: list[str] = list(app.state.peers or [])
         probed = await asyncio.gather(
             *(probe_peer_health(url, ssl_port=ssl_port) for url in peers_cfg)
@@ -2171,8 +2199,77 @@ def create_app(
         return {
             "node_id": app.state.node_id,
             "ssl_port": ssl_port,
+            "token_configured": bool(app.state.federation_token),
+            "managed": True,
             "peers": list(probed),
         }
+
+    @app.put("/api/federation/peers")
+    async def api_federation_peers_replace(
+        body: FederationPeersReplace,
+    ) -> dict[str, Any]:
+        """Replace the full federation peer list."""
+        try:
+            peers = normalize_peers(body.peers)
+            # Validate strictly (normalize_peers silently drops bad URLs).
+            for raw in body.peers:
+                if str(raw or "").strip():
+                    normalize_peer_url(str(raw))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        peers = _apply_federation_peers(peers)
+        ssl_port = app.state.ssl_port
+        probed = await asyncio.gather(
+            *(probe_peer_health(url, ssl_port=ssl_port) for url in peers)
+        )
+        return {"ok": True, "peers": list(probed)}
+
+    @app.post("/api/federation/peers")
+    async def api_federation_peers_add(body: FederationPeerAdd) -> dict[str, Any]:
+        """Add one federation peer URL."""
+        try:
+            url = normalize_peer_url(body.url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        current = list(app.state.peers or [])
+        file_peers = load_peers_file()
+        if file_peers is not None:
+            current = list(file_peers)
+        if url in current:
+            raise HTTPException(status_code=409, detail="Peer already configured")
+        peers = _apply_federation_peers([*current, url])
+        probed = await probe_peer_health(url, ssl_port=app.state.ssl_port)
+        return {"ok": True, "added": probed, "peers": peers}
+
+    @app.delete("/api/federation/peers")
+    async def api_federation_peers_delete(
+        url: str = Query(..., min_length=1),
+    ) -> dict[str, Any]:
+        """Remove one federation peer URL."""
+        try:
+            target = normalize_peer_url(url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        current = list(app.state.peers or [])
+        file_peers = load_peers_file()
+        if file_peers is not None:
+            current = list(file_peers)
+        if target not in current:
+            raise HTTPException(status_code=404, detail="Peer not found")
+        peers = _apply_federation_peers([p for p in current if p != target])
+        return {"ok": True, "removed": target, "peers": peers}
+
+    @app.post("/api/federation/peers/probe")
+    async def api_federation_peers_probe(
+        body: FederationPeerProbe,
+    ) -> dict[str, Any]:
+        """Probe a peer URL without adding it."""
+        try:
+            url = normalize_peer_url(body.url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        probed = await probe_peer_health(url, ssl_port=app.state.ssl_port)
+        return {"ok": True, "peer": probed}
 
     @app.get("/api/devices")
     async def api_devices(

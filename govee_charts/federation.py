@@ -5,16 +5,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from govee_charts.decode import Reading
+from govee_charts.federation_store import load_peers_file, normalize_peers, peers_file_mtime
 
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 100
 QUEUE_MAXSIZE = 5000
+PEERS_RELOAD_INTERVAL_S = 5.0
 
 
 def gatt_source(node_id: str) -> str:
@@ -80,11 +83,16 @@ class PeerPublisher:
         node_id: str,
         token: str | None = None,
         timeout: float = 5.0,
+        peers_path: Path | str | None = None,
     ) -> None:
-        self.peers = [p.rstrip("/") for p in peers if p.strip()]
+        self.peers = normalize_peers(peers)
         self.node_id = node_id
         self.token = token or None
         self.timeout = timeout
+        self.peers_path = Path(peers_path) if peers_path else None
+        self._peers_mtime: float | None = (
+            peers_file_mtime(self.peers_path) if self.peers_path else None
+        )
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
         self._task: asyncio.Task[None] | None = None
         self._client: httpx.AsyncClient | None = None
@@ -94,9 +102,41 @@ class PeerPublisher:
     def enabled(self) -> bool:
         return bool(self.peers)
 
+    def set_peers(self, peers: list[str]) -> bool:
+        """Replace peer list in memory. Returns True when the list changed."""
+        normalized = normalize_peers(peers)
+        if normalized == self.peers:
+            return False
+        previous = list(self.peers)
+        self.peers = normalized
+        # Drop cache entries for removed peers.
+        keep = set(normalized)
+        for key in list(self._peer_cache):
+            if key not in keep:
+                self._peer_cache.pop(key, None)
+        logger.info(
+            "Federation peers updated (%d → %d): %s",
+            len(previous),
+            len(normalized),
+            ", ".join(normalized) or "(none)",
+        )
+        return True
+
+    def reload_peers_from_disk(self) -> bool:
+        """Reload peers from ``peers_path`` when the file mtime changes."""
+        if self.peers_path is None:
+            return False
+        mtime = peers_file_mtime(self.peers_path)
+        if mtime is None or mtime == self._peers_mtime:
+            return False
+        loaded = load_peers_file(self.peers_path)
+        if loaded is None:
+            return False
+        self._peers_mtime = mtime
+        return self.set_peers(loaded)
+
     async def start(self) -> None:
-        if not self.enabled:
-            return
+        # Always start the worker so peers added later via the UI are picked up.
         headers = {}
         if self.token:
             headers["X-Govee-Token"] = self.token
@@ -107,11 +147,17 @@ class PeerPublisher:
             verify=False,
         )
         self._task = asyncio.create_task(self._worker(), name="federation-publisher")
-        logger.info(
-            "Federation publisher → %s (node_id=%s)",
-            ", ".join(self.peers),
-            self.node_id,
-        )
+        if self.peers:
+            logger.info(
+                "Federation publisher → %s (node_id=%s)",
+                ", ".join(self.peers),
+                self.node_id,
+            )
+        else:
+            logger.info(
+                "Federation publisher idle (no peers, node_id=%s)",
+                self.node_id,
+            )
 
     async def stop(self) -> None:
         if self._task is not None:
@@ -344,16 +390,25 @@ class PeerPublisher:
     async def _worker(self) -> None:
         assert self._client is not None
         while True:
-            item = await self._queue.get()
+            self.reload_peers_from_disk()
+            try:
+                item = await asyncio.wait_for(
+                    self._queue.get(),
+                    timeout=PEERS_RELOAD_INTERVAL_S,
+                )
+            except asyncio.TimeoutError:
+                continue
             batch = [item]
             while len(batch) < BATCH_SIZE:
                 try:
                     batch.append(self._queue.get_nowait())
                 except asyncio.QueueEmpty:
                     break
+            if not self.peers:
+                continue
             body = {"node_id": self.node_id, "readings": batch}
             await asyncio.gather(
-                *(self._post(peer, body) for peer in self.peers),
+                *(self._post(peer, body) for peer in list(self.peers)),
                 return_exceptions=True,
             )
 
