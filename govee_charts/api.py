@@ -2279,11 +2279,25 @@ def create_app(
         probed = await probe_peer_health(url, ssl_port=app.state.ssl_port)
         return {"ok": True, "peer": probed}
 
-    @app.post("/api/federation/pull-names")
-    async def api_federation_pull_names(body: FederationPeerProbe) -> dict[str, Any]:
-        """Overwrite local sensor labels with the custom names of one peer."""
+    _PULL_SETTING_KEYS = ("zone", "height", "height_cm", "room")
+    _PULL_PLAN_KEYS = ("plan_wall", "plan_u", "plan_v")
+
+    def _peer_custom_name(item: dict[str, Any], address: str) -> str | None:
+        """Peer display name, unless it is a factory BLE name or bare address."""
+        label = str(item.get("label") or item.get("name") or "").strip()
+        if not label or label.upper() == address or _FACTORY_NAME_RE.fullmatch(label):
+            return None
+        return label
+
+    async def _pull_peer_meta(raw_url: str, *, settings: bool) -> dict[str, Any]:
+        """Overwrite local sensor metadata with one peer's values.
+
+        ``settings=False`` pulls names only; ``settings=True`` also pulls
+        zone / height / room and the room-plan position. Empty peer values
+        never clear local ones.
+        """
         try:
-            url = normalize_peer_url(body.url)
+            url = normalize_peer_url(raw_url)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2312,37 +2326,64 @@ def create_app(
             if not isinstance(item, dict):
                 continue
             address = str(item.get("address") or "").strip().upper()
-            # Skip factory BLE names (GVH5075_1C3E, MeterPlus-7527…) and bare
-            # addresses so they never replace a meaningful local name.
-            label = str(item.get("label") or item.get("name") or "").strip()
-            if (
-                not address
-                or not label
-                or label.upper() == address
-                or _FACTORY_NAME_RE.fullmatch(label)
-            ):
-                skipped += 1
-                continue
-            local = await db.get_device(address)
+            local = await db.get_device(address) if address else None
             if local is None:
                 skipped += 1
                 continue
-            before = device_display_name(local, app.state.labels)
-            if str(local.get("label") or "").strip() == label:
+
+            wanted: dict[str, Any] = {}
+            label = _peer_custom_name(item, address)
+            if label:
+                wanted["label"] = label
+            try:
+                if settings:
+                    for key in _PULL_SETTING_KEYS:
+                        if item.get(key) is not None:
+                            wanted.update(normalize_patch(**{key: item[key]}))
+                    if item.get("plan_wall") and item.get("plan_u") is not None:
+                        wanted.update(
+                            normalize_plan_patch(
+                                plan_wall=item["plan_wall"],
+                                plan_u=item["plan_u"],
+                                plan_v=item.get("plan_v") or 0.0,
+                            )
+                        )
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+
+            changes = {k: v for k, v in wanted.items() if local.get(k) != v}
+            if not wanted:
+                skipped += 1
+                continue
+            if not changes:
                 unchanged += 1
                 continue
-            try:
-                patch = normalize_patch(label=label)
-            except ValueError:
+
+            meta = {k: v for k, v in changes.items() if k not in _PULL_PLAN_KEYS}
+            if await db.update_device_categories(address, **meta) is None:
                 skipped += 1
                 continue
-            if await db.update_device_categories(address, **patch) is None:
-                skipped += 1
-                continue
-            updated.append({"address": address, "before": before, "after": label})
+            plan = {k: v for k, v in changes.items() if k in _PULL_PLAN_KEYS}
+            if plan:
+                placement = await db.get_current_placement(address)
+                if placement is None:
+                    skipped += 1
+                    continue
+                await db.update_placement(placement["id"], **plan)
+            updated.append(
+                {
+                    "address": address,
+                    "name": device_display_name(
+                        {**local, **meta}, app.state.labels
+                    ),
+                    "fields": sorted(changes),
+                }
+            )
 
         logger.info(
-            "Pulled sensor names from %s: %d updated, %d unchanged, %d skipped",
+            "Pulled sensor %s from %s: %d updated, %d unchanged, %d skipped",
+            "settings" if settings else "names",
             url,
             len(updated),
             unchanged,
@@ -2355,6 +2396,18 @@ def create_app(
             "unchanged": unchanged,
             "skipped": skipped,
         }
+
+    @app.post("/api/federation/pull-names")
+    async def api_federation_pull_names(body: FederationPeerProbe) -> dict[str, Any]:
+        """Overwrite local sensor labels with the custom names of one peer."""
+        return await _pull_peer_meta(body.url, settings=False)
+
+    @app.post("/api/federation/pull-settings")
+    async def api_federation_pull_settings(
+        body: FederationPeerProbe,
+    ) -> dict[str, Any]:
+        """Overwrite local sensor names, categories and plan positions from one peer."""
+        return await _pull_peer_meta(body.url, settings=True)
 
     @app.get("/api/devices")
     async def api_devices(

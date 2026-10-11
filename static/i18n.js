@@ -163,6 +163,14 @@
       "settings.federationPullNamesBusy": "Pulling names…",
       "settings.federationPullNamesDone":
         "Names pulled: {updated} updated, {unchanged} unchanged, {skipped} skipped.",
+      "settings.federationPullSettings": "Pull settings",
+      "settings.federationPullSettingsTitle":
+        "Overwrite local sensor names, zone, height, room and plan position with this peer's values",
+      "settings.federationPullSettingsConfirm":
+        "Overwrite local sensor settings (name, zone, height, room, plan position) with the values from {peer}?",
+      "settings.federationPullSettingsBusy": "Pulling sensor settings…",
+      "settings.federationPullSettingsDone":
+        "Settings pulled: {updated} updated, {unchanged} unchanged, {skipped} skipped.",
       "settings.federationOpen": "Open peer UI",
       "settings.federationOnline": "Online",
       "settings.federationOffline": "Offline",
@@ -772,6 +780,14 @@
       "settings.federationPullNamesBusy": "Récupération des noms…",
       "settings.federationPullNamesDone":
         "Noms récupérés : {updated} mis à jour, {unchanged} inchangés, {skipped} ignorés.",
+      "settings.federationPullSettings": "Récupérer les paramètres",
+      "settings.federationPullSettingsTitle":
+        "Écraser les noms, zone, hauteur, pièce et position sur le plan des capteurs locaux par ceux de ce pair",
+      "settings.federationPullSettingsConfirm":
+        "Écraser les paramètres locaux des capteurs (nom, zone, hauteur, pièce, position sur le plan) par ceux de {peer} ?",
+      "settings.federationPullSettingsBusy": "Récupération des paramètres…",
+      "settings.federationPullSettingsDone":
+        "Paramètres récupérés : {updated} mis à jour, {unchanged} inchangés, {skipped} ignorés.",
       "settings.federationOpen": "Ouvrir l’UI du pair",
       "settings.federationOnline": "En ligne",
       "settings.federationOffline": "Hors ligne",

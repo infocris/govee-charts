@@ -1785,32 +1785,40 @@
         });
       });
 
-      const pullBtn = document.createElement("button");
-      pullBtn.type = "button";
-      pullBtn.className = "backfill-btn";
-      pullBtn.textContent = t("settings.federationPullNames");
-      pullBtn.title = t("settings.federationPullNamesTitle");
-      pullBtn.addEventListener("click", () => {
-        const name = peer.node_id || peerHostLabel(peer.url);
-        if (!window.confirm(t("settings.federationPullNamesConfirm", { peer: name }))) {
-          return;
-        }
-        pullBtn.disabled = true;
-        pullFederationNames(peer.url)
-          .catch((err) => {
-            setFederationSettingsStatus(
-              t("settings.federationError", { error: err.message }),
-              "bad"
-            );
-          })
-          .finally(() => {
-            pullBtn.disabled = false;
-          });
-      });
+      const peerName = peer.node_id || peerHostLabel(peer.url);
+      const makePullBtn = (kind) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "backfill-btn";
+        btn.textContent = t(`settings.federationPull${kind}`);
+        btn.title = t(`settings.federationPull${kind}Title`);
+        btn.addEventListener("click", () => {
+          if (
+            !window.confirm(
+              t(`settings.federationPull${kind}Confirm`, { peer: peerName })
+            )
+          ) {
+            return;
+          }
+          btn.disabled = true;
+          pullFederationMeta(peer.url, kind)
+            .catch((err) => {
+              setFederationSettingsStatus(
+                t("settings.federationError", { error: err.message }),
+                "bad"
+              );
+            })
+            .finally(() => {
+              btn.disabled = false;
+            });
+        });
+        return btn;
+      };
 
       const actions = document.createElement("div");
       actions.className = "settings-federation-row-actions";
-      actions.appendChild(pullBtn);
+      actions.appendChild(makePullBtn("Names"));
+      actions.appendChild(makePullBtn("Settings"));
       actions.appendChild(removeBtn);
 
       row.appendChild(main);
@@ -1852,9 +1860,13 @@
     }
   }
 
-  async function pullFederationNames(url) {
-    setFederationSettingsStatus(t("settings.federationPullNamesBusy"), "");
-    const res = await fetch("/api/federation/pull-names", {
+  async function pullFederationMeta(url, kind) {
+    setFederationSettingsStatus(t(`settings.federationPull${kind}Busy`), "");
+    const endpoint =
+      kind === "Settings"
+        ? "/api/federation/pull-settings"
+        : "/api/federation/pull-names";
+    const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
@@ -1865,7 +1877,7 @@
     }
     const updated = Array.isArray(data.updated) ? data.updated : [];
     setFederationSettingsStatus(
-      t("settings.federationPullNamesDone", {
+      t(`settings.federationPull${kind}Done`, {
         updated: updated.length,
         unchanged: data.unchanged || 0,
         skipped: data.skipped || 0,
