@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -745,6 +746,13 @@ class MailInboxSet(BaseModel):
 
 
 from govee_charts.backfill import BACKFILL_MODELS as _BACKFILL_MODELS
+
+
+# Default advertisement names (Govee local name, SwitchBot fallback name).
+_FACTORY_NAME_RE = re.compile(
+    r"(?:GVH5075|Govee_H5179|GVH5177|GV5179)_[0-9A-Fa-f]{4}"
+    r"|(?:MeterPlus|Meter|MeterPro|MeterProCO2|MeterOutdoor|SwitchBot)-[0-9A-Fa-f]{4}"
+)
 
 
 def device_display_name(
@@ -2270,6 +2278,83 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         probed = await probe_peer_health(url, ssl_port=app.state.ssl_port)
         return {"ok": True, "peer": probed}
+
+    @app.post("/api/federation/pull-names")
+    async def api_federation_pull_names(body: FederationPeerProbe) -> dict[str, Any]:
+        """Overwrite local sensor labels with the custom names of one peer."""
+        try:
+            url = normalize_peer_url(body.url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        headers: dict[str, str] = {}
+        token = app.state.federation_token
+        if token:
+            headers["X-Govee-Token"] = token
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0, verify=False, headers=headers
+            ) as client:
+                res = await client.get(f"{url}/api/devices")
+            res.raise_for_status()
+            remote = res.json()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Peer {url} unreachable: {exc}"
+            ) from exc
+        if not isinstance(remote, list):
+            raise HTTPException(status_code=502, detail="Unexpected peer response")
+
+        updated: list[dict[str, Any]] = []
+        unchanged = 0
+        skipped = 0
+        for item in remote:
+            if not isinstance(item, dict):
+                continue
+            address = str(item.get("address") or "").strip().upper()
+            # Skip factory BLE names (GVH5075_1C3E, MeterPlus-7527…) and bare
+            # addresses so they never replace a meaningful local name.
+            label = str(item.get("label") or item.get("name") or "").strip()
+            if (
+                not address
+                or not label
+                or label.upper() == address
+                or _FACTORY_NAME_RE.fullmatch(label)
+            ):
+                skipped += 1
+                continue
+            local = await db.get_device(address)
+            if local is None:
+                skipped += 1
+                continue
+            before = device_display_name(local, app.state.labels)
+            if str(local.get("label") or "").strip() == label:
+                unchanged += 1
+                continue
+            try:
+                patch = normalize_patch(label=label)
+            except ValueError:
+                skipped += 1
+                continue
+            if await db.update_device_categories(address, **patch) is None:
+                skipped += 1
+                continue
+            updated.append({"address": address, "before": before, "after": label})
+
+        logger.info(
+            "Pulled sensor names from %s: %d updated, %d unchanged, %d skipped",
+            url,
+            len(updated),
+            unchanged,
+            skipped,
+        )
+        return {
+            "ok": True,
+            "peer": url,
+            "updated": updated,
+            "unchanged": unchanged,
+            "skipped": skipped,
+        }
 
     @app.get("/api/devices")
     async def api_devices(

@@ -625,6 +625,12 @@ body.sticky-views-enabled .views {
   background: color-mix(in srgb, var(--bg) 45%, transparent);
 }
 
+.settings-federation-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
 .settings-federation-row-main {
   display: flex;
   flex-direction: column;

@@ -155,6 +155,14 @@
       "settings.federationUrlLabel": "Peer base URL",
       "settings.federationAdd": "Add",
       "settings.federationRemove": "Remove",
+      "settings.federationPullNames": "Pull names",
+      "settings.federationPullNamesTitle":
+        "Overwrite local sensor names with this peer's names",
+      "settings.federationPullNamesConfirm":
+        "Overwrite local sensor names with the names from {peer}?",
+      "settings.federationPullNamesBusy": "Pulling names…",
+      "settings.federationPullNamesDone":
+        "Names pulled: {updated} updated, {unchanged} unchanged, {skipped} skipped.",
       "settings.federationOpen": "Open peer UI",
       "settings.federationOnline": "Online",
       "settings.federationOffline": "Offline",
@@ -756,6 +764,14 @@
       "settings.federationUrlLabel": "URL de base du pair",
       "settings.federationAdd": "Ajouter",
       "settings.federationRemove": "Retirer",
+      "settings.federationPullNames": "Récupérer les noms",
+      "settings.federationPullNamesTitle":
+        "Écraser les noms locaux des capteurs par ceux de ce pair",
+      "settings.federationPullNamesConfirm":
+        "Écraser les noms locaux des capteurs par ceux de {peer} ?",
+      "settings.federationPullNamesBusy": "Récupération des noms…",
+      "settings.federationPullNamesDone":
+        "Noms récupérés : {updated} mis à jour, {unchanged} inchangés, {skipped} ignorés.",
       "settings.federationOpen": "Ouvrir l’UI du pair",
       "settings.federationOnline": "En ligne",
       "settings.federationOffline": "Hors ligne",

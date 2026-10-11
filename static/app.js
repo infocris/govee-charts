@@ -1785,8 +1785,36 @@
         });
       });
 
+      const pullBtn = document.createElement("button");
+      pullBtn.type = "button";
+      pullBtn.className = "backfill-btn";
+      pullBtn.textContent = t("settings.federationPullNames");
+      pullBtn.title = t("settings.federationPullNamesTitle");
+      pullBtn.addEventListener("click", () => {
+        const name = peer.node_id || peerHostLabel(peer.url);
+        if (!window.confirm(t("settings.federationPullNamesConfirm", { peer: name }))) {
+          return;
+        }
+        pullBtn.disabled = true;
+        pullFederationNames(peer.url)
+          .catch((err) => {
+            setFederationSettingsStatus(
+              t("settings.federationError", { error: err.message }),
+              "bad"
+            );
+          })
+          .finally(() => {
+            pullBtn.disabled = false;
+          });
+      });
+
+      const actions = document.createElement("div");
+      actions.className = "settings-federation-row-actions";
+      actions.appendChild(pullBtn);
+      actions.appendChild(removeBtn);
+
       row.appendChild(main);
-      row.appendChild(removeBtn);
+      row.appendChild(actions);
       listEl.appendChild(row);
     }
   }
@@ -1821,6 +1849,31 @@
       await refreshFederationSettings();
     } finally {
       if (addBtn) addBtn.disabled = false;
+    }
+  }
+
+  async function pullFederationNames(url) {
+    setFederationSettingsStatus(t("settings.federationPullNamesBusy"), "");
+    const res = await fetch("/api/federation/pull-names", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.detail || `HTTP ${res.status}`);
+    }
+    const updated = Array.isArray(data.updated) ? data.updated : [];
+    setFederationSettingsStatus(
+      t("settings.federationPullNamesDone", {
+        updated: updated.length,
+        unchanged: data.unchanged || 0,
+        skipped: data.skipped || 0,
+      }),
+      "ok"
+    );
+    if (updated.length) {
+      await loadDevices().catch(() => {});
     }
   }
 
