@@ -220,7 +220,7 @@
 
       "overview.title": "All sensors",
       "overview.hint":
-        "Edit name / zone / height / height cm / room inline — use Charts to open compare graphs",
+        "Use Edit on a card to change name / zone / height / height cm / room — Charts opens compare graphs",
       "overview.filter": "Filter",
       "overview.filterPlaceholder": "Name or MAC…",
       "overview.filterModel": "Filter by model",
@@ -289,6 +289,11 @@
       "overview.allModels": "All models",
       "overview.all": "All",
       "overview.charts": "Charts",
+      "overview.edit": "Edit",
+      "overview.editDone": "Done",
+      "overview.editAria": "Edit {name}",
+      "overview.editDoneAria": "Finish editing {name}",
+      "overview.unplaced": "Not placed",
       "overview.chartsTitle": "Open compare charts for this sensor",
       "overview.chartsAria": "Open compare charts for {name}",
       "overview.pushMeta": "Push meta",
@@ -871,7 +876,7 @@
 
       "overview.title": "Tous les capteurs",
       "overview.hint":
-        "Modifier nom / zone / hauteur / hauteur cm / pièce en ligne — Charts ouvre les graphiques",
+        "« Modifier » sur une carte pour changer nom / zone / hauteur / hauteur cm / pièce — Graphiques ouvre les courbes",
       "overview.filter": "Filtrer",
       "overview.filterPlaceholder": "Nom ou MAC…",
       "overview.filterModel": "Filtrer par modèle",
@@ -941,6 +946,11 @@
       "overview.allModels": "Tous les modèles",
       "overview.all": "Tous",
       "overview.charts": "Graphiques",
+      "overview.edit": "Modifier",
+      "overview.editDone": "Terminé",
+      "overview.editAria": "Modifier {name}",
+      "overview.editDoneAria": "Terminer la modification de {name}",
+      "overview.unplaced": "Non placé",
       "overview.chartsTitle": "Ouvrir les graphiques de comparaison",
       "overview.chartsAria": "Ouvrir les graphiques pour {name}",
       "overview.pushMeta": "Pousser méta",

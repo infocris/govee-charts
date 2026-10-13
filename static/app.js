@@ -31,6 +31,8 @@
     overviewShowArchivedEl.checked = overviewShowArchived;
   }
   let overviewRenderKey = "";
+  // Cards in edit mode (full controls, whole grid row); others stay compact.
+  const overviewEditing = new Set();
   const overviewDeviceFilterEl = document.getElementById("overview-device-filter");
   const OVERVIEW_TEXT_FILTER_KEY = "govee-charts.overviewTextFilter";
   let overviewTextFilter = localStorage.getItem(OVERVIEW_TEXT_FILTER_KEY) || "";
@@ -14352,6 +14354,89 @@
     return wrap;
   }
 
+  function makeOverviewEditToggle(device, editing) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "restart-btn overview-charts-btn overview-edit-btn";
+    btn.textContent = editing ? t("overview.editDone") : t("overview.edit");
+    btn.setAttribute("aria-pressed", editing ? "true" : "false");
+    btn.setAttribute(
+      "aria-label",
+      t(editing ? "overview.editDoneAria" : "overview.editAria", {
+        name: deviceLabel(device) || device.address,
+      })
+    );
+    btn.addEventListener("click", () => {
+      if (overviewEditing.has(device.address)) {
+        overviewEditing.delete(device.address);
+      } else {
+        overviewEditing.add(device.address);
+      }
+      overviewRenderKey = "";
+      updateOverview();
+      const nextBtn = overviewBody.querySelector(
+        `.overview-edit-btn[data-address="${CSS.escape(device.address)}"]`
+      );
+      if (nextBtn) nextBtn.focus();
+    });
+    btn.dataset.address = device.address;
+    return btn;
+  }
+
+  function overviewCompactPlace(device) {
+    // Read-only summary of zone / height / room for the compact card.
+    const labelOf = (options, id) => {
+      const hit = (options || []).find((o) => o.id === id);
+      return hit ? hit.label : id;
+    };
+    const parts = [];
+    if (device.room) parts.push(labelOf(taxonomyData.rooms, device.room));
+    if (device.zone) parts.push(labelOf(taxonomyData.zones, device.zone));
+    if (device.height_cm != null && Number.isFinite(Number(device.height_cm))) {
+      parts.push(`${Math.round(Number(device.height_cm))} cm`);
+    } else if (device.height) {
+      parts.push(labelOf(taxonomyData.heights, device.height));
+    }
+    const el = document.createElement("div");
+    el.className = "overview-card-chips";
+    for (const text of parts) {
+      const chip = document.createElement("span");
+      chip.className = "overview-chip";
+      chip.textContent = text;
+      el.appendChild(chip);
+    }
+    if (!parts.length) {
+      const chip = document.createElement("span");
+      chip.className = "overview-chip is-empty";
+      chip.textContent = t("overview.unplaced");
+      el.appendChild(chip);
+    }
+    return el;
+  }
+
+  function overviewCardFoot(device, source) {
+    const foot = document.createElement("div");
+    foot.className = "overview-card-foot";
+    const footLeft = document.createElement("div");
+    footLeft.className = "overview-card-foot-left rssi-cell";
+    footLeft.innerHTML =
+      `<span>${escapeHtml(
+        t("overview.battery", {
+          value:
+            device.battery != null ? `${Number(device.battery)} %` : "—",
+        })
+      )}</span>` + `<span>${rssiHtml(device.rssi)}</span>`;
+    const footRight = document.createElement("div");
+    footRight.className = "overview-card-foot-right";
+    footRight.innerHTML =
+      `<span class="overview-source">${sourceHtml(source)}</span>` +
+      `<span class="overview-meta">${escapeHtml(
+        fmtTime(device.last_reading_ts || device.last_seen)
+      )}</span>`;
+    foot.append(footLeft, footRight);
+    return foot;
+  }
+
   function updateOverview() {
     const visible = overviewVisibleDevices();
     const nextKey = overviewDeviceSnapshot(visible);
@@ -14385,8 +14470,10 @@
 
     const ranked = sortedDevices(visible);
     for (const device of ranked) {
+      const editing = overviewEditing.has(device.address);
       const card = document.createElement("article");
       card.className = "overview-card";
+      card.classList.add(editing ? "is-editing" : "is-compact");
       if (device.archived_at) card.classList.add("is-archived");
       card.style.setProperty("--device-color", colorFor(device.address));
       const source = device.last_source || "—";
@@ -14401,7 +14488,15 @@
       const swatch = document.createElement("span");
       swatch.className = "device-swatch";
       swatch.setAttribute("aria-hidden", "true");
-      nameRow.append(swatch, labeledDeviceNameInput(device));
+      if (editing) {
+        nameRow.append(swatch, labeledDeviceNameInput(device));
+      } else {
+        const nameText = document.createElement("span");
+        nameText.className = "overview-name-text";
+        nameText.textContent = deviceLabel(device) || device.address;
+        nameText.title = nameText.textContent;
+        nameRow.append(swatch, nameText);
+      }
       if (device.archived_at) {
         const badge = document.createElement("span");
         badge.className = "overview-card-badge";
@@ -14448,9 +14543,18 @@
           statusEl.textContent = t("compare.error", { error: err.message });
         });
       });
-      readings.appendChild(chartsBtn);
+      const cardButtons = document.createElement("span");
+      cardButtons.className = "overview-card-buttons";
+      cardButtons.append(chartsBtn, makeOverviewEditToggle(device, editing));
+      readings.appendChild(cardButtons);
 
       top.append(identity, readings);
+
+      if (!editing) {
+        card.append(top, overviewCompactPlace(device), overviewCardFoot(device, source));
+        overviewBody.appendChild(card);
+        continue;
+      }
 
       const place = document.createElement("div");
       place.className = "overview-card-place";
@@ -14494,27 +14598,7 @@
       place.appendChild(actions);
       place.appendChild(makePlacementsPanel(device));
 
-      const foot = document.createElement("div");
-      foot.className = "overview-card-foot";
-      const footLeft = document.createElement("div");
-      footLeft.className = "overview-card-foot-left rssi-cell";
-      footLeft.innerHTML =
-        `<span>${escapeHtml(
-          t("overview.battery", {
-            value:
-              device.battery != null ? `${Number(device.battery)} %` : "—",
-          })
-        )}</span>` + `<span>${rssiHtml(device.rssi)}</span>`;
-      const footRight = document.createElement("div");
-      footRight.className = "overview-card-foot-right";
-      footRight.innerHTML =
-        `<span class="overview-source">${sourceHtml(source)}</span>` +
-        `<span class="overview-meta">${escapeHtml(
-          fmtTime(device.last_reading_ts || device.last_seen)
-        )}</span>`;
-      foot.append(footLeft, footRight);
-
-      card.append(top, place, foot);
+      card.append(top, place, overviewCardFoot(device, source));
       overviewBody.appendChild(card);
     }
 
