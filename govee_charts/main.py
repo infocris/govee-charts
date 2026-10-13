@@ -36,6 +36,7 @@ from govee_charts.federation import PeerPublisher
 from govee_charts.federation_store import MODE_COLLECTOR, normalize_mode, normalize_peers
 from govee_charts.ha_th import HaThConfig, HaThPoller
 from govee_charts.map_chat_store import MapChatStore
+from govee_charts.memtrim import limit_malloc_arenas, start_malloc_trim
 from govee_charts.presence import PresenceConfig, PresenceService
 from govee_charts.hvac import HvacConfig, HvacHaPoller, import_ha_hvac_history
 from govee_charts.scanner import GoveeScanner, discover_once
@@ -1159,6 +1160,9 @@ async def amain() -> None:
 
 
 def main() -> None:
+    # Before any thread exists: cap glibc arenas, then trim freed heap regularly.
+    limit_malloc_arenas()
+    start_malloc_trim()
     try:
         asyncio.run(amain())
     except KeyboardInterrupt:
