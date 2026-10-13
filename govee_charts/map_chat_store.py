@@ -9,6 +9,8 @@ from typing import Any
 
 import aiosqlite
 
+from govee_charts.db import ensure_aiosqlite_cursor_thread_safety
+
 
 class MapChatStore:
     """Persists chat turns outside readings.db (sensor snapshot + advice banner)."""
@@ -24,6 +26,7 @@ class MapChatStore:
         return self._db
 
     async def connect(self) -> None:
+        ensure_aiosqlite_cursor_thread_safety()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(self.path, isolation_level=None)
         self._db.row_factory = aiosqlite.Row

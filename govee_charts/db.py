@@ -38,12 +38,59 @@ def is_db_locked(exc: BaseException) -> bool:
     return "locked" in msg or "busy" in msg
 
 
+def ensure_aiosqlite_cursor_thread_safety() -> None:
+    """Finalize leaked aiosqlite cursors on the connection worker thread.
+
+    Call sites often ``await db.execute(...)`` without ``async with`` / ``close()``.
+    When CPython GC collects the wrapper, the nested ``sqlite3.Cursor.__del__``
+    would call ``sqlite3_reset`` on a random thread while the aiosqlite worker
+    may be mid-``sqlite3_step``. On Apple's libsqlite3 that races as SIGSEGV in
+    ``btreeReleaseAllCursorPages`` / hangs in ``purgeableCacheShrink``.
+    """
+    if getattr(aiosqlite.Cursor, "_govee_threadsafe_del", False):
+        return
+
+    def __del__(self) -> None:  # noqa: N807
+        cur = getattr(self, "_cursor", None)
+        conn = getattr(self, "_conn", None)
+        if cur is None:
+            return
+        # Keep ``cur`` alive in the closure until the worker closes it so the
+        # sqlite3 finalizer does not run on this (often main) thread.
+        try:
+            self._cursor = None
+        except Exception:
+            pass
+
+        def _close() -> None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+
+        try:
+            if (
+                conn is not None
+                and getattr(conn, "_running", False)
+                and getattr(conn, "_connection", None) is not None
+            ):
+                conn._tx.put_nowait((None, _close))
+                return
+        except Exception:
+            pass
+        _close()
+
+    aiosqlite.Cursor.__del__ = __del__  # type: ignore[method-assign, assignment]
+    aiosqlite.Cursor._govee_threadsafe_del = True  # type: ignore[attr-defined]
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._db: aiosqlite.Connection | None = None
 
     async def connect(self) -> None:
+        ensure_aiosqlite_cursor_thread_safety()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Autocommit: avoid long-lived read transactions that freeze the WAL
         # snapshot for this connection and block checkpoints for peers.
