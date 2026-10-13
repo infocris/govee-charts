@@ -6,13 +6,21 @@ from pathlib import Path
 
 import pytest
 
+from govee_charts.federation import PeerPublisher
 from govee_charts.federation_store import (
+    MODE_COLLECTOR,
+    MODE_FULL,
     format_peers_toml,
+    load_federation_settings,
     load_peers_file,
+    normalize_mode,
     normalize_peer_url,
     normalize_peers,
+    resolve_federation_settings,
     resolve_peers,
+    save_mode,
     save_peers,
+    sync_mode_to_config_toml,
     sync_peers_to_config_toml,
 )
 
@@ -112,3 +120,63 @@ def test_sync_peers_to_config_toml(tmp_path: Path):
 
 def test_format_peers_toml_empty():
     assert format_peers_toml([]) == "peers = []"
+
+
+def test_normalize_mode():
+    assert normalize_mode("full") == MODE_FULL
+    assert normalize_mode("collector") == MODE_COLLECTOR
+    assert normalize_mode("BLE") == MODE_COLLECTOR
+    assert normalize_mode("") == MODE_FULL
+
+
+def test_save_mode_preserves_peers(tmp_path: Path):
+    path = tmp_path / "federation_peers.json"
+    save_peers(["https://a.example:8082"], peers_path=path, config_path=tmp_path / "x.toml")
+    assert save_mode("collector", peers_path=path, config_path=tmp_path / "x.toml") == (
+        MODE_COLLECTOR
+    )
+    settings = load_federation_settings(path)
+    assert settings == {
+        "peers": ["https://a.example:8082"],
+        "mode": MODE_COLLECTOR,
+    }
+
+
+def test_resolve_federation_settings_mode_from_config(tmp_path: Path):
+    path = tmp_path / "federation_peers.json"
+    out = resolve_federation_settings(
+        [],
+        config_mode="collector",
+        peers_path=path,
+        seed_file=True,
+    )
+    assert out["mode"] == MODE_COLLECTOR
+    assert load_federation_settings(path)["mode"] == MODE_COLLECTOR
+
+
+def test_sync_mode_to_config_toml_inserts(tmp_path: Path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[federation]\n"
+        'node_id = "local"\n'
+        "peers = []\n",
+        encoding="utf-8",
+    )
+    assert sync_mode_to_config_toml("collector", cfg)
+    text = cfg.read_text(encoding="utf-8")
+    assert 'mode = "collector"' in text
+    assert 'node_id = "local"' in text
+
+
+def test_peer_publisher_collector_disables_outbound():
+    pub = PeerPublisher(
+        ["https://a.example:8082"],
+        node_id="edge",
+        mode="collector",
+    )
+    assert pub.is_collector
+    assert not pub.enabled
+    pub.set_mode("full")
+    assert pub.enabled
+    pub.set_mode("collector")
+    assert not pub.enabled

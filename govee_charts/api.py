@@ -87,9 +87,14 @@ from govee_charts.db import (
 from govee_charts.decode import Reading
 from govee_charts.federation import csv_source
 from govee_charts.federation_store import (
+    MODE_COLLECTOR,
+    MODE_FULL,
+    load_federation_settings,
     load_peers_file,
+    normalize_mode,
     normalize_peer_url,
     normalize_peers,
+    save_mode,
     save_peers,
 )
 from govee_charts.energy import build_energy_summary, estimate_live_ac_watts
@@ -518,6 +523,19 @@ def run_git_pull() -> dict[str, Any]:
     }
 
 
+def _unprobed_peer(peer: str, *, ssl_port: int | None) -> dict[str, Any]:
+    """Peer row without a network probe (collector mode)."""
+    peer = peer.rstrip("/")
+    label = urlparse(peer).hostname or peer
+    return {
+        "url": peer,
+        "browse_url": peer_browse_url(peer, ssl_port),
+        "node_id": label,
+        "online": None,
+        "mode": None,
+    }
+
+
 async def probe_peer_health(peer: str, *, ssl_port: int | None) -> dict[str, Any]:
     """Server-side /api/health probe (avoids browser mixed-content blocks)."""
     peer = peer.rstrip("/")
@@ -538,14 +556,20 @@ async def probe_peer_health(peer: str, *, ssl_port: int | None) -> dict[str, Any
                     "browse_url": browse,
                     "node_id": label,
                     "online": False,
+                    "mode": None,
                 }
             data = res.json() if res.content else {}
             node_id = str((data or {}).get("node_id") or label).strip() or label
+            mode = normalize_mode(
+                (data or {}).get("federation_mode")
+                or (data or {}).get("mode")
+            )
             return {
                 "url": peer,
                 "browse_url": browse,
                 "node_id": node_id,
                 "online": True,
+                "mode": mode,
             }
     except Exception:
         return {
@@ -553,6 +577,7 @@ async def probe_peer_health(peer: str, *, ssl_port: int | None) -> dict[str, Any
             "browse_url": browse,
             "node_id": label,
             "online": False,
+            "mode": None,
         }
 
 
@@ -738,6 +763,10 @@ class FederationPeerProbe(BaseModel):
     url: str = Field(..., min_length=1)
 
 
+class FederationModeBody(BaseModel):
+    mode: str = Field(..., min_length=1)
+
+
 class MailInboxSet(BaseModel):
     """Create a new disposable inbox, or register an existing address."""
 
@@ -912,6 +941,7 @@ def create_app(
     federation_token: str | None = None,
     node_id: str = "local",
     peers: list[str] | None = None,
+    federation_mode: str = MODE_FULL,
     suffix_map: dict[str, str] | None = None,
     weather: WeatherService | None = None,
     on_restart_ui: Callable[[], None] | None = None,
@@ -936,6 +966,7 @@ def create_app(
     app.state.federation_token = federation_token or None
     app.state.node_id = node_id
     app.state.peers = [p.rstrip("/") for p in (peers or []) if p.strip()]
+    app.state.federation_mode = normalize_mode(federation_mode)
     app.state.weather = weather
     app.state.on_restart_ui = on_restart_ui
     app.state.on_restart_workers = on_restart_workers
@@ -1081,6 +1112,7 @@ def create_app(
         return {
             "ok": True,
             "node_id": app.state.node_id,
+            "federation_mode": normalize_mode(app.state.federation_mode),
             "systemd": bool(os.environ.get("INVOCATION_ID")),
             "asset_version": static_asset_version(),
             "workers_last_seen": hb,
@@ -2187,30 +2219,82 @@ def create_app(
             ),
         }
 
+    def _sync_federation_from_disk() -> None:
+        """Prefer live file so Settings edits show without restarting UI."""
+        settings = load_federation_settings()
+        if settings is None:
+            return
+        app.state.peers = list(settings.get("peers") or [])
+        app.state.federation_mode = normalize_mode(settings.get("mode"))
+
     def _apply_federation_peers(peers: list[str]) -> list[str]:
         """Persist peers and update in-memory state (workers reload from disk)."""
         normalized = save_peers(peers)
         app.state.peers = list(normalized)
         return normalized
 
+    def _apply_federation_mode(mode: str) -> str:
+        normalized = save_mode(mode)
+        app.state.federation_mode = normalized
+        return normalized
+
+    def _require_federation_outbound() -> None:
+        if normalize_mode(app.state.federation_mode) == MODE_COLLECTOR:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Node is in BLE collector mode — outbound federation "
+                    "is disabled (peers may still pull from this node)"
+                ),
+            )
+
     @app.get("/api/federation")
     async def api_federation() -> dict[str, Any]:
         """Local node id + peers with server-side health probes."""
         ssl_port = app.state.ssl_port
-        # Prefer live file so Settings edits show without restarting UI.
-        file_peers = load_peers_file()
-        if file_peers is not None:
-            app.state.peers = list(file_peers)
+        _sync_federation_from_disk()
+        mode = normalize_mode(app.state.federation_mode)
         peers_cfg: list[str] = list(app.state.peers or [])
-        probed = await asyncio.gather(
-            *(probe_peer_health(url, ssl_port=ssl_port) for url in peers_cfg)
-        )
+        if mode == MODE_COLLECTOR:
+            # No outbound federation: list peers without health probes.
+            probed = [_unprobed_peer(url, ssl_port=ssl_port) for url in peers_cfg]
+        else:
+            probed = await asyncio.gather(
+                *(probe_peer_health(url, ssl_port=ssl_port) for url in peers_cfg)
+            )
         return {
             "node_id": app.state.node_id,
             "ssl_port": ssl_port,
+            "mode": mode,
+            "outbound": mode != MODE_COLLECTOR,
+            "scanner_enabled": bool(app.state.scanner_enabled),
             "token_configured": bool(app.state.federation_token),
             "managed": True,
             "peers": list(probed),
+        }
+
+    @app.put("/api/federation/mode")
+    async def api_federation_mode(body: FederationModeBody) -> dict[str, Any]:
+        """Switch between full federation and BLE collector mode."""
+        raw = str(body.mode or "").strip().lower()
+        if raw not in ("full", "collector", "collect", "ble", "edge", "sensor"):
+            raise HTTPException(
+                status_code=400,
+                detail='mode must be "full" or "collector"',
+            )
+        mode = _apply_federation_mode(raw)
+        warning = None
+        if mode == MODE_COLLECTOR and not app.state.scanner_enabled:
+            warning = (
+                "Collector mode is on, but scanner.enabled is false — "
+                "enable BLE scanning in config.toml and restart workers"
+            )
+        return {
+            "ok": True,
+            "mode": mode,
+            "outbound": mode != MODE_COLLECTOR,
+            "scanner_enabled": bool(app.state.scanner_enabled),
+            "warning": warning,
         }
 
     @app.put("/api/federation/peers")
@@ -2401,6 +2485,8 @@ def create_app(
     @app.post("/api/federation/pull-names")
     async def api_federation_pull_names(body: FederationPeerProbe) -> dict[str, Any]:
         """Overwrite local sensor labels with the custom names of one peer."""
+        _sync_federation_from_disk()
+        _require_federation_outbound()
         return await _pull_peer_meta(body.url, settings=False)
 
     @app.post("/api/federation/pull-settings")
@@ -2408,11 +2494,15 @@ def create_app(
         body: FederationPeerProbe,
     ) -> dict[str, Any]:
         """Overwrite local sensor names, categories and plan positions from one peer."""
+        _sync_federation_from_disk()
+        _require_federation_outbound()
         return await _pull_peer_meta(body.url, settings=True)
 
     @app.post("/api/federation/pull-plans")
     async def api_federation_pull_plans(body: FederationPeerProbe) -> dict[str, Any]:
         """Import floor plans from one peer (upsert by plan id)."""
+        _sync_federation_from_disk()
+        _require_federation_outbound()
         try:
             url = normalize_peer_url(body.url)
         except ValueError as exc:
@@ -3981,6 +4071,8 @@ def create_app(
     @app.post("/api/devices/{address}/push-meta")
     async def api_push_device_meta(address: str) -> dict[str, Any]:
         """Push this device's label/placement fields to all federation peers."""
+        _sync_federation_from_disk()
+        _require_federation_outbound()
         peers: list[str] = list(app.state.peers or [])
         if not peers:
             raise HTTPException(status_code=400, detail="No federation peers configured")

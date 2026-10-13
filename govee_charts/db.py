@@ -2784,6 +2784,24 @@ class Database:
         await self.db.commit()
         return cursor.rowcount > 0
 
+    async def last_reading_ts_from_node(
+        self, address: str, node_id: str
+    ) -> float | None:
+        """Newest reading ts for ``address`` produced by ``node_id`` (or ``node_id/…``)."""
+        prefix = f"{node_id}/"
+        cursor = await self.db.execute(
+            """
+            SELECT MAX(ts) FROM readings
+            WHERE address = ?
+              AND (source = ? OR substr(source, 1, ?) = ?)
+            """,
+            (address.upper(), node_id, len(prefix), prefix),
+        )
+        row = await cursor.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return float(row[0])
+
     async def delete_readings_after(
         self,
         address: str,
@@ -5387,9 +5405,13 @@ class Database:
         overwrite: bool = False,
         eps_temp: float = 0.05,
         eps_hum: float = 0.05,
+        touch_now: bool = True,
     ) -> dict[str, int]:
         """
         Bulk insert history samples with per-row battery/rssi/source.
+
+        ``touch_now=False`` bumps ``devices.last_seen`` only up to the newest
+        sample (pulled data must not make a remote-only sensor look live).
 
         ``samples``: ``(ts, temperature_c, humidity, battery, rssi, source)``.
 
@@ -5416,7 +5438,13 @@ class Database:
                 last_seen = MAX(devices.last_seen, excluded.last_seen),
                 first_seen = MIN(devices.first_seen, excluded.first_seen)
             """,
-            (address, display_name, model, first_ts, max(last_ts, now)),
+            (
+                address,
+                display_name,
+                model,
+                first_ts,
+                max(last_ts, now) if touch_now else last_ts,
+            ),
         )
 
         # Deduplicate by minute (last sample wins); keep full row for inserts.

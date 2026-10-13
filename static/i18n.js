@@ -148,6 +148,15 @@
       "settings.stationsCoords": "{lat}, {lon}",
       "settings.federation": "Federation nodes",
       "settings.federationLocal": "This node",
+      "settings.federationMode": "Node mode",
+      "settings.federationModeFull": "Full — push and pull with peers",
+      "settings.federationModeCollector":
+        "BLE collector — scan only, peers pull from us",
+      "settings.federationModeHelp":
+        "Collector mode keeps BLE scanning and serves history to peers, but does not push or query the federation.",
+      "settings.federationModeSet": "Mode set to {mode}.",
+      "settings.federationModeCollectorHint":
+        "Outbound federation paused. Peers can still pull history from this node.",
       "settings.federationHelp":
         "Peer base URLs for ingest and history pull. Saved on this node and applied to workers within a few seconds.",
       "settings.federationEmpty": "No peers configured yet.",
@@ -183,6 +192,7 @@
       "settings.federationOpen": "Open peer UI",
       "settings.federationOnline": "Online",
       "settings.federationOffline": "Offline",
+      "settings.federationNotProbed": "Not probed (collector mode)",
       "settings.federationAdded": "Peer added.",
       "settings.federationRemoved": "Peer removed.",
       "settings.federationError": "Could not update peers: {error}",
@@ -774,6 +784,15 @@
       "settings.stationsCoords": "{lat}, {lon}",
       "settings.federation": "Nœuds de fédération",
       "settings.federationLocal": "Ce nœud",
+      "settings.federationMode": "Mode du nœud",
+      "settings.federationModeFull": "Complet — envoi et pull vers les pairs",
+      "settings.federationModeCollector":
+        "Collecteur BLE — scan seul, les pairs tirent chez nous",
+      "settings.federationModeHelp":
+        "Le mode collecteur garde le scan BLE et sert l’historique aux pairs, sans pousser ni interroger la fédération.",
+      "settings.federationModeSet": "Mode défini sur {mode}.",
+      "settings.federationModeCollectorHint":
+        "Fédération sortante en pause. Les pairs peuvent toujours tirer l’historique depuis ce nœud.",
       "settings.federationHelp":
         "URL de base des pairs pour l’ingest et le pull d’historique. Enregistré sur ce nœud et pris en compte par les workers en quelques secondes.",
       "settings.federationEmpty": "Aucun pair configuré pour l’instant.",
@@ -809,6 +828,7 @@
       "settings.federationOpen": "Ouvrir l’UI du pair",
       "settings.federationOnline": "En ligne",
       "settings.federationOffline": "Hors ligne",
+      "settings.federationNotProbed": "Non sondé (mode collecteur)",
       "settings.federationAdded": "Pair ajouté.",
       "settings.federationRemoved": "Pair retiré.",
       "settings.federationError": "Impossible de mettre à jour les pairs : {error}",

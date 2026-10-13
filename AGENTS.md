@@ -28,6 +28,7 @@ Chat replies to the repository owner may follow their preferred language; projec
 - Each node scans locally (if `scanner.enabled`) and **pushes locally produced** readings to `federation.peers` via `POST /api/ingest`:
   - Live BLE ads: `source = node_id`
   - GATT history backfill: `source = "{node_id}/gatt"` (when `backfill.federation_share` is true)
+- **BLE collector mode** (`federation.mode = "collector"`, Settings → Federation nodes): the node only scans BLE and makes **no** outbound federation request (no push, no history pull, no RSSI election, no peer health probes). Full nodes detect collector peers via `GET /api/federation` (`mode`), stop pushing to them, and poll their `/api/devices` + `/api/history` (`collector_pull.py`), inserting only samples whose `source` is the collector's `node_id` (or `node_id/…`).
 - Ingested readings are **not** re-forwarded (no loops). Per-reading optional `source` is accepted on ingest (defaults to the peer `node_id`).
 - Shared optional `federation.token` sent as `X-Govee-Token`.
 - Dedup key: unique `(address, ts)` in SQLite.

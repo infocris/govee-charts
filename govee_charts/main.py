@@ -25,13 +25,18 @@ import uvicorn
 from govee_charts.address import build_suffix_map
 from govee_charts.api import create_app
 from govee_charts.backfill import BackfillConfig, BackfillService
+from govee_charts.collector_pull import CollectorPullConfig, CollectorPullService
 from govee_charts.compaction import CompactionConfig, CompactionService
 from govee_charts.cursor_chat import normalize_cursor_chat_config
 from govee_charts.db import Database, is_db_locked
 from govee_charts.decode import Reading
 from govee_charts.doors import DoorHaPoller, DoorMqttListener, DoorsConfig, import_ha_door_history
 from govee_charts.federation import PeerPublisher
-from govee_charts.federation_store import DEFAULT_PEERS_PATH, resolve_peers
+from govee_charts.federation_store import (
+    DEFAULT_PEERS_PATH,
+    MODE_COLLECTOR,
+    resolve_federation_settings,
+)
 from govee_charts.ha_th import HaThConfig, HaThPoller
 from govee_charts.map_chat_store import MapChatStore
 from govee_charts.presence import PresenceConfig, PresenceService
@@ -88,6 +93,11 @@ DEFAULTS: dict[str, Any] = {
         "node_id": "",
         "token": "",
         "peers": [],
+        # full = push/pull peers; collector = BLE only (peers may pull from us)
+        "mode": "full",
+        # Full nodes: poll collector peers for new readings (seconds / hours)
+        "collector_pull_seconds": 60,
+        "collector_pull_lookback_hours": 72,
     },
     "weather": {
         "enabled": False,
@@ -244,7 +254,12 @@ def load_config() -> dict[str, Any]:
     if isinstance(peers_raw, str):
         peers_raw = [peers_raw]
     # data/federation_peers.json (UI-managed) wins over config.toml when present.
-    cfg["federation"]["peers"] = resolve_peers(peers_raw)
+    fed_settings = resolve_federation_settings(
+        peers_raw,
+        config_mode=cfg.get("federation", {}).get("mode"),
+    )
+    cfg["federation"]["peers"] = list(fed_settings["peers"])
+    cfg["federation"]["mode"] = str(fed_settings["mode"])
     node_id = str(cfg["federation"].get("node_id") or "").strip()
     if not node_id:
         node_id = socket.gethostname() or "local"
@@ -374,6 +389,7 @@ async def _start_workers(
         node_id=fed["node_id"],
         token=fed["token"] or None,
         peers_path=DEFAULT_PEERS_PATH,
+        mode=str(fed.get("mode") or "full"),
     )
     await publisher.start()
     stop_event = asyncio.Event()
@@ -384,6 +400,7 @@ async def _start_workers(
     hvac_task: asyncio.Task[None] | None = None
     ha_th_task: asyncio.Task[None] | None = None
     backfill_task: asyncio.Task[None] | None = None
+    collector_pull_task: asyncio.Task[None] | None = None
     compaction_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
     # Assigned below; heartbeat may see None until scanner starts.
@@ -473,6 +490,11 @@ async def _start_workers(
     hard_watchdog = _start_workers_hard_watchdog(db, hard_watchdog_stop)
 
     scanner_enabled = enable_scanner and bool(cfg["scanner"].get("enabled", True))
+    if str(fed.get("mode") or "") == MODE_COLLECTOR and not scanner_enabled:
+        logging.warning(
+            "Federation mode=collector but scanner is disabled — "
+            "enable scanner.enabled to collect BLE advertisements"
+        )
     if scanner_enabled:
         scanner = GoveeScanner(
             db,
@@ -518,6 +540,18 @@ async def _start_workers(
         )
     else:
         logging.info("GATT history backfill disabled (set backfill.enabled=true)")
+
+    # Always running: idle while this node is a collector or has no peers;
+    # mode/peers changes from Settings are picked up by the publisher.
+    collector_pull = CollectorPullService(
+        db,
+        publisher,
+        CollectorPullConfig.from_dict(fed),
+        node_id=fed["node_id"],
+    )
+    collector_pull_task = asyncio.create_task(
+        collector_pull.run(stop_event), name="collector-pull"
+    )
 
     compaction_cfg = CompactionConfig.from_dict(cfg.get("compaction"))
     if compaction_cfg.enabled:
@@ -626,6 +660,7 @@ async def _start_workers(
         "hvac_task": hvac_task,
         "ha_th_task": ha_th_task,
         "backfill_task": backfill_task,
+        "collector_pull_task": collector_pull_task,
         "compaction_task": compaction_task,
         "heartbeat_task": heartbeat_task,
         "hard_watchdog_stop": hard_watchdog_stop,
@@ -726,6 +761,7 @@ async def _stop_workers(
         (runtime.get("hvac_task"), "HVAC HA poll"),
         (runtime.get("ha_th_task"), "HA T/H poll"),
         (runtime.get("backfill_task"), "GATT backfill"),
+        (runtime.get("collector_pull_task"), "Collector pull"),
         (runtime.get("compaction_task"), "Readings compaction"),
         (runtime.get("heartbeat_task"), "Workers heartbeat"),
     ]
@@ -964,6 +1000,7 @@ async def run_ui_server(
         federation_token=fed["token"] or None,
         node_id=fed["node_id"],
         peers=fed["peers"],
+        federation_mode=str(fed.get("mode") or "full"),
         suffix_map=suffix_map,
         weather=weather,
         on_restart_ui=request_restart,

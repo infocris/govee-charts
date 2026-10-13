@@ -1595,6 +1595,20 @@
             <span data-i18n="settings.federationLocal">This node</span>:
             <code id="settings-federation-node">—</code>
           </p>
+          <label class="settings-field" for="settings-federation-mode">
+            <span class="settings-field-label" data-i18n="settings.federationMode">Node mode</span>
+            <select
+              id="settings-federation-mode"
+              data-i18n-aria-label="settings.federationModeHelp"
+              aria-label="Federation node mode"
+            >
+              <option value="full" data-i18n="settings.federationModeFull">Full — push and pull with peers</option>
+              <option value="collector" data-i18n="settings.federationModeCollector">BLE collector — scan only, peers pull from us</option>
+            </select>
+            <span class="settings-field-help" data-i18n="settings.federationModeHelp">
+              Collector mode keeps BLE scanning and serves history to peers, but does not push or query the federation.
+            </span>
+          </label>
           <div
             id="settings-federation-peers"
             class="settings-federation-list"

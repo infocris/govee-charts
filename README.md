@@ -226,6 +226,11 @@ See `config.example.toml`:
 - `scanner.adapters` — BlueZ adapters (`["hci0", "hci1"]`)
 - `federation.peers` — URLs of other instances (also editable in Settings →
   Federation nodes; runtime list lives in `data/federation_peers.json`)
+- `federation.mode` — `full` (push/pull) or `collector` (BLE scan only, no
+  outbound federation request). Full nodes poll collector peers'
+  `/api/history` every `federation.collector_pull_seconds` (default 60, catch-up
+  capped by `collector_pull_lookback_hours`, default 72) and stop pushing to
+  them. Editable in Settings.
 - `federation.token` — shared secret for `POST /api/ingest`
 - `[weather]` — Open-Meteo hourly forecast + sensor projections (`place` or lat/lon)
 - `[cursor_chat]` — Map-view chat via local Cursor Agent CLI (`agent login`, ask mode)
@@ -402,7 +407,8 @@ Data © [Open-Meteo](https://open-meteo.com/).
 - `POST /api/backfill/devices` — opt a sensor in/out and/or toggle GATT (`{address, enabled?, gatt_enabled?}`; persisted even if the worker is offline)
 - `POST /api/backfill/import/preview` — parse Govee Home CSV/ZIP and compare to existing readings (form: `address`, `file`, optional `overwrite`); includes would_insert / would_overwrite + sample diffs
 - `POST /api/backfill/import` — confirm ingest (same form fields); with `overwrite=true`, updates conflicting minutes
-- `GET /api/federation` — local `node_id` + peers with health probes
+- `GET /api/federation` — local `node_id` + `mode` + peers with health probes
+- `PUT /api/federation/mode` — `{mode:"full"|"collector"}` (BLE collector = no outbound)
 - `POST /api/federation/peers` — add a peer `{url}` (persisted; workers reload within seconds)
 - `PUT /api/federation/peers` — replace peer list `{peers:[…]}`
 - `DELETE /api/federation/peers?url=…` — remove a peer

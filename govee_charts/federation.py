@@ -11,7 +11,14 @@ from typing import Any
 import httpx
 
 from govee_charts.decode import Reading
-from govee_charts.federation_store import load_peers_file, normalize_peers, peers_file_mtime
+from govee_charts.federation_store import (
+    MODE_COLLECTOR,
+    MODE_FULL,
+    load_federation_settings,
+    normalize_mode,
+    normalize_peers,
+    peers_file_mtime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +91,10 @@ class PeerPublisher:
         token: str | None = None,
         timeout: float = 5.0,
         peers_path: Path | str | None = None,
+        mode: str = MODE_FULL,
     ) -> None:
         self.peers = normalize_peers(peers)
+        self.mode = normalize_mode(mode)
         self.node_id = node_id
         self.token = token or None
         self.timeout = timeout
@@ -97,10 +106,79 @@ class PeerPublisher:
         self._task: asyncio.Task[None] | None = None
         self._client: httpx.AsyncClient | None = None
         self._peer_cache: dict[str, dict[str, Any]] = {}
+        # Peers seen in collector mode: never pushed to (they pull nothing and
+        # are pulled from instead — see collector_pull.py).
+        self.collector_peers: set[str] = set()
+
+    @property
+    def is_collector(self) -> bool:
+        return self.mode == MODE_COLLECTOR
 
     @property
     def enabled(self) -> bool:
-        return bool(self.peers)
+        """True when outbound federation (push/pull) is active."""
+        return bool(self.peers) and not self.is_collector
+
+    def set_mode(self, mode: str) -> bool:
+        """Update federation mode. Returns True when it changed."""
+        normalized = normalize_mode(mode)
+        if normalized == self.mode:
+            return False
+        previous = self.mode
+        self.mode = normalized
+        if self.is_collector:
+            self._drain_queue()
+        logger.info(
+            "Federation mode %s → %s (node_id=%s)",
+            previous,
+            normalized,
+            self.node_id,
+        )
+        return True
+
+    def _drain_queue(self) -> int:
+        """Drop readings queued before outbound federation was disabled."""
+        dropped = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return dropped
+            dropped += 1
+
+    def set_collector_peers(self, peers: set[str]) -> None:
+        """Record which peers run in collector mode (excluded from pushes)."""
+        normalized = {str(p).rstrip("/") for p in peers}
+        if normalized != self.collector_peers:
+            logger.info(
+                "Federation collector peers: %s",
+                ", ".join(sorted(normalized)) or "(none)",
+            )
+        self.collector_peers = normalized
+
+    async def get_peer_json(
+        self,
+        peer: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> Any | None:
+        """GET ``{peer}{path}`` and return decoded JSON, or None on any error."""
+        if not self.enabled or self._client is None:
+            return None
+        try:
+            kwargs: dict[str, Any] = {"params": params}
+            if timeout is not None:
+                kwargs["timeout"] = timeout
+            res = await self._client.get(f"{peer}{path}", **kwargs)
+            if res.status_code >= 400:
+                logger.debug("GET %s%s → HTTP %s", peer, path, res.status_code)
+                return None
+            return res.json()
+        except Exception as exc:
+            logger.debug("GET %s%s failed: %s", peer, path, exc)
+            return None
 
     def set_peers(self, peers: list[str]) -> bool:
         """Replace peer list in memory. Returns True when the list changed."""
@@ -111,6 +189,7 @@ class PeerPublisher:
         self.peers = normalized
         # Drop cache entries for removed peers.
         keep = set(normalized)
+        self.collector_peers &= keep
         for key in list(self._peer_cache):
             if key not in keep:
                 self._peer_cache.pop(key, None)
@@ -123,20 +202,22 @@ class PeerPublisher:
         return True
 
     def reload_peers_from_disk(self) -> bool:
-        """Reload peers from ``peers_path`` when the file mtime changes."""
+        """Reload peers/mode from ``peers_path`` when the file mtime changes."""
         if self.peers_path is None:
             return False
         mtime = peers_file_mtime(self.peers_path)
         if mtime is None or mtime == self._peers_mtime:
             return False
-        loaded = load_peers_file(self.peers_path)
+        loaded = load_federation_settings(self.peers_path)
         if loaded is None:
             return False
         self._peers_mtime = mtime
-        return self.set_peers(loaded)
+        changed_peers = self.set_peers(list(loaded.get("peers") or []))
+        changed_mode = self.set_mode(str(loaded.get("mode") or MODE_FULL))
+        return changed_peers or changed_mode
 
     async def start(self) -> None:
-        # Always start the worker so peers added later via the UI are picked up.
+        # Always start the worker so peers/mode added later via the UI are picked up.
         headers = {}
         if self.token:
             headers["X-Govee-Token"] = self.token
@@ -147,7 +228,12 @@ class PeerPublisher:
             verify=False,
         )
         self._task = asyncio.create_task(self._worker(), name="federation-publisher")
-        if self.peers:
+        if self.is_collector:
+            logger.info(
+                "Federation collector mode (BLE only, no outbound; node_id=%s)",
+                self.node_id,
+            )
+        elif self.peers:
             logger.info(
                 "Federation publisher → %s (node_id=%s)",
                 ", ".join(self.peers),
@@ -404,11 +490,15 @@ class PeerPublisher:
                     batch.append(self._queue.get_nowait())
                 except asyncio.QueueEmpty:
                     break
-            if not self.peers:
+            # Mode may have flipped to collector while waiting on the queue.
+            targets = [
+                p for p in list(self.peers) if p not in self.collector_peers
+            ]
+            if not self.enabled or not targets:
                 continue
             body = {"node_id": self.node_id, "readings": batch}
             await asyncio.gather(
-                *(self._post(peer, body) for peer in list(self.peers)),
+                *(self._post(peer, body) for peer in targets),
                 return_exceptions=True,
             )
 

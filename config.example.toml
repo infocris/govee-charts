@@ -46,6 +46,14 @@ max_delete_per_device = 50000
 node_id = ""
 # Shared secret (same on all peers). Leave empty to disable auth.
 token = ""
+# full = push/pull with peers; collector = BLE scan only (no outbound
+# federation). Peers may still pull history from a collector node.
+# Editable in Settings → Federation nodes.
+mode = "full"
+# Full nodes poll collector peers for new readings every N seconds;
+# first pull (or after downtime) reaches back at most this many hours.
+collector_pull_seconds = 60
+collector_pull_lookback_hours = 72
 # Peer base URLs, e.g. ["http://192.168.1.20:8080"]
 # Also editable in Settings → Federation nodes (persisted to
 # data/federation_peers.json, which overrides this list when present).

@@ -632,9 +632,11 @@
   let facadeChartInstances = [];
   let historyLoaded = false;
   let localNodeId = "";
+  /** @type {"full"|"collector"} */
+  let federationMode = "full";
   /** @type {Map<string, string>} node_id → url */
   let peerByNodeId = new Map();
-  /** @type {Array<{url?: string, node_id?: string, online?: boolean}>} */
+  /** @type {Array<{url?: string, node_id?: string, online?: boolean, mode?: string|null}>} */
   let federationPeers = [];
   const showForecastEl = document.getElementById("show-forecast");
   const projectionScenarioEl = document.getElementById("projection-scenario");
@@ -1670,7 +1672,9 @@
 
     if (localNodeId && nodeLineEl) {
       nodeLineEl.hidden = false;
-      nodeLineEl.textContent = `Node · ${localNodeId}`;
+      const modeTag =
+        federationMode === "collector" ? " · collector" : "";
+      nodeLineEl.textContent = `Node · ${localNodeId}${modeTag}`;
     }
 
     if (!peerLinksEl) return;
@@ -1686,8 +1690,13 @@
       a.href = href;
       a.target = "_blank";
       a.rel = "noopener noreferrer";
-      a.textContent = peer.node_id;
-      a.title = href + (peer.online ? "" : " (offline)");
+      const modeSuffix =
+        peer.mode === "collector" ? " · collector" : "";
+      a.textContent = `${peer.node_id || peerHostLabel(peer.url)}${modeSuffix}`;
+      a.title =
+        href +
+        (peer.online ? "" : " (offline)") +
+        (peer.mode === "collector" ? " · BLE collector" : "");
       if (!peer.online) a.classList.add("offline");
       peerLinksEl.appendChild(a);
     }
@@ -1700,6 +1709,7 @@
         browse_url: p.browse_url || null,
         node_id: p.node_id || peerHostLabel(p.url),
         online: Boolean(p.online),
+        mode: p.mode || null,
       };
     }
     return null;
@@ -1710,6 +1720,7 @@
     if (!res.ok) throw new Error(`federation HTTP ${res.status}`);
     const data = await res.json();
     localNodeId = data.node_id || "";
+    federationMode = data.mode === "collector" ? "collector" : "full";
     const peers = Array.isArray(data.peers) ? data.peers : [];
     // Server already probed health (same-origin → no mixed-content errors).
     // Fall back to client probe only if peers are plain URL strings.
@@ -1736,11 +1747,23 @@
     const listEl = document.getElementById("settings-federation-peers");
     const emptyEl = document.getElementById("settings-federation-empty");
     const nodeEl = document.getElementById("settings-federation-node");
+    const modeEl = document.getElementById("settings-federation-mode");
+    const addWrap = document.querySelector(".settings-federation-add");
     if (nodeEl) nodeEl.textContent = localNodeId || "—";
+    if (modeEl && modeEl.value !== federationMode) {
+      modeEl.value = federationMode;
+    }
+    const collector = federationMode === "collector";
+    if (addWrap) addWrap.hidden = collector;
     if (!listEl) return;
     listEl.replaceChildren();
     const rows = Array.isArray(peers) ? peers : [];
     if (emptyEl) emptyEl.hidden = rows.length > 0;
+    if (collector) {
+      listEl.classList.add("is-collector");
+    } else {
+      listEl.classList.remove("is-collector");
+    }
     for (const peer of rows) {
       const row = document.createElement("div");
       row.className = "settings-federation-row";
@@ -1753,13 +1776,16 @@
       const dot = document.createElement("span");
       dot.className =
         "settings-federation-dot" + (peer.online ? " online" : "");
-      dot.title = peer.online
-        ? t("settings.federationOnline")
-        : t("settings.federationOffline");
+      dot.title = collector
+        ? t("settings.federationNotProbed")
+        : peer.online
+          ? t("settings.federationOnline")
+          : t("settings.federationOffline");
       title.appendChild(dot);
-      title.appendChild(
-        document.createTextNode(peer.node_id || peerHostLabel(peer.url))
-      );
+      const label =
+        (peer.node_id || peerHostLabel(peer.url)) +
+        (peer.mode === "collector" ? " · collector" : "");
+      title.appendChild(document.createTextNode(label));
 
       const link = document.createElement("a");
       const href = peerLinkUrl(peer);
@@ -1776,6 +1802,7 @@
       removeBtn.type = "button";
       removeBtn.className = "backfill-btn";
       removeBtn.textContent = t("settings.federationRemove");
+      removeBtn.disabled = collector;
       removeBtn.addEventListener("click", () => {
         removeFederationPeer(peer.url).catch((err) => {
           setFederationSettingsStatus(
@@ -1792,6 +1819,7 @@
         btn.className = "backfill-btn";
         btn.textContent = t(`settings.federationPull${kind}`);
         btn.title = t(`settings.federationPull${kind}Title`);
+        btn.disabled = collector;
         btn.addEventListener("click", () => {
           if (
             !window.confirm(
@@ -1809,7 +1837,7 @@
               );
             })
             .finally(() => {
-              btn.disabled = false;
+              btn.disabled = collector;
             });
         });
         return btn;
@@ -1817,14 +1845,22 @@
 
       const actions = document.createElement("div");
       actions.className = "settings-federation-row-actions";
-      actions.appendChild(makePullBtn("Names"));
-      actions.appendChild(makePullBtn("Settings"));
-      actions.appendChild(makePullBtn("Plans"));
+      if (!collector) {
+        actions.appendChild(makePullBtn("Names"));
+        actions.appendChild(makePullBtn("Settings"));
+        actions.appendChild(makePullBtn("Plans"));
+      }
       actions.appendChild(removeBtn);
 
       row.appendChild(main);
       row.appendChild(actions);
       listEl.appendChild(row);
+    }
+    if (collector) {
+      setFederationSettingsStatus(
+        t("settings.federationModeCollectorHint"),
+        "ok"
+      );
     }
   }
 
@@ -1832,6 +1868,23 @@
     const { peers } = await loadFederation();
     renderFederationSettings(peers);
     return peers;
+  }
+
+  async function setFederationMode(mode) {
+    const res = await fetch("/api/federation/mode", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.detail || `HTTP ${res.status}`);
+    }
+    federationMode = data.mode === "collector" ? "collector" : "full";
+    let msg = t("settings.federationModeSet", { mode: federationMode });
+    if (data.warning) msg += ` ${data.warning}`;
+    setFederationSettingsStatus(msg, data.warning ? "bad" : "ok");
+    await refreshFederationSettings();
   }
 
   async function addFederationPeer(url) {
@@ -17866,6 +17919,20 @@
   const settingsFederationUrlEl = document.getElementById(
     "settings-federation-url"
   );
+  const settingsFederationModeEl = document.getElementById(
+    "settings-federation-mode"
+  );
+  if (settingsFederationModeEl) {
+    settingsFederationModeEl.addEventListener("change", () => {
+      setFederationMode(settingsFederationModeEl.value).catch((err) => {
+        setFederationSettingsStatus(
+          t("settings.federationError", { error: err.message }),
+          "bad"
+        );
+        settingsFederationModeEl.value = federationMode;
+      });
+    });
+  }
   if (settingsFederationAddBtn) {
     settingsFederationAddBtn.addEventListener("click", () => {
       addFederationPeer(

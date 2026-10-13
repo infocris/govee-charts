@@ -613,6 +613,10 @@ body.sticky-views-enabled .views {
   margin-bottom: 0.5rem;
 }
 
+.settings-federation-list.is-collector .settings-federation-row {
+  opacity: 0.72;
+}
+
 .settings-federation-row {
   display: flex;
   flex-wrap: wrap;
