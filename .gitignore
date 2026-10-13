@@ -18,5 +18,7 @@ data/federation_peers.tmp
 data/secrets/
 data/mail_inbox.json
 data/mail_inbox.tmp
+data/*.imported
+data/*.bak
 config.toml
 .cursor/agent-chat-id
