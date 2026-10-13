@@ -265,6 +265,51 @@
         </div>
       </div>
       <p class="status" id="doors-status" hidden></p>
+
+      <div class="overview-head overview-head-secondary">
+        <h2 data-i18n="overview.contactsTitle">Contact sensors</h2>
+        <p class="overview-hint" data-i18n="overview.contactsHint">Every known door / window contact. Rename, set room and type, attach to an opening, or delete stale entries. Home Assistant entities added here are polled live.</p>
+      </div>
+      <div class="overview-table-wrap">
+        <table class="overview-table contacts-table" id="contacts-table">
+          <thead>
+            <tr>
+              <th scope="col" data-i18n="overview.col.contact">Sensor</th>
+              <th scope="col" data-i18n="overview.col.room">Room</th>
+              <th scope="col" data-i18n="overview.col.kind">Kind</th>
+              <th scope="col" data-i18n="overview.col.opening">Opening</th>
+              <th scope="col" data-i18n="overview.col.state">State</th>
+              <th scope="col" data-i18n="overview.col.actions">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="contacts-body">
+            <tr><td colspan="6" class="overview-empty" data-i18n="overview.loading">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <form class="contacts-add" id="contacts-add-form" onsubmit="return false;">
+        <input
+          id="contacts-add-entity"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="binary_sensor.kitchen_window"
+          data-i18n-aria-label="overview.contactsAddEntity"
+          aria-label="Home Assistant entity id"
+        />
+        <input
+          id="contacts-add-name"
+          type="text"
+          autocomplete="off"
+          maxlength="80"
+          data-i18n-placeholder="overview.contactsAddName"
+          placeholder="Name (optional)"
+          data-i18n-aria-label="overview.contactsAddName"
+          aria-label="Name (optional)"
+        />
+        <button type="submit" id="contacts-add-btn" class="backfill-btn" data-i18n="overview.contactsAdd">Add HA entity</button>
+      </form>
+      <p class="status" id="contacts-status" aria-live="polite"></p>
     </section>
 
     <section id="view-compare" class="view" role="tabpanel" data-i18n-aria-label="nav.compare" aria-label="Compare" hidden>

@@ -3614,7 +3614,17 @@ class Database:
             values,
         )
         await self.db.commit()
-        return await self.get_door_sensor(sensor_id)
+        updated = await self.get_door_sensor(sensor_id)
+        if updated is not None:
+            return updated
+        # Registered but silent sensors are not in the event-based listing.
+        cursor = await self.db.execute(
+            "SELECT sensor_id, name, room, kind, forced_state, forced_at "
+            "FROM door_sensors WHERE sensor_id = ?",
+            (sensor_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
     async def force_door_state(
         self,
@@ -3670,6 +3680,71 @@ class Database:
         )
         await self.db.commit()
         return await self.get_door_sensor(sensor_id)
+
+    async def list_all_door_sensors(self) -> list[dict[str, Any]]:
+        """Every known contact sensor (metadata or events), for management UIs.
+
+        Unlike ``list_door_sensors`` this does not dedupe HA mirrors and keeps
+        sensors that never reported, so stale rows can be found and removed.
+        """
+        cursor = await self.db.execute(
+            """
+            WITH ids AS (
+                SELECT sensor_id FROM door_sensors
+                UNION
+                SELECT DISTINCT sensor_id FROM door_events
+            ),
+            latest AS (
+                SELECT e.sensor_id, e.name, e.state, e.ts, e.source
+                FROM door_events e
+                INNER JOIN (
+                    SELECT sensor_id, MAX(ts) AS max_ts
+                    FROM door_events
+                    WHERE COALESCE(source, '') != 'manual'
+                    GROUP BY sensor_id
+                ) m ON m.sensor_id = e.sensor_id AND m.max_ts = e.ts
+            ),
+            counts AS (
+                SELECT sensor_id, COUNT(*) AS n FROM door_events GROUP BY sensor_id
+            )
+            SELECT
+                ids.sensor_id,
+                COALESCE(s.name, l.name, ids.sensor_id) AS name,
+                s.room,
+                s.kind,
+                s.forced_state,
+                l.state AS reported_state,
+                l.ts AS reported_ts,
+                l.source AS reported_source,
+                COALESCE(c.n, 0) AS event_count,
+                (
+                    SELECT cs.connection_id FROM connection_sensors cs
+                    WHERE cs.sensor_id = ids.sensor_id
+                    LIMIT 1
+                ) AS connection_id
+            FROM ids
+            LEFT JOIN door_sensors s ON s.sensor_id = ids.sensor_id
+            LEFT JOIN latest l ON l.sensor_id = ids.sensor_id
+            LEFT JOIN counts c ON c.sensor_id = ids.sensor_id
+            ORDER BY COALESCE(s.name, l.name, ids.sensor_id) COLLATE NOCASE
+            """
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def delete_door_sensor(self, sensor_id: str) -> bool:
+        """Forget a contact sensor: metadata, connection links and its events."""
+        sensor_id = str(sensor_id).strip()
+        removed = 0
+        for sql in (
+            "DELETE FROM connection_sensors WHERE sensor_id = ?",
+            "DELETE FROM door_events WHERE sensor_id = ?",
+            "DELETE FROM door_sensors WHERE sensor_id = ?",
+        ):
+            cursor = await self.db.execute(sql, (sensor_id,))
+            removed += max(0, cursor.rowcount or 0)
+            await cursor.close()
+        await self.db.commit()
+        return removed > 0
 
     async def get_door_sensor(self, sensor_id: str) -> dict[str, Any] | None:
         sensors = await self.list_door_sensors()

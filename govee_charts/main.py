@@ -593,8 +593,10 @@ async def _start_workers(
             doors_cfg.mqtt_host,
             doors_cfg.mqtt_port,
         )
-        if doors_cfg.ha_entities:
-            ha_poller = DoorHaPoller(db, doors_cfg)
+        # Always start when a token is set: entities added later from the
+        # Overview contact sensor list are picked up live.
+        if doors_cfg.ha_entities or doors_cfg.ha_token:
+            ha_poller = DoorHaPoller(db, doors_cfg, settings_store=default_store())
             door_ha_task = asyncio.create_task(
                 ha_poller.run(stop_event), name="door-ha-poll"
             )

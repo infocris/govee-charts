@@ -57,6 +57,7 @@ from govee_charts.floorplan import (
 )
 from govee_charts.backfill import BackfillService
 from govee_charts.categories import normalize_door_patch, normalize_patch, taxonomy
+from govee_charts.doors import door_name_from_ha
 from govee_charts.plan_position import normalize_plan_patch
 from govee_charts.connections import (
     OUTDOOR,
@@ -681,6 +682,11 @@ class DoorPatch(BaseModel):
     name: str | None = None
 
     model_config = {"extra": "forbid"}
+
+
+class DoorHaEntityAdd(BaseModel):
+    entity_id: str = Field(..., min_length=1, max_length=200)
+    name: str | None = Field(default=None, max_length=80)
 
 
 class DoorForceBody(BaseModel):
@@ -4415,6 +4421,87 @@ def create_app(
         """Latest open/closed state for each door/window contact sensor."""
         sensors = await db.list_door_sensors()
         return {"sensors": sensors, "count": len(sensors)}
+
+    _HA_ENTITY_RE = re.compile(r"^binary_sensor\.[a-z0-9_]+$")
+
+    def _doors_ha_entities() -> list[str]:
+        store = app.state.settings_store
+        if store is None:
+            return []
+        return [
+            str(e) for e in (_section_effective(store, "doors").get("ha_entities") or [])
+        ]
+
+    def _save_doors_ha_entities(entities: list[str]) -> None:
+        store = app.state.settings_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="Settings store not available")
+        store.patch_section("doors", {"ha_entities": entities})
+
+    @app.get("/api/doors/sensors")
+    async def api_door_sensors_all() -> dict[str, Any]:
+        """Every known contact sensor (management list), incl. silent ones."""
+        polled = set(_doors_ha_entities())
+        sensors = await db.list_all_door_sensors()
+        for sensor in sensors:
+            sensor["ha_polled"] = sensor["sensor_id"] in polled
+        known = {s["sensor_id"] for s in sensors}
+        # Polled entities that never reported yet still belong in the list.
+        for entity_id in sorted(polled - known):
+            sensors.append(
+                {
+                    "sensor_id": entity_id,
+                    "name": entity_id,
+                    "room": None,
+                    "kind": None,
+                    "forced_state": None,
+                    "reported_state": None,
+                    "reported_ts": None,
+                    "reported_source": None,
+                    "event_count": 0,
+                    "connection_id": None,
+                    "ha_polled": True,
+                }
+            )
+        return {
+            "sensors": sensors,
+            "count": len(sensors),
+            "ha_entities": sorted(polled),
+            "settings_available": app.state.settings_store is not None,
+        }
+
+    @app.post("/api/doors/ha-entities")
+    async def api_door_ha_entity_add(body: DoorHaEntityAdd) -> dict[str, Any]:
+        """Poll one more Home Assistant binary_sensor (workers pick it up live)."""
+        entity_id = body.entity_id.strip().lower()
+        if not _HA_ENTITY_RE.match(entity_id):
+            raise HTTPException(
+                status_code=400,
+                detail="Entity id must look like binary_sensor.some_contact",
+            )
+        entities = _doors_ha_entities()
+        if entity_id in entities:
+            raise HTTPException(status_code=409, detail="Entity already polled")
+        _save_doors_ha_entities([*entities, entity_id])
+        name = (body.name or "").strip() or door_name_from_ha(entity_id, {})
+        await db.ensure_door_sensor(sensor_id=entity_id, name=name)
+        await db.db.commit()
+        logger.warning("Door HA entity %s added from UI", entity_id)
+        return {"ok": True, "entity_id": entity_id, "ha_entities": [*entities, entity_id]}
+
+    @app.delete("/api/doors/{sensor_id:path}")
+    async def api_door_sensor_delete(sensor_id: str) -> dict[str, Any]:
+        """Forget a contact sensor (links + history); stop polling it on HA."""
+        sensor_id = sensor_id.strip()
+        entities = _doors_ha_entities()
+        was_polled = sensor_id in entities
+        if was_polled:
+            _save_doors_ha_entities([e for e in entities if e != sensor_id])
+        removed = await db.delete_door_sensor(sensor_id)
+        if not removed and not was_polled:
+            raise HTTPException(status_code=404, detail="Unknown door sensor")
+        logger.warning("Door sensor %s deleted from UI", sensor_id)
+        return {"ok": True, "sensor_id": sensor_id, "unpolled": was_polled}
 
     @app.patch("/api/doors/{sensor_id:path}")
     async def api_patch_door(

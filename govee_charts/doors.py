@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import quote
 
 from govee_charts.db import Database
+from govee_charts.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
 
@@ -419,10 +420,48 @@ def door_name_from_ha(
 class DoorHaPoller:
     """Poll Home Assistant REST for contact sensors not available on MQTT."""
 
-    def __init__(self, db: Database, cfg: DoorsConfig) -> None:
+    def __init__(
+        self,
+        db: Database,
+        cfg: DoorsConfig,
+        *,
+        settings_store: SettingsStore | None = None,
+    ) -> None:
         self.db = db
         self.cfg = cfg
+        self.entities: tuple[str, ...] = tuple(cfg.ha_entities)
+        self.settings_store = settings_store
+        self._settings_version: float | None = (
+            settings_store.section_updated_ts("doors") if settings_store else None
+        )
         self._last_state: dict[str, str] = {}
+
+    def reload_entities(self) -> bool:
+        """Pick up ``doors.ha_entities`` edits from the settings store."""
+        if self.settings_store is None:
+            return False
+        try:
+            version = self.settings_store.section_updated_ts("doors")
+            if version == self._settings_version:
+                return False
+            self._settings_version = version
+            stored = self.settings_store.get_section("doors")
+        except Exception as exc:
+            logger.warning("Door HA entities reload failed: %s", exc)
+            return False
+        # Stored sections are diffs against DEFAULTS: a missing key means [].
+        entities = DoorsConfig.from_dict(
+            {"ha_entities": stored.get("ha_entities") or []}
+        ).ha_entities
+        if entities == self.entities:
+            return False
+        logger.info(
+            "Door HA entities updated (%d → %d)", len(self.entities), len(entities)
+        )
+        self.entities = entities
+        for gone in set(self._last_state) - set(entities):
+            self._last_state.pop(gone, None)
+        return True
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -461,7 +500,7 @@ class DoorHaPoller:
 
     async def _poll_once(self, client: Any) -> None:
         now = time.time()
-        for entity_id in self.cfg.ha_entities:
+        for entity_id in self.entities:
             payload = await self._get_state(client, entity_id)
             if not payload:
                 continue
@@ -504,7 +543,7 @@ class DoorHaPoller:
                 logger.info("Door %s initial %s (%s)", name, state, entity_id)
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        if not self.cfg.ha_entities:
+        if not self.entities and self.settings_store is None:
             return
         if not self.cfg.ha_token:
             logger.error(
@@ -523,11 +562,12 @@ class DoorHaPoller:
         async with httpx.AsyncClient(timeout=timeout) as client:
             logger.info(
                 "Door HA poller started (%d entit%s every %.0fs)",
-                len(self.cfg.ha_entities),
-                "y" if len(self.cfg.ha_entities) == 1 else "ies",
+                len(self.entities),
+                "y" if len(self.entities) == 1 else "ies",
                 self.cfg.ha_poll_seconds,
             )
             while not stop_event.is_set():
+                self.reload_entities()
                 try:
                     await self._poll_once(client)
                 except Exception:

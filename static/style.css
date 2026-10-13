@@ -6205,3 +6205,47 @@ body.plan-editor-modal-open {
     0 0 / 16px 16px;
 }
 
+
+.contacts-table input.contact-name-input,
+.contacts-table select {
+  width: 100%;
+  min-width: 7rem;
+  box-sizing: border-box;
+}
+
+.contacts-table .contact-id {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.contacts-table .contact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.contacts-table tr.is-silent td {
+  opacity: 0.75;
+}
+
+.contacts-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.6rem 0 0.25rem;
+}
+
+.contacts-add input {
+  flex: 1 1 12rem;
+  min-width: 0;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9rem;
+}

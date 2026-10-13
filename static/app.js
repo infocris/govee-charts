@@ -40,6 +40,9 @@
     overviewDeviceFilterEl.value = overviewTextFilter;
   }
   const doorsBody = document.getElementById("doors-body");
+  const contactsBody = document.getElementById("contacts-body");
+  const contactsStatus = document.getElementById("contacts-status");
+  let contactSensors = [];
   const doorsStatus = document.getElementById("doors-status");
   const doorLogEl = document.getElementById("door-log");
   const doorLogTitleEl = document.getElementById("door-log-title");
@@ -5686,12 +5689,268 @@
     }
   }
 
+  function setContactsStatus(message, tone) {
+    if (!contactsStatus) return;
+    contactsStatus.textContent = message || "";
+    if (tone) contactsStatus.dataset.tone = tone;
+    else delete contactsStatus.dataset.tone;
+  }
+
+  async function contactsRequest(url, options) {
+    const res = await fetch(url, options);
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((body && body.detail) || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function loadContactSensors() {
+    if (!contactsBody) return;
+    const data = await contactsRequest("/api/doors/sensors");
+    contactSensors = Array.isArray(data.sensors) ? data.sensors : [];
+    renderContactSensors();
+  }
+
+  function contactSelect(options, value, onChange) {
+    const select = document.createElement("select");
+    select.className = "cat-select";
+    for (const opt of options) {
+      const option = document.createElement("option");
+      option.value = opt.id;
+      option.textContent = opt.label;
+      select.appendChild(option);
+    }
+    select.value = value || "";
+    suppressScrollValueChange(select);
+    select.addEventListener("change", () => onChange(select.value, select));
+    return select;
+  }
+
+  async function patchContactSensor(sensor, patch) {
+    await contactsRequest(`/api/doors/${encodeURIComponent(sensor.sensor_id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+  }
+
+  async function setContactOpening(sensor, connectionId) {
+    const sid = sensor.sensor_id;
+    const previous = sensor.connection_id || "";
+    if (previous && previous !== connectionId) {
+      const old = apartmentConnections.find((c) => (c.id || c.connection_id) === previous);
+      const keep = (old && old.sensor_ids ? old.sensor_ids : []).filter((x) => x !== sid);
+      await contactsRequest(`/api/connections/${encodeURIComponent(previous)}/sensors`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sensor_ids: keep }),
+      });
+    }
+    if (connectionId) {
+      const target = apartmentConnections.find(
+        (c) => (c.id || c.connection_id) === connectionId
+      );
+      const ids = new Set(target && target.sensor_ids ? target.sensor_ids : []);
+      ids.add(sid);
+      await contactsRequest(`/api/connections/${encodeURIComponent(connectionId)}/sensors`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sensor_ids: [...ids] }),
+      });
+    }
+  }
+
+  async function runContactAction(action, okMessage) {
+    setContactsStatus("");
+    try {
+      await action();
+      await loadDoors();
+      if (okMessage) setContactsStatus(okMessage, "ok");
+    } catch (err) {
+      setContactsStatus(t("overview.contactsError", { error: err.message }), "bad");
+      await loadContactSensors().catch(() => {});
+    }
+  }
+
+  function renderContactSensors() {
+    if (!contactsBody) return;
+    if (document.activeElement && contactsBody.contains(document.activeElement)) {
+      return;
+    }
+    contactsBody.innerHTML = "";
+    if (!contactSensors.length) {
+      contactsBody.innerHTML = `<tr><td colspan="6" class="overview-empty">${escapeHtml(
+        t("overview.noDoors")
+      )}</td></tr>`;
+      return;
+    }
+    const rooms = [{ id: "", label: "—" }, ...(taxonomyData.rooms || [])];
+    const kinds = [
+      { id: "", label: "—" },
+      ...["door", "window", "other"].map((k) => ({
+        id: k,
+        label: t(`overview.contactKind.${k}`),
+      })),
+    ];
+    const openings = [
+      { id: "", label: t("overview.contactNoOpening") },
+      ...apartmentConnections.map((c) => ({
+        id: c.id || c.connection_id,
+        label: `${c.label_a || c.room_a} ↔ ${c.label_b || c.room_b}`,
+      })),
+    ];
+    for (const sensor of contactSensors) {
+      const name = sensor.name || sensor.sensor_id;
+      const tr = document.createElement("tr");
+      if (!sensor.reported_ts) tr.classList.add("is-silent");
+
+      const nameTd = document.createElement("td");
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "device-name-input contact-name-input";
+      input.maxLength = 80;
+      input.value = name;
+      input.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") input.blur();
+        if (ev.key === "Escape") {
+          input.value = name;
+          input.blur();
+        }
+      });
+      input.addEventListener("change", () => {
+        const value = input.value.trim();
+        if (!value || value === name) {
+          input.value = name;
+          return;
+        }
+        runContactAction(
+          () => patchContactSensor(sensor, { name: value }),
+          t("overview.contactsSaved", { name: value })
+        );
+      });
+      const idSpan = document.createElement("span");
+      idSpan.className = "contact-id";
+      idSpan.textContent = sensor.sensor_id;
+      nameTd.append(input, idSpan);
+
+      const roomTd = document.createElement("td");
+      roomTd.appendChild(
+        contactSelect(rooms, sensor.room, (value) =>
+          runContactAction(
+            () => patchContactSensor(sensor, { room: value || null }),
+            t("overview.contactsSaved", { name })
+          )
+        )
+      );
+      const kindTd = document.createElement("td");
+      kindTd.appendChild(
+        contactSelect(kinds, sensor.kind, (value) =>
+          runContactAction(
+            () => patchContactSensor(sensor, { kind: value || null }),
+            t("overview.contactsSaved", { name })
+          )
+        )
+      );
+      const openingTd = document.createElement("td");
+      const openingSelect = contactSelect(openings, sensor.connection_id, (value) =>
+        runContactAction(
+          () => setContactOpening(sensor, value),
+          t("overview.contactsSaved", { name })
+        )
+      );
+      openingSelect.disabled = !apartmentConnections.length;
+      openingTd.appendChild(openingSelect);
+
+      const stateTd = document.createElement("td");
+      const st = String(sensor.reported_state || "");
+      const bits = [];
+      if (st) {
+        bits.push(
+          `<span class="door-state door-state-${escapeHtml(st)}">${escapeHtml(st)}</span>`
+        );
+      }
+      bits.push(
+        `<span class="overview-meta">${escapeHtml(
+          sensor.reported_ts
+            ? `${fmtTime(sensor.reported_ts)} · ${sensor.reported_source || "—"}`
+            : t("overview.contactNever")
+        )}</span>`
+      );
+      const extra = [t("overview.contactEvents", { n: Number(sensor.event_count || 0) })];
+      if (sensor.ha_polled) extra.push(t("overview.contactHaPolled"));
+      bits.push(`<span class="overview-meta">${escapeHtml(extra.join(" · "))}</span>`);
+      stateTd.innerHTML = bits.join("<br />");
+
+      const actionsTd = document.createElement("td");
+      const actions = document.createElement("div");
+      actions.className = "contact-actions";
+      const logBtn = document.createElement("button");
+      logBtn.type = "button";
+      logBtn.className = "door-force-btn";
+      logBtn.textContent = t("overview.contactLog");
+      logBtn.disabled = !Number(sensor.event_count || 0);
+      logBtn.addEventListener("click", () => {
+        loadDoorLog(sensor).catch((err) => console.warn(err));
+      });
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "door-force-btn";
+      delBtn.textContent = t("overview.contactDelete");
+      delBtn.addEventListener("click", () => {
+        const msg = t("overview.contactDeleteConfirm", {
+          name,
+          polled: sensor.ha_polled ? t("overview.contactDeletePolled") : "",
+        });
+        if (!window.confirm(msg)) return;
+        runContactAction(
+          () =>
+            contactsRequest(`/api/doors/${encodeURIComponent(sensor.sensor_id)}`, {
+              method: "DELETE",
+            }),
+          t("overview.contactsDeleted", { name })
+        );
+      });
+      actions.append(logBtn, delBtn);
+      actionsTd.appendChild(actions);
+
+      tr.append(nameTd, roomTd, kindTd, openingTd, stateTd, actionsTd);
+      contactsBody.appendChild(tr);
+    }
+  }
+
+  function initContactSensors() {
+    const form = document.getElementById("contacts-add-form");
+    if (!form) return;
+    form.addEventListener("submit", () => {
+      const entityEl = document.getElementById("contacts-add-entity");
+      const nameEl = document.getElementById("contacts-add-name");
+      const entity = String(entityEl.value || "").trim();
+      if (!entity) return;
+      runContactAction(async () => {
+        await contactsRequest("/api/doors/ha-entities", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            entity_id: entity,
+            name: String(nameEl.value || "").trim() || null,
+          }),
+        });
+        entityEl.value = "";
+        nameEl.value = "";
+      }, t("overview.contactsAdded", { entity }));
+    });
+  }
+
+  initContactSensors();
+
   async function loadDoors() {
     try {
       const res = await fetch("/api/connections");
       if (!res.ok) throw new Error(`connections HTTP ${res.status}`);
       const data = await res.json();
       applyConnectionsPayload(data);
+      await loadContactSensors().catch((err) =>
+        setContactsStatus(t("overview.contactsError", { error: err.message }), "bad")
+      );
     } catch (err) {
       if (doorsBody) {
         doorsBody.innerHTML = `<tr><td colspan="5" class="overview-empty">${escapeHtml(
