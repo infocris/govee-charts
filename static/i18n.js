@@ -171,6 +171,15 @@
       "settings.federationPullSettingsBusy": "Pulling sensor settings…",
       "settings.federationPullSettingsDone":
         "Settings pulled: {updated} updated, {unchanged} unchanged, {skipped} skipped.",
+      "settings.federationPullPlans": "Pull plans",
+      "settings.federationPullPlansTitle":
+        "Import this peer's floor plans (same plan id overwrites the local copy)",
+      "settings.federationPullPlansConfirm":
+        "Import the floor plans from {peer}? Local plans with the same id will be overwritten.",
+      "settings.federationPullPlansBusy": "Pulling floor plans…",
+      "settings.federationPullPlansDone":
+        "Plans pulled: {added} added, {updated} updated, {unchanged} unchanged.",
+      "settings.federationPullPlansActivated": "Activated “{name}”.",
       "settings.federationOpen": "Open peer UI",
       "settings.federationOnline": "Online",
       "settings.federationOffline": "Offline",
@@ -788,6 +797,15 @@
       "settings.federationPullSettingsBusy": "Récupération des paramètres…",
       "settings.federationPullSettingsDone":
         "Paramètres récupérés : {updated} mis à jour, {unchanged} inchangés, {skipped} ignorés.",
+      "settings.federationPullPlans": "Récupérer les plans",
+      "settings.federationPullPlansTitle":
+        "Importer les plans de ce pair (un plan de même id écrase la copie locale)",
+      "settings.federationPullPlansConfirm":
+        "Importer les plans de {peer} ? Les plans locaux de même id seront écrasés.",
+      "settings.federationPullPlansBusy": "Récupération des plans…",
+      "settings.federationPullPlansDone":
+        "Plans récupérés : {added} ajoutés, {updated} mis à jour, {unchanged} inchangés.",
+      "settings.federationPullPlansActivated": "« {name} » activé.",
       "settings.federationOpen": "Ouvrir l’UI du pair",
       "settings.federationOnline": "En ligne",
       "settings.federationOffline": "Hors ligne",

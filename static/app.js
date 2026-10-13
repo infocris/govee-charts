@@ -1819,6 +1819,7 @@
       actions.className = "settings-federation-row-actions";
       actions.appendChild(makePullBtn("Names"));
       actions.appendChild(makePullBtn("Settings"));
+      actions.appendChild(makePullBtn("Plans"));
       actions.appendChild(removeBtn);
 
       row.appendChild(main);
@@ -1862,10 +1863,7 @@
 
   async function pullFederationMeta(url, kind) {
     setFederationSettingsStatus(t(`settings.federationPull${kind}Busy`), "");
-    const endpoint =
-      kind === "Settings"
-        ? "/api/federation/pull-settings"
-        : "/api/federation/pull-names";
+    const endpoint = `/api/federation/pull-${kind.toLowerCase()}`;
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1876,6 +1874,21 @@
       throw new Error(data.detail || `HTTP ${res.status}`);
     }
     const updated = Array.isArray(data.updated) ? data.updated : [];
+    if (kind === "Plans") {
+      const added = Array.isArray(data.added) ? data.added : [];
+      let msg = t("settings.federationPullPlansDone", {
+        added: added.length,
+        updated: updated.length,
+        unchanged: data.unchanged || 0,
+      });
+      if (data.activated && data.active_plan) {
+        msg += ` ${t("settings.federationPullPlansActivated", {
+          name: data.active_plan.name || data.activated,
+        })}`;
+      }
+      setFederationSettingsStatus(msg, "ok");
+      return;
+    }
     setFederationSettingsStatus(
       t(`settings.federationPull${kind}Done`, {
         updated: updated.length,

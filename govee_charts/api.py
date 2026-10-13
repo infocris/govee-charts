@@ -49,6 +49,7 @@ from govee_charts.floorplan import (
     find_plan,
     known_room_options,
     load_plans,
+    merge_imported_plans,
     plan_summary,
     save_plans,
     validate_plan_update,
@@ -2408,6 +2409,106 @@ def create_app(
     ) -> dict[str, Any]:
         """Overwrite local sensor names, categories and plan positions from one peer."""
         return await _pull_peer_meta(body.url, settings=True)
+
+    @app.post("/api/federation/pull-plans")
+    async def api_federation_pull_plans(body: FederationPeerProbe) -> dict[str, Any]:
+        """Import floor plans from one peer (upsert by plan id)."""
+        try:
+            url = normalize_peer_url(body.url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        headers: dict[str, str] = {}
+        token = app.state.federation_token
+        if token:
+            headers["X-Govee-Token"] = token
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0, verify=False, headers=headers
+            ) as client:
+                res = await client.get(f"{url}/api/apartment/plans")
+                res.raise_for_status()
+                listing = res.json()
+                if not isinstance(listing, dict) or not isinstance(
+                    listing.get("plans"), list
+                ):
+                    raise ValueError("unexpected plan listing")
+                remote_plans: list[Any] = []
+                for summary in listing["plans"]:
+                    pid = str((summary or {}).get("id") or "").strip()
+                    if not pid:
+                        continue
+                    res = await client.get(f"{url}/api/apartment/plans/{pid}")
+                    res.raise_for_status()
+                    remote_plans.append(res.json())
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Peer {url} unreachable: {exc}"
+            ) from exc
+
+        before = _plans_store()
+        merged = merge_imported_plans(
+            before, remote_plans, listing.get("active_plan_id")
+        )
+        store = merged["store"]
+        active_id = store.get("active_plan_id")
+        changed_ids = {p["id"] for p in merged["added"] + merged["updated"]}
+        relayout = bool(active_id) and (
+            active_id in changed_ids or bool(merged["activated"])
+        )
+        weather_svc: WeatherService | None = app.state.weather
+        layout = weather_svc.apartment if weather_svc is not None else None
+
+        # Recompile the live layout when the active plan was replaced or adopted;
+        # a peer plan that cannot be applied here is imported but not activated.
+        if relayout:
+            compiled = (
+                apply_plan_to_layout(layout, find_plan(store, active_id))
+                if layout is not None
+                else {"ok": False, "error": "Apartment layout not available"}
+            )
+            if not compiled.get("ok"):
+                logger.warning(
+                    "Imported plan %s not applied: %s",
+                    active_id,
+                    compiled.get("error") or compiled.get("warnings"),
+                )
+                if merged["activated"]:
+                    store = {**store, "active_plan_id": None}
+                    merged["activated"] = None
+                relayout = False
+
+        if changed_ids or store.get("active_plan_id") != before.get("active_plan_id"):
+            try:
+                _persist_plans(store)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to save plans: {exc}"
+                ) from exc
+            if relayout:
+                try:
+                    await _ensure_layout_connections(db, layout)
+                except Exception as exc:
+                    logger.warning("Connection sync after plan import failed: %s", exc)
+
+        logger.info(
+            "Pulled floor plans from %s: %d added, %d updated, %d unchanged, %d skipped",
+            url,
+            len(merged["added"]),
+            len(merged["updated"]),
+            merged["unchanged"],
+            merged["skipped"],
+        )
+        return {
+            "ok": True,
+            "peer": url,
+            "added": merged["added"],
+            "updated": merged["updated"],
+            "unchanged": merged["unchanged"],
+            "skipped": merged["skipped"],
+            "activated": merged["activated"],
+            "active_plan": active_plan_meta(store),
+        }
 
     @app.get("/api/devices")
     async def api_devices(

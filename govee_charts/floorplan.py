@@ -850,6 +850,60 @@ def duplicate_plan(plan: dict[str, Any], *, name: str | None = None) -> dict[str
     return clone
 
 
+def merge_imported_plans(
+    store: dict[str, Any],
+    remote_plans: list[Any],
+    remote_active_id: str | None = None,
+) -> dict[str, Any]:
+    """Upsert plans pulled from a federation peer into ``store``.
+
+    Plans are matched by id: unknown ids are added, known ids are overwritten
+    when their content differs (``updated_at`` ignored). Local plans absent on
+    the peer are kept. The peer's active plan is adopted only when no plan is
+    active locally. Returns the new store plus a per-plan report.
+    """
+    plans = [p for p in (store.get("plans") or []) if isinstance(p, dict)]
+    index = {str(p.get("id")): i for i, p in enumerate(plans)}
+    added: list[dict[str, Any]] = []
+    updated: list[dict[str, Any]] = []
+    unchanged = 0
+    skipped = 0
+
+    def _content(plan: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in plan.items() if k != "updated_at"}
+
+    for raw in remote_plans or []:
+        if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
+            skipped += 1
+            continue
+        plan = _normalize_plan(raw)
+        pid = str(plan["id"])
+        summary = {"id": pid, "name": plan.get("name")}
+        if pid not in index:
+            index[pid] = len(plans)
+            plans.append(plan)
+            added.append(summary)
+        elif _content(plans[index[pid]]) != _content(plan):
+            plans[index[pid]] = plan
+            updated.append(summary)
+        else:
+            unchanged += 1
+
+    active = store.get("active_plan_id")
+    activated = None
+    if not active and remote_active_id and str(remote_active_id) in index:
+        active = activated = str(remote_active_id)
+
+    return {
+        "store": {**store, "active_plan_id": active, "plans": plans},
+        "added": added,
+        "updated": updated,
+        "unchanged": unchanged,
+        "skipped": skipped,
+        "activated": activated,
+    }
+
+
 def validate_plan_update(
     existing: dict[str, Any],
     patch: dict[str, Any],

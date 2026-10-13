@@ -13,6 +13,7 @@ from govee_charts.floorplan import (
     duplicate_plan,
     empty_plan,
     load_plans,
+    merge_imported_plans,
     partition_faces_from_walls,
     save_plans,
     validate_plan_update,
@@ -405,6 +406,45 @@ class FloorplanCompileTests(unittest.TestCase):
         self.assertTrue(by_id["living"]["exterior"])
         self.assertFalse(by_id["bedroom"]["has_window"])
         self.assertTrue(by_id["bedroom"]["exterior"])
+
+
+class MergeImportedPlansTests(unittest.TestCase):
+    def test_adds_updates_and_keeps_local_only(self) -> None:
+        local_only = empty_plan(name="Local", mode="free", plan_id="plan-local")
+        shared = empty_plan(name="Shared", mode="free", plan_id="plan-shared")
+        store = {"active_plan_id": None, "plans": [local_only, shared]}
+        remote_shared = {**shared, "name": "Shared v2", "updated_at": "2030-01-01"}
+        remote_new = empty_plan(name="Peer", mode="partition", plan_id="plan-peer")
+
+        out = merge_imported_plans(store, [remote_shared, remote_new, {"name": "x"}])
+
+        ids = [p["id"] for p in out["store"]["plans"]]
+        self.assertEqual(ids, ["plan-local", "plan-shared", "plan-peer"])
+        self.assertEqual(out["store"]["plans"][1]["name"], "Shared v2")
+        self.assertEqual([p["id"] for p in out["added"]], ["plan-peer"])
+        self.assertEqual([p["id"] for p in out["updated"]], ["plan-shared"])
+        self.assertEqual(out["skipped"], 1)
+        self.assertIsNone(out["activated"])
+
+    def test_identical_plan_ignoring_timestamp_is_unchanged(self) -> None:
+        plan = empty_plan(name="Same", mode="free", plan_id="plan-same")
+        store = {"active_plan_id": None, "plans": [plan]}
+        out = merge_imported_plans(store, [{**plan, "updated_at": "2030-01-01"}])
+        self.assertEqual(out["unchanged"], 1)
+        self.assertEqual(out["updated"], [])
+
+    def test_adopts_peer_active_only_when_none_local(self) -> None:
+        mine = empty_plan(name="Mine", mode="free", plan_id="plan-mine")
+        peer = empty_plan(name="Peer", mode="free", plan_id="plan-peer")
+
+        out = merge_imported_plans({"active_plan_id": None, "plans": []}, [peer], "plan-peer")
+        self.assertEqual(out["activated"], "plan-peer")
+        self.assertEqual(out["store"]["active_plan_id"], "plan-peer")
+
+        store = {"active_plan_id": "plan-mine", "plans": [mine]}
+        out = merge_imported_plans(store, [peer], "plan-peer")
+        self.assertIsNone(out["activated"])
+        self.assertEqual(out["store"]["active_plan_id"], "plan-mine")
 
 
 if __name__ == "__main__":
