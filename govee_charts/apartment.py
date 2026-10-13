@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import heapq
-import json
 import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from govee_charts.settings_store import KEY_APARTMENT_OVERRIDES, SettingsStore, default_store
+
 logger = logging.getLogger(__name__)
 
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OVERRIDES_PATH = ROOT / "data" / "apartment_overrides.json"
 
 # Storey geometry (T3): ~2.5 m ceiling, interior door frames ~2.0 m.
 # The ~0.5 m transom above the lintel is a weakly mixed ceiling pocket.
@@ -1577,21 +1575,22 @@ def simulate_network(
     return series
 
 
-def load_overrides(path: Path | None = None) -> dict[str, Any]:
-    path = path or DEFAULT_OVERRIDES_PATH
+def load_overrides(store: SettingsStore | None = None) -> dict[str, Any]:
+    st = store if store is not None else default_store()
     try:
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
+        data = st.get(KEY_APARTMENT_OVERRIDES) if st is not None else None
+        if isinstance(data, dict):
+            return data
     except Exception as exc:
         logger.warning("Apartment overrides unreadable: %s", exc)
     return {"rooms": {}}
 
 
-def save_overrides(layout: ApartmentLayout, path: Path | None = None) -> None:
+def save_overrides(layout: ApartmentLayout, store: SettingsStore | None = None) -> None:
     """Persist current exterior orientations for all rooms."""
-    path = path or DEFAULT_OVERRIDES_PATH
+    st = store if store is not None else default_store()
+    if st is None:
+        raise RuntimeError("Settings store is not configured")
     payload = {
         "rooms": {
             rid: {"exterior": list(room.exterior)}
@@ -1599,10 +1598,7 @@ def save_overrides(layout: ApartmentLayout, path: Path | None = None) -> None:
         }
     }
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        st.set(KEY_APARTMENT_OVERRIDES, payload)
     except Exception as exc:
         logger.warning("Apartment overrides write failed: %s", exc)
         raise

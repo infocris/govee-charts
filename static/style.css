@@ -715,6 +715,26 @@ body.sticky-views-enabled .views {
   color: color-mix(in srgb, #e07070 80%, var(--ink));
 }
 
+.settings-config-editor {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 14rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.settings-config-editor:focus {
+  outline: none;
+  border-color: var(--muted);
+}
+
 .settings-stations-field {
   border: none;
   margin: 0;

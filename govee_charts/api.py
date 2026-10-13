@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -90,7 +91,7 @@ from govee_charts.federation_store import (
     MODE_COLLECTOR,
     MODE_FULL,
     load_federation_settings,
-    load_peers_file,
+    load_peers,
     normalize_mode,
     normalize_peer_url,
     normalize_peers,
@@ -99,6 +100,18 @@ from govee_charts.federation_store import (
 )
 from govee_charts.energy import build_energy_summary, estimate_live_ac_watts
 from govee_charts.map_chat_store import MapChatStore
+from govee_charts.settings_store import (
+    BOOTSTRAP_KEYS,
+    BOOTSTRAP_SECTIONS,
+    SECRET_MASK,
+    SettingsStore,
+    deep_merge,
+    diff_from_defaults,
+    mask_secrets,
+    strip_bootstrap,
+    unmask_secrets,
+    validate_against_defaults,
+)
 from govee_charts.tts import (
     HOME_TTS_VOICE_ID,
     default_voice_for_lang,
@@ -755,6 +768,10 @@ class FederationPeerAdd(BaseModel):
     url: str = Field(..., min_length=1)
 
 
+class SettingsSectionBody(BaseModel):
+    value: dict[str, Any]
+
+
 class FederationPeersReplace(BaseModel):
     peers: list[str] = Field(default_factory=list)
 
@@ -789,7 +806,7 @@ def device_display_name(
     device: dict[str, Any],
     labels: dict[str, str] | None = None,
 ) -> str:
-    """UI label > config.toml [labels] > BLE advertisement name > address."""
+    """UI label > [labels] setting > BLE advertisement name > address."""
     addr = str(device.get("address") or "").upper()
     custom = str(device.get("label") or "").strip()
     if custom:
@@ -958,6 +975,8 @@ def create_app(
     map_chat_store: MapChatStore | None = None,
     apartment_plans: dict[str, Any] | None = None,
     apartment_fallback: dict[str, Any] | None = None,
+    settings_store: SettingsStore | None = None,
+    config_defaults: dict[str, Any] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Govee Charts", docs_url=None, redoc_url=None)
     app.state.db = db
@@ -994,6 +1013,8 @@ def create_app(
     }
     app.state.cursor_chat = normalize_cursor_chat_config(cursor_chat)
     app.state.map_chat_store = map_chat_store
+    app.state.settings_store = settings_store
+    app.state.config_defaults = copy.deepcopy(config_defaults or {})
     app.state.apartment_plans = (
         apartment_plans if isinstance(apartment_plans, dict) else load_plans()
     )
@@ -1019,7 +1040,7 @@ def create_app(
         fb = getattr(app.state, "apartment_fallback", None)
         if not isinstance(fb, dict):
             return
-        # Back to the config.toml switch (an active plan forces the map on).
+        # Back to the apartment.enabled setting (an active plan forces the map on).
         layout.enabled = bool(fb.get("enabled"))
         if not fb.get("rooms"):
             return
@@ -2167,6 +2188,114 @@ def create_app(
             )
         return result
 
+    def _settings_sections() -> list[str]:
+        return [
+            name
+            for name in app.state.config_defaults
+            if name not in BOOTSTRAP_SECTIONS
+        ]
+
+    def _require_settings_section(section: str) -> SettingsStore:
+        store = app.state.settings_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="Settings store not available")
+        if section not in _settings_sections():
+            raise HTTPException(status_code=404, detail=f"Unknown settings section: {section}")
+        return store
+
+    def _section_defaults(section: str) -> dict[str, Any]:
+        return strip_bootstrap(section, app.state.config_defaults.get(section) or {})
+
+    def _section_effective(store: SettingsStore, section: str) -> dict[str, Any]:
+        return deep_merge(_section_defaults(section), store.get_section(section))
+
+    @app.get("/api/settings")
+    async def api_settings_list() -> dict[str, Any]:
+        """DB-managed config sections (bootstrap keys stay in config.toml)."""
+        store = app.state.settings_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="Settings store not available")
+        sections = []
+        for name in _settings_sections():
+            stored = store.get_section(name)
+            sections.append(
+                {
+                    "name": name,
+                    "customized": bool(stored),
+                    "updated_ts": store.section_updated_ts(name) if stored else None,
+                }
+            )
+        return {
+            "sections": sections,
+            "bootstrap": {
+                "file": "config.toml",
+                "sections": list(BOOTSTRAP_SECTIONS),
+                "keys": {k: list(v) for k, v in BOOTSTRAP_KEYS.items()},
+            },
+        }
+
+    @app.get("/api/settings/{section}")
+    async def api_settings_get(section: str) -> dict[str, Any]:
+        store = _require_settings_section(section)
+        stored = store.get_section(section)
+        return {
+            "section": section,
+            "value": mask_secrets(_section_effective(store, section)),
+            "defaults": mask_secrets(_section_defaults(section)),
+            "customized": bool(stored),
+            "secret_mask": SECRET_MASK,
+        }
+
+    @app.put("/api/settings/{section}")
+    async def api_settings_put(section: str, body: SettingsSectionBody) -> dict[str, Any]:
+        """Replace one section (stored as a diff against DEFAULTS)."""
+        store = _require_settings_section(section)
+        value = unmask_secrets(body.value, _section_effective(store, section))
+        value = strip_bootstrap(section, value)
+        defaults = _section_defaults(section)
+        errors = validate_against_defaults(value, defaults)
+        if errors:
+            raise HTTPException(status_code=422, detail="; ".join(errors[:10]))
+        if section == "federation":
+            value["peers"] = normalize_peers(list(value.get("peers") or []))
+            value["mode"] = normalize_mode(value.get("mode"))
+        elif section == "labels":
+            value = {str(k).upper(): str(v) for k, v in value.items()}
+        diff = diff_from_defaults(value, defaults)
+        if diff:
+            store.set_section(section, diff)
+        else:
+            store.delete_section(section)
+        if section == "federation":
+            # Peers / mode apply live; the publisher polls the store.
+            app.state.peers = list(value["peers"])
+            app.state.federation_mode = value["mode"]
+        logger.warning("Settings section %s updated from UI", section)
+        return {
+            "ok": True,
+            "section": section,
+            "customized": bool(diff),
+            "value": mask_secrets(_section_effective(store, section)),
+            "restart_required": True,
+        }
+
+    @app.delete("/api/settings/{section}")
+    async def api_settings_reset(section: str) -> dict[str, Any]:
+        """Reset one section to DEFAULTS."""
+        store = _require_settings_section(section)
+        store.delete_section(section)
+        if section == "federation":
+            app.state.peers = []
+            app.state.federation_mode = MODE_FULL
+        logger.warning("Settings section %s reset to defaults from UI", section)
+        return {
+            "ok": True,
+            "section": section,
+            "customized": False,
+            "value": mask_secrets(_section_defaults(section)),
+            "restart_required": True,
+        }
+
     @app.post("/api/restart")
     async def api_restart(
         target: str = Query(default="ui", pattern="^(ui|workers)$")
@@ -2223,8 +2352,8 @@ def create_app(
             ),
         }
 
-    def _sync_federation_from_disk() -> None:
-        """Prefer live file so Settings edits show without restarting UI."""
+    def _sync_federation_from_store() -> None:
+        """Prefer stored settings so Settings edits show without restarting UI."""
         settings = load_federation_settings()
         if settings is None:
             return
@@ -2232,7 +2361,7 @@ def create_app(
         app.state.federation_mode = normalize_mode(settings.get("mode"))
 
     def _apply_federation_peers(peers: list[str]) -> list[str]:
-        """Persist peers and update in-memory state (workers reload from disk)."""
+        """Persist peers and update in-memory state (workers reload from the store)."""
         normalized = save_peers(peers)
         app.state.peers = list(normalized)
         return normalized
@@ -2256,7 +2385,7 @@ def create_app(
     async def api_federation() -> dict[str, Any]:
         """Local node id + peers with server-side health probes."""
         ssl_port = app.state.ssl_port
-        _sync_federation_from_disk()
+        _sync_federation_from_store()
         mode = normalize_mode(app.state.federation_mode)
         peers_cfg: list[str] = list(app.state.peers or [])
         if mode == MODE_COLLECTOR:
@@ -2291,7 +2420,7 @@ def create_app(
         if mode == MODE_COLLECTOR and not app.state.scanner_enabled:
             warning = (
                 "Collector mode is on, but scanner.enabled is false — "
-                "enable BLE scanning in config.toml and restart workers"
+                "enable BLE scanning in Settings → Configuration (scanner) and restart workers"
             )
         return {
             "ok": True,
@@ -2329,7 +2458,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         current = list(app.state.peers or [])
-        file_peers = load_peers_file()
+        file_peers = load_peers()
         if file_peers is not None:
             current = list(file_peers)
         if url in current:
@@ -2348,7 +2477,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         current = list(app.state.peers or [])
-        file_peers = load_peers_file()
+        file_peers = load_peers()
         if file_peers is not None:
             current = list(file_peers)
         if target not in current:
@@ -2489,7 +2618,7 @@ def create_app(
     @app.post("/api/federation/pull-names")
     async def api_federation_pull_names(body: FederationPeerProbe) -> dict[str, Any]:
         """Overwrite local sensor labels with the custom names of one peer."""
-        _sync_federation_from_disk()
+        _sync_federation_from_store()
         _require_federation_outbound()
         return await _pull_peer_meta(body.url, settings=False)
 
@@ -2498,14 +2627,14 @@ def create_app(
         body: FederationPeerProbe,
     ) -> dict[str, Any]:
         """Overwrite local sensor names, categories and plan positions from one peer."""
-        _sync_federation_from_disk()
+        _sync_federation_from_store()
         _require_federation_outbound()
         return await _pull_peer_meta(body.url, settings=True)
 
     @app.post("/api/federation/pull-plans")
     async def api_federation_pull_plans(body: FederationPeerProbe) -> dict[str, Any]:
         """Import floor plans from one peer (upsert by plan id)."""
-        _sync_federation_from_disk()
+        _sync_federation_from_store()
         _require_federation_outbound()
         try:
             url = normalize_peer_url(body.url)
@@ -3846,7 +3975,7 @@ def create_app(
 
     @app.post("/api/apartment/plans/{plan_id}/deactivate")
     async def api_deactivate_plan(plan_id: str) -> dict[str, Any]:
-        """Clear active plan and restore config.toml layout (if this plan was active)."""
+        """Clear active plan and restore the configured layout (if this plan was active)."""
         weather_svc: WeatherService | None = app.state.weather
         store = _plans_store()
         if store.get("active_plan_id") != plan_id:
@@ -4075,7 +4204,7 @@ def create_app(
     @app.post("/api/devices/{address}/push-meta")
     async def api_push_device_meta(address: str) -> dict[str, Any]:
         """Push this device's label/placement fields to all federation peers."""
-        _sync_federation_from_disk()
+        _sync_federation_from_store()
         _require_federation_outbound()
         peers: list[str] = list(app.state.peers or [])
         if not peers:

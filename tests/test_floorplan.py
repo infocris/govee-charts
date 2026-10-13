@@ -18,6 +18,7 @@ from govee_charts.floorplan import (
     save_plans,
     validate_plan_update,
 )
+from govee_charts.settings_store import SettingsStore
 
 
 def _free_plan() -> dict:
@@ -237,10 +238,10 @@ class FloorplanCompileTests(unittest.TestCase):
 
     def test_persist_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "apartment_plans.json"
+            settings = SettingsStore(Path(tmp) / "readings.db")
             store = {"active_plan_id": None, "plans": [_free_plan()]}
-            save_plans(store, path)
-            loaded = load_plans(path)
+            save_plans(store, settings)
+            loaded = load_plans(settings)
             self.assertEqual(len(loaded["plans"]), 1)
             self.assertEqual(loaded["plans"][0]["mode"], "free")
             self.assertEqual(len(loaded["plans"][0]["shapes"]), 3)

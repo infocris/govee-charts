@@ -1735,6 +1735,133 @@
     return { data, peers: normalized };
   }
 
+  let configSections = [];
+
+  function setConfigStatus(message, tone) {
+    const el = document.getElementById("settings-config-status");
+    if (!el) return;
+    el.textContent = message || "";
+    if (tone) el.dataset.tone = tone;
+    else delete el.dataset.tone;
+  }
+
+  async function configRequest(url, options) {
+    const res = await fetch(url, options);
+    let body = null;
+    try {
+      body = await res.json();
+    } catch (_) {
+      body = null;
+    }
+    if (!res.ok) {
+      throw new Error((body && body.detail) || `HTTP ${res.status}`);
+    }
+    return body;
+  }
+
+  function renderConfigSections(selected) {
+    const sel = document.getElementById("settings-config-section");
+    if (!sel) return;
+    sel.replaceChildren();
+    for (const sec of configSections) {
+      const opt = document.createElement("option");
+      opt.value = sec.name;
+      opt.textContent = sec.customized
+        ? t("settings.configCustomized", { name: sec.name })
+        : sec.name;
+      sel.appendChild(opt);
+    }
+    if (selected && configSections.some((s) => s.name === selected)) {
+      sel.value = selected;
+    }
+  }
+
+  async function loadConfigSection(name) {
+    const editor = document.getElementById("settings-config-editor");
+    if (!editor || !name) return;
+    setConfigStatus(t("settings.configLoading"));
+    const data = await configRequest(`/api/settings/${encodeURIComponent(name)}`);
+    editor.value = JSON.stringify(data.value, null, 2);
+    setConfigStatus("");
+  }
+
+  async function refreshConfigSettings() {
+    const sel = document.getElementById("settings-config-section");
+    if (!sel) return;
+    const previous = sel.value;
+    const data = await configRequest("/api/settings");
+    configSections = Array.isArray(data.sections) ? data.sections : [];
+    renderConfigSections(previous);
+    await loadConfigSection(sel.value);
+  }
+
+  function markConfigSection(name, customized) {
+    const sec = configSections.find((s) => s.name === name);
+    if (sec) sec.customized = Boolean(customized);
+    renderConfigSections(name);
+  }
+
+  async function saveConfigSection() {
+    const sel = document.getElementById("settings-config-section");
+    const editor = document.getElementById("settings-config-editor");
+    if (!sel || !editor || !sel.value) return;
+    let value;
+    try {
+      value = JSON.parse(editor.value);
+    } catch (err) {
+      setConfigStatus(t("settings.configInvalid", { error: err.message }), "bad");
+      return;
+    }
+    const data = await configRequest(`/api/settings/${encodeURIComponent(sel.value)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    editor.value = JSON.stringify(data.value, null, 2);
+    markConfigSection(sel.value, data.customized);
+    setConfigStatus(t("settings.configSaved"), "ok");
+    if (sel.value === "federation") {
+      refreshFederationSettings().catch((err) => console.warn(err));
+    }
+  }
+
+  async function resetConfigSection() {
+    const sel = document.getElementById("settings-config-section");
+    const editor = document.getElementById("settings-config-editor");
+    if (!sel || !editor || !sel.value) return;
+    if (!window.confirm(t("settings.configResetConfirm", { name: sel.value }))) return;
+    const data = await configRequest(`/api/settings/${encodeURIComponent(sel.value)}`, {
+      method: "DELETE",
+    });
+    editor.value = JSON.stringify(data.value, null, 2);
+    markConfigSection(sel.value, false);
+    setConfigStatus(t("settings.configResetDone"), "ok");
+    if (sel.value === "federation") {
+      refreshFederationSettings().catch((err) => console.warn(err));
+    }
+  }
+
+  function initConfigSettings() {
+    const sel = document.getElementById("settings-config-section");
+    if (!sel) return;
+    const onError = (err) =>
+      setConfigStatus(t("settings.configError", { error: err.message }), "bad");
+    sel.addEventListener("change", () => {
+      loadConfigSection(sel.value).catch(onError);
+    });
+    document
+      .getElementById("settings-config-save")
+      ?.addEventListener("click", () => saveConfigSection().catch(onError));
+    document
+      .getElementById("settings-config-reset")
+      ?.addEventListener("click", () => resetConfigSection().catch(onError));
+    document
+      .getElementById("settings-config-reload")
+      ?.addEventListener("click", () => loadConfigSection(sel.value).catch(onError));
+  }
+
+  initConfigSettings();
+
   function setFederationSettingsStatus(message, tone) {
     const el = document.getElementById("settings-federation-status");
     if (!el) return;
@@ -5765,6 +5892,9 @@
       loadSystem().catch((err) => console.warn(err));
     } else if (view === "settings") {
       ensureStationsForSettings().catch((err) => console.warn(err));
+      refreshConfigSettings().catch((err) =>
+        setConfigStatus(t("settings.configError", { error: err.message }), "bad")
+      );
     }
     syncBackfillPolling();
   }
@@ -8048,7 +8178,7 @@
     if (!data || !data.enabled) {
       if (mapOverviewChartsMetaEl) {
         mapOverviewChartsMetaEl.textContent =
-          "Enable [apartment] in config.toml to chart indoor averages.";
+          "Enable apartment in Settings → Configuration to chart indoor averages.";
       }
       if (mapOverviewChartsStatusEl) mapOverviewChartsStatusEl.textContent = "";
       if (mapOverviewTempChart) {
@@ -8414,7 +8544,7 @@
       if (sectionTempScaleEl) sectionTempScaleEl.hidden = true;
       if (sectionMetaEl) {
         sectionMetaEl.textContent =
-          "Enable [apartment] in config.toml to show the cross-section.";
+          "Enable apartment in Settings → Configuration to show the cross-section.";
       }
       return;
     }
@@ -8974,7 +9104,7 @@
       if (networkTempScaleEl) networkTempScaleEl.hidden = true;
       if (networkMetaEl) {
         networkMetaEl.textContent =
-          "Apartment map disabled — activate a floor plan, or enable [apartment] in config.toml.";
+          "Apartment map disabled — activate a floor plan, or enable apartment in Settings → Configuration.";
       }
       if (networkStatusEl) networkStatusEl.textContent = "Disabled";
       return;
@@ -10605,7 +10735,7 @@
     if (facadeMetaEl) {
       if (!data.enabled) {
         facadeMetaEl.textContent =
-          "Apartment network disabled — enable [apartment] in config.toml to use projections.";
+          "Apartment network disabled — enable apartment in Settings → Configuration to use projections.";
       } else {
         const bits = [
           `Floor ${data.floor}/${data.floors_total}`,

@@ -96,7 +96,29 @@ below 12.x (12 dropped 3.9 support).
 ```bash
 cd ~/govee-charts
 make install
-# optional: edit config.toml (labels, port, retention, federation)
+# optional: edit config.toml (port, SSL, database path) before the first start
+```
+
+## Configuration
+
+`config.toml` only holds **bootstrap** settings: `[server]`, `[database]` and
+`scanner.log_file`. Everything else (scanner, federation, weather, apartment,
+doors, HVAC, backfill, labels, …) lives in the database (`app_settings` table in
+`readings.db`) and is edited in **Settings → Configuration** (one JSON editor per
+section; restart workers and UI to apply). Federation peers and node mode still
+apply live from **Settings → Federation nodes**.
+
+On the first start, the non-bootstrap sections of `config.toml` and the legacy
+`data/federation_peers.json`, `data/apartment_overrides.json` and
+`data/apartment_plans.json` are imported once (the JSON files are renamed
+`*.imported`). After that, edits to those sections in `config.toml` are ignored
+(a warning is logged). Only values that differ from the built-in defaults are
+stored, so new defaults keep applying. Secrets (tokens, passwords) are masked in
+the API and UI.
+
+```bash
+venv/bin/python -m govee_charts.settings_store show [section]       # stored overrides
+venv/bin/python -m govee_charts.settings_store import-toml --force  # re-import config.toml
 ```
 
 ## Usage
@@ -132,7 +154,7 @@ If `ssl = true` and certs are missing, the app auto-runs cert generation
 
 ## Run in the background
 
-After `make install` and editing `config.toml`:
+After `make install`:
 
 ### Linux (systemd)
 
@@ -242,7 +264,7 @@ On the **Overview** page, each sensor has an editable **name** (friendly label),
 **Zone** (interior/exterior), **Height** (high/mid/low), optional **Height cm**
 (exact mounting height above the floor, 0–600), and **Room** (kitchen, bedroom,
 corridor, living, other). Names and categories are stored in SQLite (labels also
-still work from `config.toml` as fallback). Values can be filtered in Overview
+still work from the `labels` setting as fallback). Values can be filtered in Overview
 and Compare. On first start, empty categories are inferred from friendly labels
 when possible.
 When **Height cm** is set, the **Map** view places temperatures on the vertical
@@ -251,7 +273,7 @@ back to high/mid/low mapped onto the door / transom geometry
 (`apartment.door_height_m` ≈ 2.0 m in a 2.5 m storey: high above the lintel,
 mid at mid-door, low near the floor).
 
-Enable in `config.toml` (`weather.enabled = true`).
+Enable in Settings → Configuration (`weather.enabled = true`).
 
 1. **Browser geolocation** (preferred) — Compare view asks for location and
    sends `latitude`/`longitude` to `/api/forecast`. Click **Locate** to refresh.
@@ -273,7 +295,7 @@ constant bias.
 
 ### Apartment layout (optional)
 
-Set `[apartment] enabled = true` in `config.toml` (see `config.example.toml`),
+Set `apartment.enabled = true` in Settings → Configuration (see `config.example.toml`),
 or simply activate a floor plan (an active plan turns the map on regardless of
 the config switch), to project rooms as a **multi-node RC network**:
 

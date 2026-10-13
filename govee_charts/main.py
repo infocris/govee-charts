@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import logging
 import os
 import signal
@@ -32,11 +33,7 @@ from govee_charts.db import Database, is_db_locked
 from govee_charts.decode import Reading
 from govee_charts.doors import DoorHaPoller, DoorMqttListener, DoorsConfig, import_ha_door_history
 from govee_charts.federation import PeerPublisher
-from govee_charts.federation_store import (
-    DEFAULT_PEERS_PATH,
-    MODE_COLLECTOR,
-    resolve_federation_settings,
-)
+from govee_charts.federation_store import MODE_COLLECTOR, normalize_mode, normalize_peers
 from govee_charts.ha_th import HaThConfig, HaThPoller
 from govee_charts.map_chat_store import MapChatStore
 from govee_charts.presence import PresenceConfig, PresenceService
@@ -48,6 +45,14 @@ from govee_charts.apartment import (
     load_overrides,
 )
 from govee_charts.floorplan import apply_plan_to_layout, find_plan, load_plans
+from govee_charts.settings_store import (
+    bootstrap_part,
+    configure_default_store,
+    deep_merge,
+    default_store,
+    import_legacy_settings,
+    load_sections,
+)
 from govee_charts.sslutil import resolve_ssl_files
 from govee_charts.weather import WeatherConfig, WeatherService
 
@@ -226,21 +231,31 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
-def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    out = dict(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = deep_merge(out[key], value)
-        else:
-            out[key] = value
-    return out
+def read_config_toml() -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        return {}
+    with CONFIG_PATH.open("rb") as fh:
+        return tomllib.load(fh)
+
+
+def load_bootstrap_config(toml_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """DEFAULTS + bootstrap keys from config.toml (server, database, log file)."""
+    raw = read_config_toml() if toml_cfg is None else toml_cfg
+    return deep_merge(DEFAULTS, bootstrap_part(raw))
 
 
 def load_config() -> dict[str, Any]:
-    cfg = dict(DEFAULTS)
-    if CONFIG_PATH.exists():
-        with CONFIG_PATH.open("rb") as fh:
-            cfg = deep_merge(cfg, tomllib.load(fh))
+    """Bootstrap from config.toml, everything else from the settings table."""
+    toml_cfg = read_config_toml()
+    cfg = load_bootstrap_config(toml_cfg)
+    store = configure_default_store(resolve_db_path(cfg))
+    import_legacy_settings(store, toml_cfg, DEFAULTS)
+    cfg = deep_merge(cfg, load_sections(store, DEFAULTS))
+    return normalize_config(cfg)
+
+
+def normalize_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    cfg = copy.deepcopy(cfg)
     # Normalize labels keys to uppercase strings
     labels_raw = cfg.get("labels") or {}
     cfg["labels"] = {str(k).upper(): str(v) for k, v in labels_raw.items()}
@@ -253,13 +268,8 @@ def load_config() -> dict[str, Any]:
     peers_raw = cfg.get("federation", {}).get("peers") or []
     if isinstance(peers_raw, str):
         peers_raw = [peers_raw]
-    # data/federation_peers.json (UI-managed) wins over config.toml when present.
-    fed_settings = resolve_federation_settings(
-        peers_raw,
-        config_mode=cfg.get("federation", {}).get("mode"),
-    )
-    cfg["federation"]["peers"] = list(fed_settings["peers"])
-    cfg["federation"]["mode"] = str(fed_settings["mode"])
+    cfg["federation"]["peers"] = normalize_peers(peers_raw)
+    cfg["federation"]["mode"] = normalize_mode(cfg["federation"].get("mode"))
     node_id = str(cfg["federation"].get("node_id") or "").strip()
     if not node_id:
         node_id = socket.gethostname() or "local"
@@ -388,7 +398,7 @@ async def _start_workers(
         fed["peers"],
         node_id=fed["node_id"],
         token=fed["token"] or None,
-        peers_path=DEFAULT_PEERS_PATH,
+        settings_store=default_store(),
         mode=str(fed.get("mode") or "full"),
     )
     await publisher.start()
@@ -1019,6 +1029,8 @@ async def run_ui_server(
         map_chat_store=map_chat_store,
         apartment_plans=apartment_plans,
         apartment_fallback=apartment_fallback,
+        settings_store=default_store(),
+        config_defaults=DEFAULTS,
     )
 
     http_config = uvicorn.Config(
@@ -1088,8 +1100,9 @@ async def run_workers(cfg: dict[str, Any], *, enable_scanner: bool = True) -> No
 
 async def amain() -> None:
     args = parse_args()
+    # Log file is a bootstrap key: set up logging before the settings import.
+    setup_logging(str(load_bootstrap_config()["scanner"]["log_file"]))
     cfg = load_config()
-    setup_logging(str(cfg["scanner"]["log_file"]))
 
     if args.discover:
         await discover_once(

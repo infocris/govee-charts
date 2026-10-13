@@ -21,7 +21,7 @@ Chat replies to the repository owner may follow their preferred language; projec
 - **Python package** `govee_charts/`: BLE scanner (Bleak), SQLite store (`aiosqlite`), FastAPI dashboard + JSON API, optional federation publisher (`httpx`).
 - **Static UI** in `static/` (vanilla JS + Chart.js CDN). No frontend build step.
 - **Entry point**: `python -m govee_charts.main` (see `Makefile`).
-- **Local config**: `config.toml` (gitignored). Template: `config.example.toml`.
+- **Settings**: `config.toml` (gitignored, template `config.example.toml`) only holds bootstrap keys — `[server]`, `[database]`, `scanner.log_file`. All other sections live in SQLite (`app_settings` in readings.db, `govee_charts/settings_store.py`) as diffs against `DEFAULTS` in `main.py`, edited via `GET/PUT/DELETE /api/settings/{section}` (Settings → Configuration). First start imports `config.toml` + legacy `data/*.json` once; afterwards those TOML sections are ignored. Federation peers/mode, apartment overrides and floor plans are stored there too.
 
 ### Federation
 
@@ -71,7 +71,7 @@ Chat replies to the repository owner may follow their preferred language; projec
 - Keep the UI simple: overview table + compare charts; avoid heavy frameworks.
 - **Map topology graph** (`static/app.js`): no overlapping nodes, no crossing connections, keep labels/locks off the viewBox edges, and show **façade nodes only for rooms with exterior windows** (beside those rooms). See `.cursor/rules/map-graph-layout.mdc`.
 - **Apartment geometry**: ceiling ≈ **2.5 m**, interior door frames ≈ **2.0 m** (`apartment.ceiling_m` / `apartment.door_height_m`). Cross-section doors run floor→lintel with a transom above; categorical high/mid/low map onto transom / mid-door / near-floor. See `.cursor/rules/apartment-geometry.mdc`.
-- After adding or changing settings in `config.example.toml` / `DEFAULTS`, **also update the local gitignored `config.toml`** when it exists: merge new keys with the documented defaults (enable new optional features that are on by default in the example). Do not overwrite existing user values, secrets, labels, peers, or paths. Mention a restart if the running service must reload config.
+- New settings go in `DEFAULTS` (and documented in `config.example.toml`); stored settings only keep overrides, so defaults apply without migrating anything. Only touch the local `config.toml` for bootstrap keys (`[server]`, `[database]`, `scanner.log_file`). Mention a restart if the running service must reload settings.
 - **Web notifications** (window alerts): HTTPS + root `/sw.js` + `registration.showNotification()`; Safari standalone quirks and diagnostic UX are documented in the personal Cursor skill `web-notifications` (see `~/.cursor/skills/web-notifications/SKILL.md`).
 
 ## Useful commands

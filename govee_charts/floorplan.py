@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
 import math
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from govee_charts.apartment import (
@@ -19,11 +17,10 @@ from govee_charts.apartment import (
     compass_from_deg,
 )
 from govee_charts.categories import ROOM_LABELS, ROOMS
+from govee_charts.settings_store import KEY_APARTMENT_PLANS, SettingsStore, default_store
 
 logger = logging.getLogger(__name__)
 
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_PLANS_PATH = ROOT / "data" / "apartment_plans.json"
 
 PLAN_MODES = frozenset({"free", "partition"})
 OPENING_KINDS = frozenset({"door", "window"})
@@ -89,38 +86,33 @@ def empty_plan(
     }
 
 
-def load_plans(path: Path | None = None) -> dict[str, Any]:
-    path = path or DEFAULT_PLANS_PATH
+def load_plans(store: SettingsStore | None = None) -> dict[str, Any]:
+    st = store if store is not None else default_store()
     try:
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                plans = data.get("plans")
-                if not isinstance(plans, list):
-                    plans = []
-                active = data.get("active_plan_id")
-                if active is not None:
-                    active = str(active)
-                return {"active_plan_id": active, "plans": [_normalize_plan(p) for p in plans if isinstance(p, dict)]}
+        data = st.get(KEY_APARTMENT_PLANS) if st is not None else None
+        if isinstance(data, dict):
+            plans = data.get("plans")
+            if not isinstance(plans, list):
+                plans = []
+            active = data.get("active_plan_id")
+            if active is not None:
+                active = str(active)
+            return {"active_plan_id": active, "plans": [_normalize_plan(p) for p in plans if isinstance(p, dict)]}
     except Exception as exc:
         logger.warning("Apartment plans unreadable: %s", exc)
     return empty_store()
 
 
-def save_plans(store: dict[str, Any], path: Path | None = None) -> None:
-    path = path or DEFAULT_PLANS_PATH
+def save_plans(plans_store: dict[str, Any], store: SettingsStore | None = None) -> None:
+    st = store if store is not None else default_store()
+    if st is None:
+        raise RuntimeError("Settings store is not configured")
     payload = {
-        "active_plan_id": store.get("active_plan_id"),
-        "plans": list(store.get("plans") or []),
+        "active_plan_id": plans_store.get("active_plan_id"),
+        "plans": list(plans_store.get("plans") or []),
     }
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        st.set(KEY_APARTMENT_PLANS, payload)
     except Exception as exc:
         logger.warning("Apartment plans write failed: %s", exc)
         raise
@@ -794,7 +786,7 @@ def apply_compiled_to_layout(
     """Replace rooms/edges on layout from compile output; keep storey meta.
 
     An active floor plan turns the apartment map on, even when
-    ``[apartment] enabled = false`` in config.toml.
+    ``apartment.enabled = false`` in the stored settings.
     """
     if not compiled.get("ok"):
         raise ValueError(compiled.get("error") or "Compile failed")

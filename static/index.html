@@ -1671,6 +1671,35 @@
             Choose which stations appear on the Map overview, Compare charts, and projection cards. Stored in this browser.
           </span>
         </fieldset>
+        <fieldset class="settings-field settings-config-field">
+          <legend class="settings-field-label" data-i18n="settings.config">Configuration</legend>
+          <label class="settings-field" for="settings-config-section">
+            <span class="settings-field-label" data-i18n="settings.configSection">Section</span>
+            <select
+              id="settings-config-section"
+              data-i18n-aria-label="settings.configSection"
+              aria-label="Section"
+            ></select>
+          </label>
+          <textarea
+            id="settings-config-editor"
+            class="settings-config-editor"
+            rows="16"
+            spellcheck="false"
+            autocomplete="off"
+            data-i18n-aria-label="settings.configEditor"
+            aria-label="Section settings (JSON)"
+          ></textarea>
+          <div class="settings-service-actions">
+            <button type="button" id="settings-config-save" class="backfill-btn" data-i18n="settings.configSave">Save</button>
+            <button type="button" id="settings-config-reset" class="backfill-btn" data-i18n="settings.configReset">Reset to defaults</button>
+            <button type="button" id="settings-config-reload" class="backfill-btn" data-i18n="settings.configReload">Reload</button>
+          </div>
+          <p id="settings-config-status" class="settings-federation-status" aria-live="polite"></p>
+          <span class="settings-field-help" data-i18n="settings.configHelp">
+            Stored in the database. config.toml only keeps [server], [database] and scanner.log_file. Secrets show as ******** and are kept unless replaced. Restart workers and UI to apply.
+          </span>
+        </fieldset>
         <fieldset class="settings-field settings-service-field">
           <legend class="settings-field-label" data-i18n="settings.service">Service</legend>
           <div class="settings-service-actions">

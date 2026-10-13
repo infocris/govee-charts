@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -17,8 +16,9 @@ from govee_charts.federation_store import (
     load_federation_settings,
     normalize_mode,
     normalize_peers,
-    peers_file_mtime,
+    settings_version,
 )
+from govee_charts.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ class PeerPublisher:
         node_id: str,
         token: str | None = None,
         timeout: float = 5.0,
-        peers_path: Path | str | None = None,
+        settings_store: SettingsStore | None = None,
         mode: str = MODE_FULL,
     ) -> None:
         self.peers = normalize_peers(peers)
@@ -98,10 +98,11 @@ class PeerPublisher:
         self.node_id = node_id
         self.token = token or None
         self.timeout = timeout
-        self.peers_path = Path(peers_path) if peers_path else None
-        self._peers_mtime: float | None = (
-            peers_file_mtime(self.peers_path) if self.peers_path else None
+        self.settings_store = settings_store
+        self._settings_version: float | None = (
+            settings_version(settings_store) if settings_store else None
         )
+        self._settings_checked_at = 0.0
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
         self._task: asyncio.Task[None] | None = None
         self._client: httpx.AsyncClient | None = None
@@ -201,17 +202,21 @@ class PeerPublisher:
         )
         return True
 
-    def reload_peers_from_disk(self) -> bool:
-        """Reload peers/mode from ``peers_path`` when the file mtime changes."""
-        if self.peers_path is None:
+    def reload_peers_from_store(self) -> bool:
+        """Reload peers/mode when the stored federation section changes."""
+        if self.settings_store is None:
             return False
-        mtime = peers_file_mtime(self.peers_path)
-        if mtime is None or mtime == self._peers_mtime:
+        now = time.monotonic()
+        if now - self._settings_checked_at < PEERS_RELOAD_INTERVAL_S:
             return False
-        loaded = load_federation_settings(self.peers_path)
+        self._settings_checked_at = now
+        version = settings_version(self.settings_store)
+        if version is None or version == self._settings_version:
+            return False
+        loaded = load_federation_settings(self.settings_store)
         if loaded is None:
             return False
-        self._peers_mtime = mtime
+        self._settings_version = version
         changed_peers = self.set_peers(list(loaded.get("peers") or []))
         changed_mode = self.set_mode(str(loaded.get("mode") or MODE_FULL))
         return changed_peers or changed_mode
@@ -476,7 +481,7 @@ class PeerPublisher:
     async def _worker(self) -> None:
         assert self._client is not None
         while True:
-            self.reload_peers_from_disk()
+            self.reload_peers_from_store()
             try:
                 item = await asyncio.wait_for(
                     self._queue.get(),
