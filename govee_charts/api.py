@@ -2354,7 +2354,7 @@ def create_app(
             "message": (
                 "Restarting UI via systemd…"
                 if under_systemd
-                else "Process exiting — restart manually if not under systemd"
+                else "Process exiting — restart manually if not under systemd or launchd"
             ),
         }
 

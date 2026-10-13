@@ -70,6 +70,10 @@ _HARD_WATCHDOG_POLL_S = 5.0
 _HARD_WATCHDOG_STARTUP_GRACE_S = 120.0
 _HARD_WATCHDOG_MISS_STREAK = 3
 _WAL_CHECKPOINT_INTERVAL_S = 60.0
+# Exit code for UI-requested restarts. Non-zero so launchd (KeepAlive
+# SuccessfulExit=false) relaunches us; systemd units use Restart=always.
+_RESTART_EXIT_CODE = 75
+_restart_requested = False
 _WAL_TRUNCATE_BYTES = 64 * 1024 * 1024
 
 DEFAULTS: dict[str, Any] = {
@@ -993,6 +997,8 @@ async def run_ui_server(
             server.should_exit = True
 
     def request_restart() -> None:
+        global _restart_requested
+        _restart_requested = True
         logging.warning("Stopping HTTP listeners for restart")
         for server in servers:
             server.should_exit = True
@@ -1142,7 +1148,7 @@ def main() -> None:
     logging.info("Stopped")
     # Bleak/CoreBluetooth leaves non-daemon threads that block interpreter
     # shutdown (especially on macOS) — without this, a second Ctrl+C is needed.
-    os._exit(0)
+    os._exit(_RESTART_EXIT_CODE if _restart_requested else 0)
 
 
 if __name__ == "__main__":
