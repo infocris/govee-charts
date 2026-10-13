@@ -1740,6 +1740,79 @@
     return { data, peers: normalized };
   }
 
+  async function refreshBleSetting() {
+    const box = document.getElementById("settings-ble-enabled");
+    const status = document.getElementById("settings-ble-status");
+    if (!box) return;
+    const [settings, fed] = await Promise.all([
+      configRequest("/api/settings/scanner"),
+      configRequest("/api/federation").catch(() => null),
+    ]);
+    const stored = Boolean(settings.value && settings.value.enabled);
+    const running = fed ? Boolean(fed.scanner_enabled) : stored;
+    box.checked = stored;
+    if (status) {
+      delete status.dataset.tone;
+      status.textContent =
+        stored && !running
+          ? t("settings.bleForcedOff")
+          : t(stored ? "settings.bleOn" : "settings.bleOff");
+    }
+  }
+
+  async function restartForSettings() {
+    // Split runtime: restart workers only; all-in-one: restart the process.
+    const res = await fetch("/api/restart?target=workers", { method: "POST" });
+    if (res.ok) {
+      await waitForWorkers(45000);
+      return false;
+    }
+    await fetch("/api/restart?target=ui", { method: "POST" }).catch(() => null);
+    await waitForHealth(60000);
+    return true;
+  }
+
+  function initBleSetting() {
+    const box = document.getElementById("settings-ble-enabled");
+    const status = document.getElementById("settings-ble-status");
+    if (!box) return;
+    box.addEventListener("change", async () => {
+      const enabled = box.checked;
+      if (!window.confirm(t(enabled ? "settings.bleConfirmOn" : "settings.bleConfirmOff"))) {
+        box.checked = !enabled;
+        return;
+      }
+      box.disabled = true;
+      try {
+        const current = await configRequest("/api/settings/scanner");
+        await configRequest("/api/settings/scanner", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value: { ...current.value, enabled } }),
+        });
+        if (status) status.textContent = t("settings.bleRestarting");
+        await restartForSettings();
+        await refreshBleSetting();
+        if (status) {
+          status.dataset.tone = "ok";
+          status.textContent = t("settings.bleRestarted", {
+            state: t(enabled ? "settings.bleStateOn" : "settings.bleStateOff"),
+          });
+        }
+      } catch (err) {
+        box.checked = !enabled;
+        if (status) {
+          status.dataset.tone = "bad";
+          status.textContent = t("settings.bleError", { error: err.message });
+        }
+      } finally {
+        box.disabled = false;
+      }
+    });
+  }
+
+  initBleSetting();
+
   let configSections = [];
 
   function setConfigStatus(message, tone) {
@@ -6156,6 +6229,7 @@
       refreshConfigSettings().catch((err) =>
         setConfigStatus(t("settings.configError", { error: err.message }), "bad")
       );
+      refreshBleSetting().catch((err) => console.warn(err));
     }
     syncBackfillPolling();
   }

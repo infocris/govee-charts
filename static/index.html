@@ -1634,6 +1634,17 @@
             Diagnoses browser permission issues (especially Safari standalone) and offers fixes.
           </span>
         </fieldset>
+        <fieldset class="settings-field settings-ble-field">
+          <legend class="settings-field-label" data-i18n="settings.ble">BLE collection</legend>
+          <label class="settings-ble-toggle" for="settings-ble-enabled">
+            <input type="checkbox" id="settings-ble-enabled" />
+            <span data-i18n="settings.bleEnabled">Scan BLE sensors on this node</span>
+          </label>
+          <p id="settings-ble-status" class="settings-federation-status" aria-live="polite"></p>
+          <span class="settings-field-help" data-i18n="settings.bleHelp">
+            When off, this node stops listening to BLE advertisements and GATT history backfill; peers and Home Assistant data still work. The service restarts to apply the change.
+          </span>
+        </fieldset>
         <fieldset class="settings-field settings-federation-field">
           <legend class="settings-field-label" data-i18n="settings.federation">Federation nodes</legend>
           <p class="settings-field-help settings-federation-local">

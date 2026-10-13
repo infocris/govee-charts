@@ -6249,3 +6249,10 @@ body.plan-editor-modal-open {
   font: inherit;
   font-size: 0.9rem;
 }
+
+.settings-ble-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
