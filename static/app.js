@@ -8974,7 +8974,7 @@
       if (networkTempScaleEl) networkTempScaleEl.hidden = true;
       if (networkMetaEl) {
         networkMetaEl.textContent =
-          "Apartment map disabled — enable [apartment] in config.toml.";
+          "Apartment map disabled — activate a floor plan, or enable [apartment] in config.toml.";
       }
       if (networkStatusEl) networkStatusEl.textContent = "Disabled";
       return;

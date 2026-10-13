@@ -791,7 +791,11 @@ def apply_compiled_to_layout(
     layout: ApartmentLayout,
     compiled: dict[str, Any],
 ) -> ApartmentLayout:
-    """Replace rooms/edges on layout from compile output; keep storey meta."""
+    """Replace rooms/edges on layout from compile output; keep storey meta.
+
+    An active floor plan turns the apartment map on, even when
+    ``[apartment] enabled = false`` in config.toml.
+    """
     if not compiled.get("ok"):
         raise ValueError(compiled.get("error") or "Compile failed")
     rooms: dict[str, RoomSpec] = {}
@@ -829,6 +833,7 @@ def apply_compiled_to_layout(
             layout.area_m2 = float(area)
         except (TypeError, ValueError):
             pass
+    layout.enabled = True
     layout._rebuild_matrices()
     return layout
 

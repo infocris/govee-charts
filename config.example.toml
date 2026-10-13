@@ -97,6 +97,7 @@ cache_seconds = 300
 
 # Multi-room RC network (corridor hub). Maps device.room → node.
 # Set enabled = true when sensors have room categories assigned.
+# An active floor plan (Map → plans) enables the map even when this is false.
 [apartment]
 enabled = false
 ceiling_m = 2.5

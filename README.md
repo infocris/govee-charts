@@ -273,8 +273,9 @@ constant bias.
 
 ### Apartment layout (optional)
 
-Set `[apartment] enabled = true` in `config.toml` (see `config.example.toml`)
-to project rooms as a **multi-node RC network**:
+Set `[apartment] enabled = true` in `config.toml` (see `config.example.toml`),
+or simply activate a floor plan (an active plan turns the map on regardless of
+the config switch), to project rooms as a **multi-node RC network**:
 
 - Corridor hub linked to every room (no direct outdoor coupling)
 - Kitchen + living: southwest façades; bedroom: northeast

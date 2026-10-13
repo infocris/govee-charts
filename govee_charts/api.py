@@ -1017,7 +1017,11 @@ def create_app(
 
     def _restore_fallback_layout(layout: ApartmentLayout) -> None:
         fb = getattr(app.state, "apartment_fallback", None)
-        if not isinstance(fb, dict) or not fb.get("rooms"):
+        if not isinstance(fb, dict):
+            return
+        # Back to the config.toml switch (an active plan forces the map on).
+        layout.enabled = bool(fb.get("enabled"))
+        if not fb.get("rooms"):
             return
         raw = {
             "enabled": layout.enabled,
