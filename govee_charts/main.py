@@ -96,6 +96,11 @@ DEFAULTS: dict[str, Any] = {
         "adapters": [],
         # UI alert when no BLE ads for this long (seconds). 0 = disable alert.
         "alert_stale_after": 300.0,
+        # Restart the BLE scan after this many seconds without advertisements,
+        # and recycle it periodically even when healthy (0 = off).
+        # None = platform default (macOS: 120 / 1800, Linux: off).
+        "stale_restart_after": None,
+        "recycle_after": None,
     },
     "database": {"path": "data/readings.db"},
     "federation": {
@@ -233,6 +238,17 @@ DEFAULTS: dict[str, Any] = {
     },
     "labels": {},
 }
+
+
+def _optional_seconds(raw: Any) -> float | None:
+    """Seconds setting where None (or junk) means "use the built-in default"."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        logging.warning("Ignoring invalid seconds value %r", raw)
+        return None
 
 
 def read_config_toml() -> dict[str, Any]:
@@ -520,6 +536,8 @@ async def _start_workers(
             publisher=publisher,
             node_id=fed["node_id"],
             suffix_map=suffix_map,
+            stale_restart_after=_optional_seconds(cfg["scanner"].get("stale_restart_after")),
+            recycle_after=_optional_seconds(cfg["scanner"].get("recycle_after")),
         )
         scan_task = asyncio.create_task(scanner.run(stop_event), name="ble-scanner")
     else:
