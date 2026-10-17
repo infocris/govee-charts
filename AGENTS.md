@@ -40,6 +40,7 @@ Chat replies to the repository owner may follow their preferred language; projec
 ### Multi-adapter BLE
 
 - `scanner.adapters = ["hci0", "hci1", …]` runs parallel BlueZ scanners; empty means the system default adapter.
+- BlueZ can wedge (stop → `InProgress`, start never returns, no ads at HCI level) and only a `bluetoothd` restart fixes it. `scanner.py` bounds `start()`/`stop()` with timeouts and, after `scanner.bluez_recover_after` dead cycles, runs `scanner.bluez_recover_command` (`systemctl restart bluetooth.service`, allowed by the polkit rule from `deploy/govee-charts-bluetooth.rules.in` since the unit has `NoNewPrivileges=true`). Bleak reattaches in-process.
 
 ### Device identity: MAC vs macOS UUID (recurring pitfall)
 

@@ -20,6 +20,14 @@ from govee_charts.federation import PeerPublisher
 
 logger = logging.getLogger(__name__)
 
+# Bound BlueZ calls: a wedged bluetoothd can leave StartDiscovery pending forever.
+_START_TIMEOUT = 30.0
+_STOP_TIMEOUT = 15.0
+# Never restart bluetoothd more often than this, whatever the dead-cycle count.
+_BLUEZ_RECOVER_MIN_INTERVAL = 900.0
+_BLUEZ_RECOVER_TIMEOUT = 60.0
+DEFAULT_BLUEZ_RECOVER_COMMAND = ("systemctl", "restart", "bluetooth.service")
+
 
 def _scan_mode(active: bool) -> str:
     # CoreBluetooth does not support passive scanning.
@@ -29,9 +37,13 @@ def _scan_mode(active: bool) -> str:
 
 
 def _scanner_kwargs(adapter: str | None, mode: str) -> dict:
-    # Use legacy ``adapter=`` so bleak 0.22+ and 3.x both work (Pi / older Python).
     kwargs: dict = {"scanning_mode": mode}
     if adapter:
+        # Always pass a fresh ``bluez`` dict: bleak 3.x copies the legacy
+        # ``adapter=`` kwarg into its mutable default ``bluez={}``, so the first
+        # adapter would stick to every later scanner in the process (hci1 then
+        # scans hci0 and gets InProgress). Legacy ``adapter=`` stays for 0.22.
+        kwargs["bluez"] = {"adapter": adapter}
         kwargs["adapter"] = adapter
     return kwargs
 
@@ -65,10 +77,13 @@ def _is_bluez_in_progress(exc: BaseException) -> bool:
 async def _stop_scanner(scanner: BleakScanner, label: str) -> None:
     """Stop a scanner; BlueZ often returns InProgress — retry once, then ignore."""
     try:
-        await scanner.stop()
+        await asyncio.wait_for(scanner.stop(), timeout=_STOP_TIMEOUT)
         return
     except asyncio.CancelledError:
         raise
+    except asyncio.TimeoutError:
+        logger.warning("BLE stop on %s timed out after %.0fs", label, _STOP_TIMEOUT)
+        return
     except Exception as exc:
         if not _is_bluez_in_progress(exc):
             logger.warning("BLE stop on %s failed: %s", label, exc)
@@ -79,9 +94,11 @@ async def _stop_scanner(scanner: BleakScanner, label: str) -> None:
         )
     await asyncio.sleep(2.0)
     try:
-        await scanner.stop()
+        await asyncio.wait_for(scanner.stop(), timeout=_STOP_TIMEOUT)
     except asyncio.CancelledError:
         raise
+    except asyncio.TimeoutError:
+        logger.warning("BLE stop on %s timed out after %.0fs", label, _STOP_TIMEOUT)
     except Exception as exc:
         logger.warning("BLE stop on %s still failing: %s", label, exc)
 
@@ -105,6 +122,11 @@ class GoveeScanner:
         stale_restart_after: float | None = None,
         # Periodic recycle even while healthy (0 = disabled). Helpful on macOS.
         recycle_after: float | None = None,
+        # Restart bluetoothd after this many consecutive scan cycles without a
+        # single advertisement (stale restarts / start timeouts). 0 = off.
+        # Default: 3 on Linux, off elsewhere (only BlueZ can be restarted).
+        bluez_recover_after: int | None = None,
+        bluez_recover_command: Sequence[str] | None = None,
     ) -> None:
         self.db = db
         self.labels = {k.upper(): v for k, v in (labels or {}).items()}
@@ -120,6 +142,14 @@ class GoveeScanner:
             # macOS CoreBluetooth long-lived scans often go quiet; recycle proactively.
             recycle_after = 1800.0 if sys.platform == "darwin" else 0.0
         self.recycle_after = max(0.0, float(recycle_after))
+        if bluez_recover_after is None:
+            bluez_recover_after = 3 if sys.platform.startswith("linux") else 0
+        self.bluez_recover_after = max(0, int(bluez_recover_after))
+        self.bluez_recover_command = tuple(
+            bluez_recover_command or DEFAULT_BLUEZ_RECOVER_COMMAND
+        )
+        self._bluez_recover_lock = asyncio.Lock()
+        self._last_bluez_recover: float | None = None
         # Empty / None → default system adapter only
         self.adapters = [a for a in (adapters or []) if a] or [None]
         self.publisher = publisher
@@ -314,12 +344,15 @@ class GoveeScanner:
         label = adapter or "default"
         auth_failures = 0
         in_progress_failures = 0
+        # Consecutive scan cycles that ended without a single advertisement.
+        dead_cycles = 0
         last_adv = time.monotonic()
 
         def cb(device: BLEDevice, adv: AdvertisementData) -> None:
-            nonlocal last_adv
+            nonlocal last_adv, dead_cycles
             # Any advertisement proves the backend is still delivering events.
             last_adv = time.monotonic()
+            dead_cycles = 0
             self._note_ble_activity()
             self.on_advertisement(device, adv, adapter=adapter)
 
@@ -342,17 +375,31 @@ class GoveeScanner:
                 **_scanner_kwargs(adapter, mode),
             )
             try:
-                await scanner.start()
+                await asyncio.wait_for(scanner.start(), timeout=_START_TIMEOUT)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 if stop_event.is_set():
                     break
+                timed_out = isinstance(exc, asyncio.TimeoutError)
                 unauthorized = (
                     isinstance(exc, BleakError)
                     and "not authorized" in str(exc).lower()
                 )
-                if unauthorized:
+                if timed_out:
+                    auth_failures = 0
+                    in_progress_failures = 0
+                    dead_cycles += 1
+                    delay = 10.0
+                    logger.warning(
+                        "BLE scanner on %s: start timed out after %.0fs — "
+                        "retry in %.0fs",
+                        label,
+                        _START_TIMEOUT,
+                        delay,
+                    )
+                    await _stop_scanner(scanner, label)
+                elif unauthorized:
                     auth_failures += 1
                     in_progress_failures = 0
                     # LaunchAgents often never show a TCC prompt — log clearly
@@ -374,6 +421,8 @@ class GoveeScanner:
                         )
                 elif _is_bluez_in_progress(exc):
                     auth_failures = 0
+                    # Not a dead cycle: GATT connects on the same adapter
+                    # cause short InProgress bursts that must not restart BlueZ.
                     in_progress_failures += 1
                     delay = min(120.0, 15.0 * in_progress_failures)
                     logger.warning(
@@ -390,6 +439,9 @@ class GoveeScanner:
                         label,
                         delay,
                     )
+                if await self._maybe_recover_bluez(label, dead_cycles):
+                    dead_cycles = 0
+                    continue
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=delay)
                 except asyncio.TimeoutError:
@@ -421,6 +473,8 @@ class GoveeScanner:
                             label,
                             silent_for,
                         )
+                        if last_adv <= started:
+                            dead_cycles += 1
                         break
                     if (
                         self.recycle_after > 0
@@ -437,18 +491,82 @@ class GoveeScanner:
 
             if stop_event.is_set():
                 break
+            if await self._maybe_recover_bluez(label, dead_cycles):
+                dead_cycles = 0
+                continue
             # Brief pause between intentional restarts so BlueZ can settle.
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=2.0)
             except asyncio.TimeoutError:
                 pass
 
+    async def _maybe_recover_bluez(self, label: str, dead_cycles: int) -> bool:
+        """Restart bluetoothd once a scan stays dead across several restarts.
+
+        Recreating the BleakScanner cannot unstick a wedged bluetoothd (stop
+        keeps answering InProgress, start never completes); restarting the
+        daemon does, and Bleak reattaches in-process. Returns True when the
+        recovery command ran, so the caller can reset its counter.
+        """
+        if self.bluez_recover_after <= 0 or dead_cycles < self.bluez_recover_after:
+            return False
+        async with self._bluez_recover_lock:
+            now = time.monotonic()
+            if (
+                self._last_bluez_recover is not None
+                and now - self._last_bluez_recover < _BLUEZ_RECOVER_MIN_INTERVAL
+            ):
+                return False
+            self._last_bluez_recover = now
+            cmd = self.bluez_recover_command
+            logger.warning(
+                "BLE scanner on %s: no advertisements across %d restart(s) — "
+                "restarting BlueZ (%s)",
+                label,
+                dead_cycles,
+                " ".join(cmd),
+            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            except OSError as exc:
+                logger.error("BlueZ recovery command could not run: %s", exc)
+                return True
+            try:
+                out, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=_BLUEZ_RECOVER_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.error(
+                    "BlueZ recovery command timed out after %.0fs",
+                    _BLUEZ_RECOVER_TIMEOUT,
+                )
+                return True
+            if proc.returncode != 0:
+                logger.error(
+                    "BlueZ recovery command failed (exit %s): %s — on Linux, "
+                    "re-run `sudo make systemd-install` to install the polkit "
+                    "rule that lets the service restart bluetooth.service",
+                    proc.returncode,
+                    out.decode(errors="replace").strip(),
+                )
+                return True
+            logger.info("BlueZ restarted; resuming BLE scan on %s", label)
+            # Let bluetoothd re-register its adapters before StartDiscovery.
+            await asyncio.sleep(3.0)
+            return True
+
     async def run(self, stop_event: asyncio.Event) -> None:
         mode = _scan_mode(self.active)
         names = ", ".join(a or "default" for a in self.adapters)
         logger.info(
             "BLE scanner started (adapters=[%s], mode=%s, sample_interval=%.0fs, "
-            "stale_restart=%s, recycle=%s)",
+            "stale_restart=%s, recycle=%s, bluez_recover=%s)",
             names,
             mode,
             self.sample_interval,
@@ -456,6 +574,9 @@ class GoveeScanner:
             if self.stale_restart_after > 0
             else "off",
             f"{self.recycle_after:.0f}s" if self.recycle_after > 0 else "off",
+            f"after {self.bluez_recover_after} dead cycle(s)"
+            if self.bluez_recover_after > 0
+            else "off",
         )
         # Baseline so UI can alert if no ads arrive after start.
         self._last_adv_wall = time.time()

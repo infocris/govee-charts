@@ -7,6 +7,7 @@ import asyncio
 import copy
 import logging
 import os
+import shlex
 import signal
 import socket
 import subprocess
@@ -102,6 +103,11 @@ DEFAULTS: dict[str, Any] = {
         # None = platform default (macOS: 120 / 1800, Linux: off).
         "stale_restart_after": None,
         "recycle_after": None,
+        # Restart bluetoothd after this many consecutive scan restarts without
+        # a single advertisement (0 = off). None = platform default
+        # (Linux: 3, macOS: off). Needs the polkit rule from systemd-install.
+        "bluez_recover_after": None,
+        "bluez_recover_command": ["systemctl", "restart", "bluetooth.service"],
     },
     "database": {"path": "data/readings.db"},
     "federation": {
@@ -239,6 +245,26 @@ DEFAULTS: dict[str, Any] = {
     },
     "labels": {},
 }
+
+
+def _optional_count(raw: Any) -> int | None:
+    """Count setting where None (or junk) means "use the built-in default"."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        logging.warning("Ignoring invalid count value %r", raw)
+        return None
+
+
+def _command_list(raw: Any) -> list[str] | None:
+    """Command setting as an argv list; a string is split shell-style."""
+    if isinstance(raw, str):
+        return shlex.split(raw) or None
+    if isinstance(raw, (list, tuple)):
+        return [str(part) for part in raw if str(part)] or None
+    return None
 
 
 def _optional_seconds(raw: Any) -> float | None:
@@ -539,6 +565,8 @@ async def _start_workers(
             suffix_map=suffix_map,
             stale_restart_after=_optional_seconds(cfg["scanner"].get("stale_restart_after")),
             recycle_after=_optional_seconds(cfg["scanner"].get("recycle_after")),
+            bluez_recover_after=_optional_count(cfg["scanner"].get("bluez_recover_after")),
+            bluez_recover_command=_command_list(cfg["scanner"].get("bluez_recover_command")),
         )
         scan_task = asyncio.create_task(scanner.run(stop_event), name="ble-scanner")
     else:

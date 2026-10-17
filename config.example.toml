@@ -38,6 +38,11 @@ alert_stale_after = 300.0
 # platform default (macOS: 120 / 1800, Linux: off).
 # stale_restart_after = 300.0
 # recycle_after = 3600.0
+# Restart bluetoothd after this many consecutive scan restarts without a single
+# advertisement (0 = off). Leave unset for the platform default (Linux: 3,
+# macOS: off). `make systemd-install` installs the polkit rule that allows it.
+# bluez_recover_after = 3
+# bluez_recover_command = ["systemctl", "restart", "bluetooth.service"]
 
 [database]
 path = "data/readings.db"

@@ -174,6 +174,13 @@ Services:
 
 `restart-workers` keeps the UI available while workers restart.
 
+`systemd-install` also installs a polkit rule
+(`/etc/polkit-1/rules.d/50-govee-charts-bluetooth.rules`) that lets the service
+user run `systemctl restart bluetooth.service` and nothing else. The workers use
+it when a scan stays silent across `scanner.bluez_recover_after` restarts
+(default 3 on Linux, at most once per 15 min): a wedged bluetoothd cannot be
+recovered by restarting the scan alone.
+
 Logs: `journalctl -u govee-charts-ui -u govee-charts-workers -f` and
 `govee-charts.log` in the project directory.
 

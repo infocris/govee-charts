@@ -9,6 +9,8 @@ UI_TEMPLATE="${ROOT}/deploy/govee-charts-ui.service.in"
 WORKERS_TEMPLATE="${ROOT}/deploy/govee-charts-workers.service.in"
 UI_UNIT_PATH="/etc/systemd/system/${UI_SERVICE}.service"
 WORKERS_UNIT_PATH="/etc/systemd/system/${WORKERS_SERVICE}.service"
+POLKIT_TEMPLATE="${ROOT}/deploy/govee-charts-bluetooth.rules.in"
+POLKIT_RULE_PATH="/etc/polkit-1/rules.d/50-govee-charts-bluetooth.rules"
 
 usage() {
   cat <<EOF
@@ -86,6 +88,12 @@ install_selected() {
   fi
   if [[ "$TARGET" == "all" || "$TARGET" == "workers" ]]; then
     install_unit "$WORKERS_TEMPLATE" "$WORKERS_UNIT_PATH" "$run_user" "$run_group"
+    # Lets the workers restart a wedged bluetoothd (scanner.bluez_recover_after).
+    if [[ -d "$(dirname "$POLKIT_RULE_PATH")" ]]; then
+      install_unit "$POLKIT_TEMPLATE" "$POLKIT_RULE_PATH" "$run_user" "$run_group"
+    else
+      echo "polkit not found — BlueZ auto-recovery will not be allowed" >&2
+    fi
   fi
 }
 
@@ -105,7 +113,7 @@ disable_selected() {
   fi
   if [[ "$TARGET" == "all" || "$TARGET" == "workers" ]]; then
     sudo systemctl disable --now "$WORKERS_SERVICE" 2>/dev/null || true
-    sudo rm -f "$WORKERS_UNIT_PATH"
+    sudo rm -f "$WORKERS_UNIT_PATH" "$POLKIT_RULE_PATH"
   fi
 }
 
