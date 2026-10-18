@@ -26,6 +26,9 @@ _STOP_TIMEOUT = 15.0
 # Never restart bluetoothd more often than this, whatever the dead-cycle count.
 _BLUEZ_RECOVER_MIN_INTERVAL = 900.0
 _BLUEZ_RECOVER_TIMEOUT = 60.0
+# An adapter silent this long counts InProgress failures and GATT-interrupted
+# scans as dead cycles too (short bursts around GATT connects stay harmless).
+_SILENT_DEAD_AFTER = 600.0
 DEFAULT_BLUEZ_RECOVER_COMMAND = ("systemctl", "restart", "bluetooth.service")
 
 
@@ -347,11 +350,14 @@ class GoveeScanner:
         # Consecutive scan cycles that ended without a single advertisement.
         dead_cycles = 0
         last_adv = time.monotonic()
+        # Last advertisement on this adapter; unlike last_adv, not reset per scan.
+        last_heard = last_adv
 
         def cb(device: BLEDevice, adv: AdvertisementData) -> None:
-            nonlocal last_adv, dead_cycles
+            nonlocal last_adv, last_heard, dead_cycles
             # Any advertisement proves the backend is still delivering events.
             last_adv = time.monotonic()
+            last_heard = last_adv
             dead_cycles = 0
             self._note_ble_activity()
             self.on_advertisement(device, adv, adapter=adapter)
@@ -421,9 +427,11 @@ class GoveeScanner:
                         )
                 elif _is_bluez_in_progress(exc):
                     auth_failures = 0
-                    # Not a dead cycle: GATT connects on the same adapter
-                    # cause short InProgress bursts that must not restart BlueZ.
+                    # GATT connects on the same adapter cause short InProgress
+                    # bursts that must not restart BlueZ; a long silence must.
                     in_progress_failures += 1
+                    if time.monotonic() - last_heard >= _SILENT_DEAD_AFTER:
+                        dead_cycles += 1
                     delay = min(120.0, 15.0 * in_progress_failures)
                     logger.warning(
                         "BLE scanner on %s: BlueZ InProgress — retry in %.0fs",
@@ -489,6 +497,13 @@ class GoveeScanner:
             finally:
                 await _stop_scanner(scanner, label)
 
+            # GATT pauses can recycle the scan before the stale check fires.
+            if (
+                self._gatt_pause.is_set()
+                and last_adv <= started
+                and time.monotonic() - last_heard >= _SILENT_DEAD_AFTER
+            ):
+                dead_cycles += 1
             if stop_event.is_set():
                 break
             if await self._maybe_recover_bluez(label, dead_cycles):

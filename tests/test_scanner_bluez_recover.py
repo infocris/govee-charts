@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
+from types import SimpleNamespace
+
+from bleak.exc import BleakError
 
 from govee_charts import scanner as scanner_mod
 from govee_charts.scanner import GoveeScanner
@@ -52,3 +56,55 @@ def test_scanner_kwargs_do_not_share_adapter():
     assert a["bluez"] == {"adapter": "hci0"}
     assert b["bluez"] == {"adapter": "hci1"}
     assert a["bluez"] is not b["bluez"]
+
+
+def test_persistent_in_progress_counts_as_dead(monkeypatch):
+    # A wedged adapter answering InProgress forever must eventually recover BlueZ.
+    clock = [1000.0]
+    # Fake only the scanner's clock; asyncio's own loop must keep real time.
+    monkeypatch.setattr(
+        scanner_mod, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time)
+    )
+
+    class _InProgressScanner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def start(self):
+            clock[0] += 120.0
+            raise BleakError("[org.bluez.Error.InProgress] Operation already in progress")
+
+        async def stop(self):
+            return None
+
+    monkeypatch.setattr(scanner_mod, "BleakScanner", _InProgressScanner)
+    seen: list[int] = []
+
+    async def go() -> None:
+        # Built inside the loop: asyncio.Lock() needs one on Python 3.9.
+        s = _scanner(3, ["true"])
+        stop = asyncio.Event()
+
+        async def fake_recover(_label: str, dead_cycles: int) -> bool:
+            seen.append(dead_cycles)
+            if dead_cycles >= s.bluez_recover_after:
+                stop.set()
+                return True
+            return False
+
+        s._maybe_recover_bluez = fake_recover
+        monkeypatch.setattr(scanner_mod.asyncio, "wait_for", _no_wait)
+        await s._run_adapter(stop, "hci0", "active")
+
+    asyncio.run(go())
+    # Short bursts (< 10 min of silence) do not count; then each failure does.
+    assert seen[:4] == [0, 0, 0, 0]
+    assert seen[-1] == 3
+
+
+_real_wait_for = asyncio.wait_for
+
+
+async def _no_wait(aw, timeout=None):
+    # Retry delays elapse instantly; the fake clock is advanced by start().
+    return await _real_wait_for(aw, timeout=0.001)
