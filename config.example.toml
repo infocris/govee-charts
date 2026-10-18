@@ -43,6 +43,10 @@ alert_stale_after = 300.0
 # macOS: off). `make systemd-install` installs the polkit rule that allows it.
 # bluez_recover_after = 3
 # bluez_recover_command = ["systemctl", "restart", "bluetooth.service"]
+# Scan only this many seconds per sample_interval, then stop until the next
+# period (0 = continuous). Continuous active scans flood D-Bus with BlueZ
+# signals that desktop panels (wf-panel-pi bluetooth widget) must process.
+# scan_window = 20.0
 
 [database]
 path = "data/readings.db"

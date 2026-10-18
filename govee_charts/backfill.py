@@ -1169,8 +1169,10 @@ class BackfillService:
         # On macOS, CoreBluetooth uses UUIDs — find_device_by_address(MAC) fails.
         cached_device = None
         suffix_map = None
+        adapter = None
         if self.scanner is not None:
             suffix_map = self.scanner.suffix_map
+            adapter = self.scanner.get_ble_adapter(address)
             cached_device = self.scanner.get_ble_device(address)
             if cached_device is None:
                 # Brief settle only — a long poll thrash starved the worker and
@@ -1181,7 +1183,9 @@ class BackfillService:
                     cached_device = self.scanner.get_ble_device(address)
                     if cached_device is not None:
                         break
-            if cached_device is None:
+            # Windowed scans release the adapter between periods: let
+            # download_history rescan for the device instead of deferring.
+            if cached_device is None and not self.scanner.scan_window:
                 await self.db.update_backfill_job(
                     job_id,
                     status="deferred",
@@ -1244,6 +1248,7 @@ class BackfillService:
                     device=cached_device,
                     suffix_map=suffix_map,
                     model=model,
+                    adapter=adapter,
                 )
             else:
                 download = download_history(
@@ -1256,6 +1261,7 @@ class BackfillService:
                     now=now,
                     device=cached_device,
                     suffix_map=suffix_map,
+                    adapter=adapter,
                 )
             try:
                 result = await asyncio.wait_for(download, timeout=session_cap)

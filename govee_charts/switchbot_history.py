@@ -237,6 +237,7 @@ async def download_switchbot_history(
     device: BLEDevice | None = None,
     suffix_map: dict[str, str] | None = None,
     model: str | None = None,
+    adapter: str | None = None,
 ) -> HistoryDownloadResult:
     """
     Connect and download minute history for [end_min, start_min] minutes ago.
@@ -262,7 +263,7 @@ async def download_switchbot_history(
     if device is None:
         try:
             device, last_exc = await _find_device_resolved(
-                address, timeout=timeout, suffix_map=suffix_map
+                address, timeout=timeout, suffix_map=suffix_map, adapter=adapter
             )
             if last_exc is not None and device is None:
                 result.error = f"scan failed: {last_exc}"

@@ -108,6 +108,9 @@ DEFAULTS: dict[str, Any] = {
         # (Linux: 3, macOS: off). Needs the polkit rule from systemd-install.
         "bluez_recover_after": None,
         "bluez_recover_command": ["systemctl", "restart", "bluetooth.service"],
+        # Seconds of scanning per sample_interval (0 = continuous). Must stay
+        # well above the sensors' advertising interval (~2 s for Govee).
+        "scan_window": 0.0,
     },
     "database": {"path": "data/readings.db"},
     "federation": {
@@ -567,6 +570,7 @@ async def _start_workers(
             recycle_after=_optional_seconds(cfg["scanner"].get("recycle_after")),
             bluez_recover_after=_optional_count(cfg["scanner"].get("bluez_recover_after")),
             bluez_recover_command=_command_list(cfg["scanner"].get("bluez_recover_command")),
+            scan_window=float(cfg["scanner"].get("scan_window") or 0.0),
         )
         scan_task = asyncio.create_task(scanner.run(stop_event), name="ble-scanner")
     else:

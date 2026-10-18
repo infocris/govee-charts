@@ -34,6 +34,9 @@ _BLUEZ_RECOVER_TIMEOUT = 60.0
 # An adapter silent this long counts InProgress failures and GATT-interrupted
 # scans as dead cycles too (short bursts around GATT connects stay harmless).
 _SILENT_DEAD_AFTER = 600.0
+# BlueZ removes undiscovered devices this long after discovery stops
+# (main.conf TemporaryTimeout, default 30 s), leaving stale D-Bus paths.
+_BLUEZ_TEMPORARY_TIMEOUT = 25.0
 DEFAULT_BLUEZ_RECOVER_COMMAND = ("systemctl", "restart", "bluetooth.service")
 
 
@@ -135,6 +138,10 @@ class GoveeScanner:
         # Default: 3 on Linux, off elsewhere (only BlueZ can be restarted).
         bluez_recover_after: int | None = None,
         bluez_recover_command: Sequence[str] | None = None,
+        # Scan only this many seconds per sample_interval, then release the
+        # adapter until the next period (0 = scan continuously). Cuts BlueZ
+        # D-Bus traffic for every desktop client listening to org.bluez.
+        scan_window: float = 0.0,
     ) -> None:
         self.db = db
         self.labels = {k.upper(): v for k, v in (labels or {}).items()}
@@ -153,6 +160,7 @@ class GoveeScanner:
         if bluez_recover_after is None:
             bluez_recover_after = 3 if sys.platform.startswith("linux") else 0
         self.bluez_recover_after = max(0, int(bluez_recover_after))
+        self.scan_window = max(0.0, float(scan_window))
         self.bluez_recover_command = tuple(
             bluez_recover_command or DEFAULT_BLUEZ_RECOVER_COMMAND
         )
@@ -167,6 +175,8 @@ class GoveeScanner:
         # Canonical MAC → (BLEDevice, seen_at). Needed on macOS where
         # CoreBluetooth addresses are UUIDs, not the BLE MAC we store in SQLite.
         self._ble_devices: dict[str, tuple[BLEDevice, float]] = {}
+        # Canonical MAC → adapter that last heard it (None = system default).
+        self._ble_adapters: dict[str, str | None] = {}
         self._lock = asyncio.Lock()
         # When set, adapter loops stop scanning so GATT connects can proceed.
         self._gatt_pause = asyncio.Event()
@@ -192,9 +202,22 @@ class GoveeScanner:
         if entry is None:
             return None
         device, seen_at = entry
-        if max_age > 0 and time.time() - seen_at > max_age:
+        age = time.time() - seen_at
+        if max_age > 0 and age > max_age:
+            return None
+        if (
+            self.scan_window > 0
+            and sys.platform.startswith("linux")
+            and age > _BLUEZ_TEMPORARY_TIMEOUT
+        ):
+            # Between scan windows BlueZ has dropped the device object; the
+            # caller must rescan instead of connecting to a stale path.
             return None
         return device
+
+    def get_ble_adapter(self, address: str) -> str | None:
+        """Adapter that last heard a canonical MAC (None = system default)."""
+        return self._ble_adapters.get(address.strip().upper())
 
     def _note_ble_activity(self) -> None:
         """Record that the adapter delivered an advertisement (throttled DB write)."""
@@ -283,6 +306,7 @@ class GoveeScanner:
 
         register_mac(self.suffix_map, reading.address)
         self.remember_ble_device(reading.address, device)
+        self._ble_adapters[reading.address.strip().upper()] = adapter
         platform_addr = device.address.strip().upper()
         if (
             platform_addr != reading.address
@@ -489,17 +513,31 @@ class GoveeScanner:
             in_progress_failures = 0
             last_adv = time.monotonic()
             started = last_adv
-            logger.info("BLE scanner listening on %s (mode=%s)", label, mode)
+            if self.scan_window > 0:
+                logger.debug(
+                    "BLE scanner listening on %s (mode=%s, window=%.0fs)",
+                    label, mode, self.scan_window,
+                )
+            else:
+                logger.info("BLE scanner listening on %s (mode=%s)", label, mode)
             try:
                 while (
                     not stop_event.is_set() and not self._gatt_pause.is_set()
                 ):
                     self._note_adapter_heartbeat(scan_key)
+                    tick = 5.0
+                    if self.scan_window > 0:
+                        remaining = self.scan_window - (time.monotonic() - started)
+                        tick = min(tick, max(0.1, remaining))
                     try:
-                        await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+                        await asyncio.wait_for(stop_event.wait(), timeout=tick)
                     except asyncio.TimeoutError:
                         pass
                     now = time.monotonic()
+                    if self.scan_window > 0 and now - started >= self.scan_window:
+                        if last_adv <= started:
+                            dead_cycles += 1
+                        break
                     silent_for = now - last_adv
                     if (
                         self.stale_restart_after > 0
@@ -539,11 +577,25 @@ class GoveeScanner:
             if await self._maybe_recover_bluez(label, dead_cycles):
                 dead_cycles = 0
                 continue
-            # Brief pause between intentional restarts so BlueZ can settle.
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                pass
+            # Brief pause between intentional restarts so BlueZ can settle;
+            # in windowed mode, idle until the next sample period.
+            resume_at = time.monotonic() + 2.0
+            if self.scan_window > 0:
+                resume_at = max(resume_at, started + self.sample_interval)
+            while not stop_event.is_set():
+                pause = resume_at - time.monotonic()
+                if pause <= 0:
+                    break
+                if self.scan_window > 0:
+                    # Idle between windows is intended: keep the adapter
+                    # status fresh so Settings does not report it stopped.
+                    self._note_adapter_heartbeat(scan_key)
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(), timeout=min(pause, ADAPTER_HB_INTERVAL)
+                    )
+                except asyncio.TimeoutError:
+                    pass
 
     async def _maybe_recover_bluez(self, label: str, dead_cycles: int) -> bool:
         """Restart bluetoothd once a scan stays dead across several restarts.

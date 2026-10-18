@@ -134,6 +134,7 @@ async def download_history(
     now: float | None = None,
     device: BLEDevice | None = None,
     suffix_map: dict[str, str] | None = None,
+    adapter: str | None = None,
 ) -> HistoryDownloadResult:
     """
     Connect and download minute history for [end_min, start_min] minutes ago.
@@ -151,7 +152,7 @@ async def download_history(
     if device is None:
         try:
             device, last_exc = await _find_device_resolved(
-                address, timeout=timeout, suffix_map=suffix_map
+                address, timeout=timeout, suffix_map=suffix_map, adapter=adapter
             )
             if last_exc is not None and device is None:
                 result.error = f"scan failed: {last_exc}"
@@ -430,17 +431,27 @@ async def download_history(
     return result
 
 
+def _adapter_kwargs(adapter: str | None) -> dict[str, Any]:
+    # Same shape as scanner._scanner_kwargs: ``bluez`` for bleak 3.x, legacy
+    # ``adapter`` for 0.22. None keeps the system default adapter.
+    if not adapter:
+        return {}
+    return {"bluez": {"adapter": adapter}, "adapter": adapter}
+
+
 async def _find_device_resolved(
     address: str,
     *,
     timeout: float,
     suffix_map: dict[str, str] | None = None,
+    adapter: str | None = None,
 ) -> tuple[BLEDevice | None, Exception | None]:
     """
     Locate a sensor by canonical BLE MAC.
 
     Tries a direct address match first (Linux BlueZ), then a detection-callback
     scan that resolves Govee ads to MAC (required on macOS CoreBluetooth).
+    ``adapter`` pins the scan to the BlueZ adapter that last heard the sensor.
     """
     address = address.strip().upper()
     last_exc: Exception | None = None
@@ -451,7 +462,7 @@ async def _find_device_resolved(
         for attempt in range(2):
             try:
                 device = await BleakScanner.find_device_by_address(
-                    address, timeout=min(8.0, timeout)
+                    address, timeout=min(8.0, timeout), **_adapter_kwargs(adapter)
                 )
                 if device is not None:
                     return device, None
@@ -493,7 +504,7 @@ async def _find_device_resolved(
         if matched and not found.done():
             found.set_result(device)
 
-    scan_kwargs: dict[str, Any] = {"detection_callback": cb}
+    scan_kwargs: dict[str, Any] = {"detection_callback": cb, **_adapter_kwargs(adapter)}
     if sys.platform == "darwin":
         scan_kwargs["scanning_mode"] = "active"
     scanner = BleakScanner(**scan_kwargs)
