@@ -13,6 +13,11 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from bleak.exc import BleakError
 
+from govee_charts.ble_adapters import (
+    ADAPTER_HB_INTERVAL,
+    adv_heartbeat_key,
+    scan_heartbeat_key,
+)
 from govee_charts.address import build_suffix_map, is_ble_mac, register_mac, resolve_device_address
 from govee_charts.db import Database
 from govee_charts.decode import Reading, decode_advertisement
@@ -171,6 +176,8 @@ class GoveeScanner:
         self._last_adv_wall: float | None = None
         self._last_ble_hb_write: float = 0.0
         self._ble_hb_interval: float = 5.0
+        # Per-adapter heartbeat key → last write (throttled like the global one).
+        self._adapter_hb_writes: dict[str, float] = {}
         # Platform UUID addresses already rekeyed onto a canonical MAC this run.
         self._merged_aliases: set[str] = set()
 
@@ -208,6 +215,25 @@ class GoveeScanner:
                 logger.debug("BLE heartbeat failed", exc_info=True)
 
         loop.create_task(_touch(), name="ble-heartbeat")
+
+    def _note_adapter_heartbeat(self, key: str) -> None:
+        """Throttled per-adapter heartbeat (``ble_scan:hci0`` / ``ble_adv:hci0``)."""
+        now = time.time()
+        if now - self._adapter_hb_writes.get(key, 0.0) < ADAPTER_HB_INTERVAL:
+            return
+        self._adapter_hb_writes[key] = now
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _touch() -> None:
+            try:
+                await self.db.touch_runtime_heartbeat(key)
+            except Exception:
+                logger.debug("BLE adapter heartbeat failed", exc_info=True)
+
+        loop.create_task(_touch(), name="ble-adapter-heartbeat")
 
     @property
     def gatt_paused(self) -> bool:
@@ -345,6 +371,8 @@ class GoveeScanner:
         mode: str,
     ) -> None:
         label = adapter or "default"
+        scan_key = scan_heartbeat_key(adapter)
+        adv_key = adv_heartbeat_key(adapter)
         auth_failures = 0
         in_progress_failures = 0
         # Consecutive scan cycles that ended without a single advertisement.
@@ -360,6 +388,7 @@ class GoveeScanner:
             last_heard = last_adv
             dead_cycles = 0
             self._note_ble_activity()
+            self._note_adapter_heartbeat(adv_key)
             self.on_advertisement(device, adv, adapter=adapter)
 
         while not stop_event.is_set():
@@ -465,6 +494,7 @@ class GoveeScanner:
                 while (
                     not stop_event.is_set() and not self._gatt_pause.is_set()
                 ):
+                    self._note_adapter_heartbeat(scan_key)
                     try:
                         await asyncio.wait_for(stop_event.wait(), timeout=5.0)
                     except asyncio.TimeoutError:

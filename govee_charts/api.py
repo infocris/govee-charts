@@ -56,6 +56,13 @@ from govee_charts.floorplan import (
     validate_plan_update,
 )
 from govee_charts.backfill import BackfillService
+from govee_charts.ble_adapters import (
+    DEFAULT_ADAPTER,
+    adv_heartbeat_key,
+    list_system_adapters,
+    merge_adapters,
+    scan_heartbeat_key,
+)
 from govee_charts.categories import normalize_door_patch, normalize_patch, taxonomy
 from govee_charts.doors import door_name_from_ha
 from govee_charts.plan_position import normalize_plan_patch
@@ -2283,6 +2290,34 @@ def create_app(
             "customized": bool(diff),
             "value": mask_secrets(_section_effective(store, section)),
             "restart_required": True,
+        }
+
+    @app.get("/api/ble/adapters")
+    async def api_ble_adapters() -> dict[str, Any]:
+        """Bluetooth adapters on this host, which ones the scanner uses, and their health."""
+        store = _require_settings_section("scanner")
+        scanner_cfg = _section_effective(store, "scanner")
+        raw = scanner_cfg.get("adapters") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        configured = [str(a).strip() for a in raw if str(a).strip()]
+        scanner_enabled = bool(scanner_cfg.get("enabled", True))
+        system = await list_system_adapters()
+        labels = configured or [DEFAULT_ADAPTER]
+        heartbeats: dict[str, float | None] = {}
+        for label in labels:
+            for key in (scan_heartbeat_key(label), adv_heartbeat_key(label)):
+                heartbeats[key] = await _health_heartbeat(key)
+        return {
+            "scanner_enabled": scanner_enabled,
+            "configured": configured,
+            "system_listed": system is not None,
+            "adapters": merge_adapters(
+                system,
+                configured,
+                scanner_enabled=scanner_enabled,
+                heartbeats=heartbeats,
+            ),
         }
 
     @app.delete("/api/settings/{section}")

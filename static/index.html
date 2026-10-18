@@ -1644,6 +1644,14 @@
           <span class="settings-field-help" data-i18n="settings.bleHelp">
             When off, this node stops listening to BLE advertisements and GATT history backfill; peers and Home Assistant data still work. The service restarts to apply the change.
           </span>
+          <div class="settings-ble-adapters">
+            <span class="settings-field-label" data-i18n="settings.bleAdapters">Bluetooth adapters</span>
+            <ul id="settings-ble-adapters" class="settings-ble-adapter-list"></ul>
+            <p id="settings-ble-adapters-status" class="settings-federation-status" aria-live="polite"></p>
+            <span class="settings-field-help" data-i18n="settings.bleAdaptersHelp">
+              Tick the adapters this node scans with. Unticking one stops scanning on it; workers restart to apply the change.
+            </span>
+          </div>
         </fieldset>
         <fieldset class="settings-field settings-federation-field">
           <legend class="settings-field-label" data-i18n="settings.federation">Federation nodes</legend>

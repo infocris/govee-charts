@@ -1813,6 +1813,91 @@
 
   initBleSetting();
 
+  function bleAdapterStatusLabel(a) {
+    if (!a.present) return { key: "missing", text: t("settings.bleAdapterMissing") };
+    if (a.powered === false) return { key: "missing", text: t("settings.bleAdapterOff") };
+    return { key: a.status, text: t(`settings.bleAdapter.${a.status}`) };
+  }
+
+  async function refreshBleAdapters() {
+    const list = document.getElementById("settings-ble-adapters");
+    const status = document.getElementById("settings-ble-adapters-status");
+    if (!list) return;
+    const data = await configRequest("/api/ble/adapters");
+    list.replaceChildren();
+    const now = Date.now() / 1000;
+    for (const a of data.adapters || []) {
+      const li = document.createElement("li");
+      li.className = "settings-ble-adapter";
+      const label = document.createElement("label");
+      label.className = "settings-ble-toggle";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = Boolean(a.enabled);
+      box.dataset.adapter = a.name;
+      // Without a BlueZ listing there is a single implicit adapter: nothing to pick.
+      box.disabled = !data.system_listed;
+      box.addEventListener("change", () => onBleAdapterToggle(box));
+      const name = document.createElement("strong");
+      name.textContent = a.name;
+      label.append(box, name);
+      const meta = document.createElement("span");
+      meta.className = "settings-ble-adapter-meta";
+      const bits = [a.address, a.bus ? a.bus.toUpperCase() : null];
+      if (a.enabled && a.last_adv_ts) {
+        bits.push(t("settings.bleAdapterLastAdv", { age: formatDuration(now - a.last_adv_ts) }));
+      }
+      meta.textContent = bits.filter(Boolean).join(" · ");
+      const badge = document.createElement("span");
+      badge.className = "settings-ble-adapter-badge";
+      const st = bleAdapterStatusLabel(a);
+      badge.dataset.status = st.key;
+      badge.textContent = st.text;
+      li.append(label, meta, badge);
+      list.append(li);
+    }
+    if (status && !status.dataset.tone) {
+      status.textContent = data.system_listed ? "" : t("settings.bleAdaptersNoList");
+    }
+  }
+
+  async function onBleAdapterToggle(box) {
+    const list = document.getElementById("settings-ble-adapters");
+    const status = document.getElementById("settings-ble-adapters-status");
+    const boxes = Array.from(list.querySelectorAll("input[data-adapter]"));
+    const adapters = boxes.filter((b) => b.checked).map((b) => b.dataset.adapter);
+    const name = box.dataset.adapter;
+    if (!adapters.length) {
+      box.checked = true;
+      window.alert(t("settings.bleAdapterLast"));
+      return;
+    }
+    const confirmKey = box.checked ? "settings.bleAdapterConfirmOn" : "settings.bleAdapterConfirmOff";
+    if (!window.confirm(t(confirmKey, { name }))) {
+      box.checked = !box.checked;
+      return;
+    }
+    boxes.forEach((b) => (b.disabled = true));
+    delete status.dataset.tone;
+    try {
+      const current = await configRequest("/api/settings/scanner");
+      await configRequest("/api/settings/scanner", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: { ...current.value, adapters } }),
+      });
+      status.textContent = t("settings.bleRestarting");
+      await restartForSettings();
+      status.dataset.tone = "ok";
+      status.textContent = t("settings.bleAdaptersSaved", { adapters: adapters.join(", ") });
+    } catch (err) {
+      status.dataset.tone = "bad";
+      status.textContent = t("settings.bleAdaptersError", { error: err.message });
+    } finally {
+      await refreshBleAdapters().catch((err) => console.warn(err));
+    }
+  }
+
   let configSections = [];
 
   function setConfigStatus(message, tone) {
@@ -6230,6 +6315,7 @@
         setConfigStatus(t("settings.configError", { error: err.message }), "bad")
       );
       refreshBleSetting().catch((err) => console.warn(err));
+      refreshBleAdapters().catch((err) => console.warn(err));
     }
     syncBackfillPolling();
   }

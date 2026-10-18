@@ -6256,3 +6256,52 @@ body.plan-editor-modal-open {
   gap: 0.5rem;
   cursor: pointer;
 }
+
+.settings-ble-adapters {
+  margin-top: 0.75rem;
+}
+
+.settings-ble-adapter-list {
+  list-style: none;
+  margin: 0.35rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.settings-ble-adapter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.6rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.settings-ble-adapter-meta {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.settings-ble-adapter-badge {
+  margin-left: auto;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.settings-ble-adapter-badge[data-status="ok"] {
+  color: color-mix(in srgb, #6dcaa0 70%, var(--ink));
+  border-color: color-mix(in srgb, #6dcaa0 50%, transparent);
+}
+
+.settings-ble-adapter-badge[data-status="silent"],
+.settings-ble-adapter-badge[data-status="not_scanning"],
+.settings-ble-adapter-badge[data-status="missing"] {
+  color: color-mix(in srgb, #e07070 80%, var(--ink));
+  border-color: color-mix(in srgb, #e07070 50%, transparent);
+}
